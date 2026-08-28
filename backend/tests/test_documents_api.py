@@ -191,11 +191,6 @@ async def test_get_unknown_chunk_returns_404(admin_client):
     assert (await admin_client.get(f"/api/chunks/{uuid.uuid4()}")).status_code == 404
 
 
-@pytest.mark.xfail(
-    raises=ModuleNotFoundError,
-    strict=True,
-    reason="app.rag.parsers arrives in Task 8; strict so Task 8 cannot forget to drop this marker",
-)
 async def test_document_structure_returns_parsed_blocks(admin_client, collection_id):
     upload = await admin_client.post(
         "/api/documents",

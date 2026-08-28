@@ -3933,7 +3933,7 @@ async def test_document_structure_returns_parsed_blocks(admin_client, collection
 - [ ] **Step 8: Run tests, expect PASS**
 
 Run: `pytest tests/test_documents_api.py` (Postgres running)
-Note: the structure endpoint needs `get_parser`, which lands in Task 8. `get_parser` is therefore imported *inside* `get_document_structure`, not at module scope - a module-level import would stop `app.main` from importing at all and take the whole suite down with it, so xfailing the one test is not enough on its own. `test_document_structure_returns_parsed_blocks` carries `@pytest.mark.xfail(raises=ModuleNotFoundError, strict=True)`; strict means it fails the suite as an XPASS the moment Task 8 lands, so the marker cannot be forgotten. Task 8 Step 10 must drop the marker and include `backend/tests/test_documents_api.py` in its `git add`.
+Note: the structure endpoint needs `get_parser`, which lands in Task 8. `get_parser` is therefore imported *inside* `get_document_structure`, not at module scope - a module-level import would stop `app.main` from importing at all and take the whole suite down with it, so xfailing the one test is not enough on its own. `test_document_structure_returns_parsed_blocks` carries `@pytest.mark.xfail(raises=ModuleNotFoundError, strict=True)`; strict means it fails the suite as an XPASS the moment Task 8 lands, so the marker cannot be forgotten. Task 8 Step 9 must drop the marker and Task 8 Step 11 must include `backend/tests/test_documents_api.py` in its `git add`.
 Expected: 21 passed, 1 xfailed
 
 - [ ] **Step 9: Commit**
@@ -4020,13 +4020,9 @@ class TextParser(Parser):
             if line.startswith("#"):
                 heading_text = line.lstrip("#").strip()
                 current_section = heading_text
-                blocks.append(
-                    Block(text=heading_text, block_type="heading", section=current_section)
-                )
+                blocks.append(Block(text=heading_text, block_type="heading", section=current_section))
             elif line.startswith(("-", "*")) and len(line) > 1 and line[1] == " ":
-                blocks.append(
-                    Block(text=line[2:].strip(), block_type="list_item", section=current_section)
-                )
+                blocks.append(Block(text=line[2:].strip(), block_type="list_item", section=current_section))
             else:
                 blocks.append(Block(text=line, block_type="paragraph", section=current_section))
 
@@ -4034,6 +4030,14 @@ class TextParser(Parser):
 ```
 
 - [ ] **Step 4: Write `backend/app/rag/parsers/html_parser.py`**
+
+Two bs4 behaviours, both verified against beautifulsoup4 4.12.3 rather than
+assumed. `get_text(strip=True)` strips each navigable string *before*
+concatenating them, so `<p>Hello <b>world</b></p>` extracts as `"Helloworld"` -
+every document with inline markup comes out mangled; the separator argument is
+mandatory, not cosmetic. And `find_all` returns nested matches too, so
+`<td><p>x</p></td>` yields `x` twice - once as a `table_cell` and again as a
+`paragraph` - which is then embedded, indexed and retrieved twice.
 
 ```python
 from pathlib import Path
@@ -4044,21 +4048,27 @@ from app.rag.blocks import Block, ParsedDocument
 from app.rag.parsers.base import Parser
 
 HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
+BLOCK_TAGS = [*HEADING_TAGS, "p", "li", "td", "th"]
 
 
 class HtmlParser(Parser):
     def parse(self, path: str) -> ParsedDocument:
-        soup = BeautifulSoup(
-            Path(path).read_text(encoding="utf-8", errors="replace"), "html.parser"
-        )
+        soup = BeautifulSoup(Path(path).read_text(encoding="utf-8", errors="replace"), "html.parser")
         for tag in soup.find_all(["script", "style"]):
             tag.decompose()
 
         blocks: list[Block] = []
         current_section: str | None = None
 
-        for tag in soup.find_all([*HEADING_TAGS, "p", "li", "td", "th"]):
-            text = tag.get_text(strip=True)
+        for tag in soup.find_all(BLOCK_TAGS):
+            # A <p> inside a <td> is already covered by the <td> block above it;
+            # emitting both indexes and retrieves the same text twice.
+            if tag.find_parent(BLOCK_TAGS):
+                continue
+            # Separator matters: get_text(strip=True) strips each string first
+            # and then concatenates, so "Hello <b>world</b>" becomes
+            # "Helloworld" - every document with inline markup comes out mangled.
+            text = tag.get_text(" ", strip=True)
             if not text:
                 continue
             if tag.name in HEADING_TAGS:
@@ -4077,6 +4087,8 @@ class HtmlParser(Parser):
 - [ ] **Step 5: Write `backend/app/rag/parsers/pdf_parser.py`**
 
 `pypdf.extract_text()` overwhelmingly returns single `\n` separators, so splitting on `"\n\n"` is a no-op and every page becomes one block. Worse, a parser that can only emit `paragraph` gives the chunker no structural boundaries at all. Both are fixed here.
+
+Measured against pypdf 4.3.1: `extract_text()` never emits a blank line between two lines of a page, not even across a 260pt vertical gap. So a "short line followed by a blank line" heading rule is dead code except on the last line of a page, where it misfires on wrapped body text - and the most common printed heading shape of all, a title-cased line like `Executive Summary`, would never be detected. Title casing is the signal that survives extraction.
 
 ```python
 import re
@@ -4107,8 +4119,28 @@ def _is_heading(line: str, next_line: str) -> bool:
     words = stripped.split()
     if stripped.isupper() and len(words) <= MAX_HEADING_WORDS:
         return True
-    # Short line followed by a blank line: the classic printed-heading shape.
-    return len(words) <= 8 and not next_line.strip()
+    # A short title-cased line that the following line does not continue in
+    # lower case. The obvious "short line followed by a blank line" shape is
+    # unusable here: pypdf collapses vertical whitespace, so extract_text never
+    # emits a blank line between two lines of a page - that rule would be dead
+    # except on the last line of a page, where it misfires on wrapped body text.
+    return len(words) <= 8 and stripped.istitle() and not next_line[:1].islower()
+
+
+def _flush(blocks: list[Block], paragraph: list[str], page: int, section: str | None) -> None:
+    """Emit the buffered lines as one paragraph block and reset the buffer. A
+    module-level function rather than a closure over the page loop, which is
+    what ruff's B023 objects to."""
+    if paragraph:
+        blocks.append(
+            Block(
+                text=" ".join(paragraph).strip(),
+                block_type="paragraph",
+                page=page,
+                section=section,
+            )
+        )
+        paragraph.clear()
 
 
 class PdfParser(Parser):
@@ -4121,25 +4153,13 @@ class PdfParser(Parser):
             lines = (page.extract_text() or "").split("\n")
             paragraph: list[str] = []
 
-            def flush(section: str | None) -> None:
-                if paragraph:
-                    blocks.append(
-                        Block(
-                            text=" ".join(paragraph).strip(),
-                            block_type="paragraph",
-                            page=page_number,
-                            section=section,
-                        )
-                    )
-                    paragraph.clear()
-
             for line, next_line in zip_longest(lines, lines[1:], fillvalue=""):
                 stripped = line.strip()
                 if not stripped:
-                    flush(current_section)
+                    _flush(blocks, paragraph, page_number, current_section)
                     continue
                 if _is_heading(stripped, next_line):
-                    flush(current_section)
+                    _flush(blocks, paragraph, page_number, current_section)
                     current_section = stripped
                     blocks.append(
                         Block(
@@ -4152,14 +4172,18 @@ class PdfParser(Parser):
                     continue
                 paragraph.append(stripped)
 
-            flush(current_section)
+            _flush(blocks, paragraph, page_number, current_section)
 
         return ParsedDocument(blocks=blocks)
 ```
 
 - [ ] **Step 6: Write `backend/app/rag/parsers/docx_parser.py`**
 
+`python-docx` raises `docx.opc.exceptions.PackageNotFoundError` for a missing file, and that is **not** a subclass of `FileNotFoundError` (verified on 1.1.2). Task 7's structure endpoint catches only `FileNotFoundError` to return its "source file is no longer available" 404, so without the guard below a `.docx` whose stored file has gone missing answers 500 instead.
+
 ```python
+from pathlib import Path
+
 from docx import Document as DocxDocument
 
 from app.rag.blocks import Block, ParsedDocument
@@ -4168,6 +4192,12 @@ from app.rag.parsers.base import Parser
 
 class DocxParser(Parser):
     def parse(self, path: str) -> ParsedDocument:
+        # python-docx raises PackageNotFoundError for a missing file, which is
+        # not a FileNotFoundError - the structure endpoint's "source file is no
+        # longer available" 404 would degrade into a 500 without this.
+        if not Path(path).is_file():
+            raise FileNotFoundError(path)
+
         doc = DocxDocument(path)
         blocks: list[Block] = []
         current_section: str | None = None
@@ -4190,9 +4220,7 @@ class DocxParser(Parser):
                 for cell in row.cells:
                     text = cell.text.strip()
                     if text:
-                        blocks.append(
-                            Block(text=text, block_type="table_cell", section=current_section)
-                        )
+                        blocks.append(Block(text=text, block_type="table_cell", section=current_section))
 
         return ParsedDocument(blocks=blocks)
 ```
@@ -4233,9 +4261,48 @@ __all__ = ["PARSERS", "Parser", "get_parser", "TextParser", "HtmlParser", "PdfPa
 
 ```python
 import pytest
+from docx import Document as DocxDocument
 
 from app.rag.parsers import get_parser
 from app.rag.parsers.pdf_parser import _is_heading
+
+
+def _write_pdf(path, pages_lines: list[list[str]]) -> None:
+    """Minimal text-only PDF writer. No PDF-authoring library is installed and
+    adding one just for fixtures is not worth it - the parsers must be proven
+    against bytes pypdf actually reads, not against a mocked extract_text."""
+    objs: dict[int, bytes] = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        3: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    }
+    page_ids = [5 + 2 * i for i in range(len(pages_lines))]
+    objs[2] = b"<< /Type /Pages /Count %d /Kids [%s] >>" % (
+        len(pages_lines),
+        b" ".join(b"%d 0 R" % p for p in page_ids),
+    )
+    for i, lines in enumerate(pages_lines):
+        parts = [b"BT", b"/F1 12 Tf", b"1 0 0 1 72 720 Tm", b"16 TL"]
+        for line in lines:
+            escaped = line.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
+            parts.append(b"(" + escaped.encode("latin-1") + b") Tj T*")
+        stream = b"\n".join([*parts, b"ET"])
+        objs[4 + 2 * i] = b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream)
+        objs[5 + 2 * i] = (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>" % (4 + 2 * i)
+        )
+
+    out = bytearray(b"%PDF-1.4\n")
+    offsets: dict[int, int] = {}
+    for num in sorted(objs):
+        offsets[num] = len(out)
+        out += b"%d 0 obj\n" % num + objs[num] + b"\nendobj\n"
+    xref_offset, size = len(out), max(objs) + 1
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % size
+    for num in range(1, size):
+        out += b"%010d 00000 n \n" % offsets.get(num, 0)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (size, xref_offset)
+    path.write_bytes(bytes(out))
 
 
 def test_text_parser_detects_headings_and_lists(tmp_path):
@@ -4266,6 +4333,28 @@ def test_html_parser_extracts_headings_paragraphs_lists_and_cells(tmp_path):
     assert not any("ignored" in b.text for b in parsed.blocks)
 
 
+def test_html_parser_keeps_words_apart_around_inline_markup(tmp_path):
+    """get_text(strip=True) concatenates the stripped pieces, so real-world
+    markup ('Hello <b>world</b>') comes back as 'Helloworld' - unsearchable."""
+    path = tmp_path / "doc.html"
+    path.write_text("<p>Hello <b>world</b> and <i>friends</i></p>", encoding="utf-8")
+
+    [block] = get_parser("html").parse(str(path)).blocks
+
+    assert block.text == "Hello world and friends"
+
+
+def test_html_parser_does_not_emit_nested_tags_twice(tmp_path):
+    """<td><p>x</p></td> must yield one block, not the same text as both a
+    table_cell and a paragraph - duplicates get indexed and retrieved twice."""
+    path = tmp_path / "doc.html"
+    path.write_text("<table><tr><td><p>only once</p></td></tr></table>", encoding="utf-8")
+
+    blocks = get_parser("html").parse(str(path)).blocks
+
+    assert [(b.text, b.block_type) for b in blocks] == [("only once", "table_cell")]
+
+
 def test_pdf_heading_heuristic_accepts_real_headings():
     assert _is_heading("3.2 Results", "Body text follows.") is True
     assert _is_heading("METHODOLOGY", "Body text follows.") is True
@@ -4273,11 +4362,105 @@ def test_pdf_heading_heuristic_accepts_real_headings():
 
 
 def test_pdf_heading_heuristic_rejects_wrapped_body_lines():
-    # A wrapped sentence fragment also lacks terminal punctuation - the "followed
-    # by a blank line" requirement is what keeps this from becoming a heading.
+    # A wrapped sentence fragment also lacks terminal punctuation - lower-cased
+    # words are what keep this from becoming a heading.
     assert _is_heading("the results of the experiment were", "consistent across runs.") is False
     assert _is_heading("This is a complete sentence.", "") is False
     assert _is_heading("x" * 120, "") is False
+
+
+def test_pdf_parser_emits_headings_with_pages_and_sections(tmp_path):
+    """pypdf never emits blank lines between lines of a page, so heading
+    detection has to survive on the text alone."""
+    path = tmp_path / "doc.pdf"
+    _write_pdf(
+        path,
+        [
+            [
+                "ANNUAL REPORT",
+                "1. Introduction",
+                "This document describes the operating results for the fiscal",
+                "year and comments on the segments that grew most.",
+                "Executive Summary",
+                "Revenue grew twelve percent year over year, driven primarily",
+                "by the enterprise segment.",
+            ],
+            ["3.2 Results", "The results were consistent across all runs."],
+        ],
+    )
+
+    parsed = get_parser("pdf").parse(str(path))
+    headings = [b for b in parsed.blocks if b.block_type == "heading"]
+
+    assert [b.text for b in headings] == [
+        "ANNUAL REPORT",
+        "1. Introduction",
+        "Executive Summary",
+        "3.2 Results",
+    ]
+    assert [b.page for b in headings] == [1, 1, 1, 2]
+    body = [b for b in parsed.blocks if b.block_type == "paragraph"]
+    assert body[0].section == "1. Introduction"
+    assert body[-1].section == "3.2 Results"
+    assert body[-1].page == 2
+
+
+def test_pdf_parser_without_headings_yields_one_block_per_page(tmp_path):
+    """No structure to find, so the page is the boundary - and the page number
+    survives for citations. Task 9's size pass splits these further."""
+    path = tmp_path / "plain.pdf"
+    _write_pdf(
+        path,
+        [
+            ["Tomato blight spreads through infected soil and splashing water.", "It is bad."],
+            ["Growers should rotate crops and remove all infected plant debris.", "So do that."],
+        ],
+    )
+
+    blocks = get_parser("pdf").parse(str(path)).blocks
+
+    assert [b.block_type for b in blocks] == ["paragraph", "paragraph"]
+    assert [b.page for b in blocks] == [1, 2]
+    assert blocks[0].text.startswith("Tomato blight")
+
+
+def test_docx_parser_reads_styles_and_tables(tmp_path):
+    path = tmp_path / "doc.docx"
+    document = DocxDocument()
+    document.add_heading("Quarterly Report", level=0)
+    document.add_heading("Overview", level=1)
+    document.add_paragraph("Revenue grew twelve percent.")
+    document.add_paragraph("first bullet", style="List Bullet")
+    document.add_paragraph("")
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "APAC"
+    table.cell(0, 1).text = "120"
+    document.save(str(path))
+
+    blocks = get_parser("docx").parse(str(path)).blocks
+
+    assert [(b.text, b.block_type) for b in blocks] == [
+        ("Quarterly Report", "heading"),
+        ("Overview", "heading"),
+        ("Revenue grew twelve percent.", "paragraph"),
+        ("first bullet", "list_item"),
+        ("APAC", "table_cell"),
+        ("120", "table_cell"),
+    ]
+    assert blocks[2].section == "Overview"
+
+
+@pytest.mark.parametrize("file_type,name", [("txt", "a.txt"), ("html", "a.html"), ("pdf", "a.pdf")])
+def test_parsers_raise_file_not_found_for_a_missing_file(tmp_path, file_type, name):
+    with pytest.raises(FileNotFoundError):
+        get_parser(file_type).parse(str(tmp_path / name))
+
+
+def test_docx_parser_raises_file_not_found_for_a_missing_file(tmp_path):
+    """python-docx raises PackageNotFoundError for a missing file, which is not
+    a FileNotFoundError - the structure endpoint's 404 branch would miss it."""
+    with pytest.raises(FileNotFoundError):
+        get_parser("docx").parse(str(tmp_path / "gone.docx"))
 
 
 def test_get_parser_raises_for_unsupported_type():
@@ -4287,7 +4470,7 @@ def test_get_parser_raises_for_unsupported_type():
 
 - [ ] **Step 9: Remove Task 7's xfail marker from the structure-endpoint test**
 
-`app.rag.parsers` now exists, so `test_get_document_structure_returns_blocks` in
+`app.rag.parsers` now exists, so `test_document_structure_returns_parsed_blocks` in
 `backend/tests/test_documents_api.py` can pass. It carries
 `@pytest.mark.xfail(raises=ModuleNotFoundError, strict=True)` from Task 7 —
 delete that decorator line. The marker is `strict=True`, so leaving it turns the
