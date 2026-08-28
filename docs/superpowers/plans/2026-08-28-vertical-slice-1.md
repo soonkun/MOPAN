@@ -410,9 +410,14 @@ RRF_K=60
 RETRIEVAL_TOP_N=6
 RETRIEVAL_CANDIDATE_LIMIT=20
 
+# semantic (structure + embedding merge) or fixed (character windows).
 CHUNKING_STRATEGY=semantic
+# CHUNK_SIZE/CHUNK_OVERLAP apply to the fixed strategy; 0 <= overlap < size.
 CHUNK_SIZE=800
 CHUNK_OVERLAP=100
+# Valid range 1-4095. The ceiling is half of text-embedding-3-*'s 8191-token
+# input limit, which leaves room for the separator residual the chunker's token
+# accounting can under-count by. Out of range fails at startup.
 MAX_CHUNK_TOKENS=500
 SEMANTIC_SIMILARITY_THRESHOLD=0.75
 ANSWER_CONTEXT_TOKEN_BUDGET=6000
@@ -4654,7 +4659,7 @@ def test_split_to_token_limit_hard_splits_a_single_oversized_sentence():
 def test_split_to_token_limit_respects_the_limit_on_boundary_less_korean():
     """cl100k tokenises Hangul below the character level, so a naive stride over
     the token stream lands mid-character and decodes to U+FFFD on both sides.
-    Measured against the pre-fix splitter, that corrupted this text at 378 of 512
+    Measured against the pre-fix splitter, that corrupted this text at 318 of 512
     max_tokens values - silent data loss in the language this system targets."""
     text = "가나다라마바사아자차카타파하" * 40
     pieces = split_to_token_limit(text, CORRUPTING_LIMIT)
@@ -4754,6 +4759,23 @@ def test_size_pass_drops_empty_blocks():
         Block(text="Real text.", block_type="paragraph"),
     ]
     assert [c.content for c in build_size_bounded_candidates(blocks, MAX_TOKENS)] == ["Real text."]
+
+
+def test_size_pass_breaks_at_a_blank_heading():
+    """A parser can emit a heading block whose text is empty - text_parser does it
+    for a bare '#' line. Skipping it along with the other blank blocks swallowed
+    the section boundary too, so section B's body was appended to section A's
+    candidate and cited as page 1 of section A. Only the heading's text is
+    missing; the break it marks is not."""
+    blocks = [
+        Block(text="Body of A.", block_type="paragraph", page=1, section="A"),
+        Block(text="  ", block_type="heading", page=2, section="B"),
+        Block(text="Body of B.", block_type="paragraph", page=2, section="B"),
+    ]
+    candidates = build_size_bounded_candidates(blocks, 1000)
+
+    assert [c.content for c in candidates] == ["Body of A.", "Body of B."]
+    assert [(c.page, c.section) for c in candidates] == [(1, "A"), (2, "B")]
 ```
 
 - [ ] **Step 2: Run tests, expect FAIL** (`app.rag.chunking` does not exist)
@@ -4803,8 +4825,9 @@ from app.rag.chunking.base import ChunkCandidate
 # attached to the sentence it belongs to.
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?。！？])\s+")
 
-# Cost of the newline that joins two pieces inside one candidate. Counting it is
-# what keeps the running total an upper bound rather than an under-estimate.
+# Cost of the newline that joins two pieces inside one candidate - here and in
+# the semantic merge pass, which joins whole candidates the same way. Counting it
+# is what keeps the running total an upper bound rather than an under-estimate.
 #
 # This is a measured bound, not a proof. cl100k's pre-tokeniser rule
 # ` ?[^\s\p{L}\p{N}]+[\r\n]*` lets a trailing punctuation run absorb the newline,
@@ -4815,7 +4838,7 @@ _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?。！？])\s+")
 # to a 571-token candidate under a 500-token limit. Harmless against the 8191
 # embedding ceiling at the default; the max_chunk_tokens validator in Settings is
 # what keeps the configured limit far enough below it for that to stay true.
-_NEWLINE_TOKENS = count_tokens("\n")
+NEWLINE_TOKENS = count_tokens("\n")
 
 _REPLACEMENT = "�"
 
@@ -4905,23 +4928,33 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
     whole accumulated string on every block append is O(n^2) tiktoken work over a
     document; omitting the separator instead makes the total an under-count, and
     an under-count is how a chunk gets past the limit it is supposed to enforce.
-    See _NEWLINE_TOKENS for the residual case where the separator costs 2, not 1.
+    See NEWLINE_TOKENS for the residual case where the separator costs 2, not 1.
     """
     candidates: list[ChunkCandidate] = []
     current: ChunkCandidate | None = None
+    pending_break = False
 
     for block in blocks:
-        for piece in split_to_token_limit(block.text, max_chunk_tokens):
-            # An empty or whitespace-only block would otherwise emit a zero-length
-            # candidate, which costs an embedding call and retrieves nothing.
-            if not piece.strip():
-                continue
+        # An empty or whitespace-only block would otherwise emit a zero-length
+        # candidate, which costs an embedding call and retrieves nothing.
+        pieces = [p for p in split_to_token_limit(block.text, max_chunk_tokens) if p.strip()]
+        if not pieces:
+            # ...but a heading with no text is still a section boundary, and
+            # text_parser emits one for a bare "#" line. Dropping it outright
+            # appended the next section's body to the previous candidate and
+            # cited it under the previous section. Only its text is empty.
+            pending_break = pending_break or block.block_type == "heading"
+            continue
+
+        for piece in pieces:
             piece_tokens = count_tokens(piece)
             starts_new = (
                 current is None
+                or pending_break
                 or block.block_type == "heading"
-                or current.token_count + _NEWLINE_TOKENS + piece_tokens > max_chunk_tokens
+                or current.token_count + NEWLINE_TOKENS + piece_tokens > max_chunk_tokens
             )
+            pending_break = False
             if starts_new:
                 current = ChunkCandidate(
                     content=piece,
@@ -4933,7 +4966,7 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
                 candidates.append(current)
             else:
                 current.content = f"{current.content}\n{piece}"
-                current.token_count += _NEWLINE_TOKENS + piece_tokens
+                current.token_count += NEWLINE_TOKENS + piece_tokens
                 current.char_count = len(current.content)
                 if current.page is None:
                     current.page = block.page
@@ -4957,7 +4990,7 @@ __all__ = ["ChunkCandidate", "ChunkingStrategy", "EmbedFn", "build_size_bounded_
 `split_to_token_limit` now rejects a non-positive limit with a named cause, but
 `MAX_CHUNK_TOKENS` is operator-facing and had no validator at all. The upper bound
 matters because the newline accounting is a measured bound rather than a proof
-(see `_NEWLINE_TOKENS`): a rare punctuation tail makes a join cost 2 tokens, not 1,
+(see `NEWLINE_TOKENS`): a rare punctuation tail makes a join cost 2 tokens, not 1,
 so a candidate can run a few percent over. Capping at half the embedding ceiling
 keeps that overrun harmless instead of turning it into a rejected embedding call.
 
@@ -5035,9 +5068,38 @@ TOPIC_VECTORS = {"topic-a": [1.0, 0.0, 0.0], "topic-b": [0.0, 1.0, 0.0]}
 
 
 async def fake_embed_fn(texts: list[str]) -> list[list[float]]:
-    return [
-        TOPIC_VECTORS["topic-a"] if "topic-a" in t else TOPIC_VECTORS["topic-b"] for t in texts
-    ]
+    return [TOPIC_VECTORS["topic-a"] if "topic-a" in t else TOPIC_VECTORS["topic-b"] for t in texts]
+
+
+def _half_limit_document(pair_count: int = 6) -> tuple[list[Block], int]:
+    """Heading+body pairs whose pass-1 candidate is exactly half the token limit.
+
+    Neither string ends in punctuation, which is what stops cl100k from absorbing
+    the joining newline into the preceding token and hiding its cost.
+    """
+    blocks: list[Block] = []
+    for i in range(pair_count):
+        blocks.append(Block(text="Alpha", block_type="heading", page=i, section=f"S{i}"))
+        blocks.append(Block(text="rotate crops", block_type="paragraph", page=i, section=f"S{i}"))
+    return blocks, 2 * count_tokens("Alpha\nrotate crops")
+
+
+def _korean_headed_document(pair_count: int = 20) -> list[Block]:
+    """Headed, so pass 1 leaves candidates small enough for the merge pass to
+    actually merge, in a script cl100k tokenises below the character level."""
+    blocks: list[Block] = []
+    for i in range(pair_count):
+        blocks.append(Block(text="장 제목", block_type="heading", page=i, section=f"장 {i}"))
+        blocks.append(Block(text="가나다라마바사아자차카타파하", block_type="paragraph", page=i))
+    return blocks
+
+
+def _headed_separator_less_document(pair_count: int = 20) -> list[Block]:
+    blocks: list[Block] = []
+    for i in range(pair_count):
+        blocks.append(Block(text="Field notes", block_type="heading", page=i, section=f"N{i}"))
+        blocks.append(Block(text="rotate crops and remove debris", block_type="paragraph", page=i))
+    return blocks
 
 
 def test_fixed_chunking_rejects_an_overlap_at_or_above_the_chunk_size():
@@ -5098,6 +5160,87 @@ async def test_semantic_chunking_splits_dissimilar_candidates():
     assert len(candidates) == 2
 
 
+async def test_semantic_merge_compares_a_candidate_with_its_predecessors_embedding():
+    """A merged candidate's own embedding is cleared, because its text changed.
+    Reading the threshold off `previous.embedding or embedding` therefore falls
+    back to comparing the incoming candidate with ITSELF - similarity 1.0 - so
+    every candidate after the first merge is absorbed regardless of topic, with
+    only the token limit left to stop it. Compare against the predecessor's own
+    pass-1 embedding instead."""
+    blocks = [
+        Block(text="Heading A", block_type="heading", section="A"),
+        Block(text="topic-a first.", block_type="paragraph"),
+        Block(text="Heading B", block_type="heading", section="B"),
+        Block(text="topic-a second.", block_type="paragraph"),
+        Block(text="Heading C", block_type="heading", section="C"),
+        Block(text="topic-b elsewhere.", block_type="paragraph"),
+    ]
+    strategy = StructureSemanticChunking(similarity_threshold=0.9, max_chunk_tokens=1000)
+
+    candidates = await strategy.chunk(blocks, fake_embed_fn)
+
+    assert len(candidates) == 2
+    assert "topic-b" not in candidates[0].content
+
+
+async def test_semantic_merge_keeps_the_location_it_starts_at():
+    """A merged chunk begins where its first candidate began, so that is the
+    citation to show. A first candidate with no location of its own inherits the
+    absorbed one's rather than dropping provenance altogether."""
+    strategy = StructureSemanticChunking(similarity_threshold=0.5, max_chunk_tokens=1000)
+    located = [
+        Block(text="Heading A", block_type="heading", section="A", page=3),
+        Block(text="topic-a first.", block_type="paragraph", section="A", page=3),
+        Block(text="Heading B", block_type="heading", section="B", page=7),
+        Block(text="topic-a second.", block_type="paragraph", section="B", page=7),
+    ]
+    [candidate] = await strategy.chunk(located, fake_embed_fn)
+    assert (candidate.page, candidate.section) == (3, "A")
+
+    unlocated_first = [
+        Block(text="Heading", block_type="heading"),
+        Block(text="topic-a first.", block_type="paragraph"),
+        Block(text="Heading B", block_type="heading", section="B", page=7),
+        Block(text="topic-a second.", block_type="paragraph", section="B", page=7),
+    ]
+    [candidate] = await strategy.chunk(unlocated_first, fake_embed_fn)
+    assert (candidate.page, candidate.section) == (7, "B")
+
+
+async def test_semantic_merge_charges_the_joining_newline():
+    """Task 9's defect, one pass later: summing two candidate token counts omits
+    the newline the merge joins them with, and an under-count is exactly how a
+    chunk gets past the limit it is supposed to enforce. Against the un-charged
+    sum this document yields 9-token candidates under an 8-token limit."""
+    blocks, limit = _half_limit_document()
+    strategy = StructureSemanticChunking(similarity_threshold=0.5, max_chunk_tokens=limit)
+
+    candidates = await strategy.chunk(blocks, fake_embed_fn)
+
+    assert candidates
+    for candidate in candidates:
+        assert count_tokens(candidate.content) <= candidate.token_count <= limit
+
+
+async def test_semantic_chunking_bounds_adversarial_corpora():
+    """The bound has to hold on the shapes that hide a missing separator cost:
+    Korean (tokenised below the character level), text with no terminal
+    punctuation, and a document with no headings at all."""
+    corpora = {
+        "korean": _korean_headed_document(),
+        "separator-less": _headed_separator_less_document(),
+        "no-boundary": _separator_less_document(),
+        "heading-less": _heading_less_document(),
+    }
+    strategy = StructureSemanticChunking(similarity_threshold=0.5, max_chunk_tokens=MAX_TOKENS)
+
+    for name, blocks in corpora.items():
+        candidates = await strategy.chunk(blocks, fake_embed_fn)
+        assert len(candidates) > 1, name
+        for candidate in candidates:
+            assert count_tokens(candidate.content) <= candidate.token_count <= MAX_TOKENS, name
+
+
 async def test_semantic_chunking_bounds_a_heading_less_document():
     """The end-to-end version of the Task 9 regression: the full strategy, not
     just the size pass, must never emit an over-limit chunk."""
@@ -5107,6 +5250,21 @@ async def test_semantic_chunking_bounds_a_heading_less_document():
 
     assert len(candidates) > 1
     assert all(c.token_count <= MAX_TOKENS for c in candidates)
+
+
+async def test_semantic_chunking_embeds_the_document_once():
+    """One batched call, not one per adjacent pair - the pair-wise shape costs an
+    API round trip per candidate on every document the worker ingests."""
+    calls: list[int] = []
+
+    async def counting_embed_fn(texts: list[str]) -> list[list[float]]:
+        calls.append(len(texts))
+        return await fake_embed_fn(texts)
+
+    strategy = StructureSemanticChunking(similarity_threshold=0.99, max_chunk_tokens=MAX_TOKENS)
+    await strategy.chunk(_heading_less_document(), counting_embed_fn)
+
+    assert len(calls) == 1
 
 
 async def test_semantic_chunking_keeps_embeddings_for_unmerged_candidates():
@@ -5221,7 +5379,7 @@ class FixedChunking(ChunkingStrategy):
 ```python
 from app.rag.blocks import Block
 from app.rag.chunking.base import ChunkCandidate, ChunkingStrategy, EmbedFn
-from app.rag.chunking.structure import build_size_bounded_candidates
+from app.rag.chunking.structure import NEWLINE_TOKENS, build_size_bounded_candidates
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -5251,14 +5409,24 @@ class StructureSemanticChunking(ChunkingStrategy):
 
     async def chunk(self, blocks: list[Block], embed_fn: EmbedFn) -> list[ChunkCandidate]:
         candidates = build_size_bounded_candidates(blocks, self.max_chunk_tokens)
+        for candidate in candidates:
+            candidate.metadata.setdefault("strategy", "semantic")
+        # One candidate cannot merge with anything, so the embedding call would
+        # buy nothing; the pipeline embeds it when it stores it.
         if len(candidates) <= 1:
             return candidates
 
+        # One batched call for the whole document. Embedding each adjacent pair
+        # separately would cost an API round trip per candidate.
         embeddings = await embed_fn([c.content for c in candidates])
 
         merged: list[ChunkCandidate] = []
+        # The previous candidate's OWN pass-1 embedding. Reading it off
+        # merged[-1] instead does not work: a merged candidate has its embedding
+        # cleared, so the fallback compares the incoming candidate with itself
+        # (similarity 1.0) and absorbs everything after the first merge.
+        previous_embedding: list[float] = []
         for candidate, embedding in zip(candidates, embeddings, strict=True):
-            candidate.metadata.setdefault("strategy", "semantic")
             # Keep the pass-1 embedding: if this candidate is never merged, its
             # text is final and the pipeline can store this vector directly
             # instead of paying to embed the whole corpus a second time.
@@ -5266,11 +5434,17 @@ class StructureSemanticChunking(ChunkingStrategy):
 
             if not merged:
                 merged.append(candidate)
+                previous_embedding = embedding
                 continue
 
             previous = merged[-1]
-            similarity = _cosine_similarity(previous.embedding or embedding, embedding)
-            combined_tokens = previous.token_count + candidate.token_count
+            similarity = _cosine_similarity(previous_embedding, embedding)
+            # Charge the joining newline to the candidate that follows it, the
+            # same accounting the size pass uses. Summing the two token counts
+            # omits it, and an under-count here re-breaks the bound pass 1 just
+            # enforced - measured at 9 tokens under an 8-token limit.
+            combined_tokens = previous.token_count + NEWLINE_TOKENS + candidate.token_count
+            previous_embedding = embedding
 
             if similarity >= self.similarity_threshold and combined_tokens <= self.max_chunk_tokens:
                 previous.content = f"{previous.content}\n{candidate.content}"
@@ -5325,7 +5499,7 @@ __all__ = [
 - [ ] **Step 6: Run tests, expect PASS**
 
 Run: `pytest tests/test_chunking.py -v`
-Expected: all 23 tests PASS
+Expected: all 30 tests PASS
 
 - [ ] **Step 7: Commit**
 

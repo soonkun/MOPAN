@@ -8,8 +8,9 @@ from app.rag.chunking.base import ChunkCandidate
 # attached to the sentence it belongs to.
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?。！？])\s+")
 
-# Cost of the newline that joins two pieces inside one candidate. Counting it is
-# what keeps the running total an upper bound rather than an under-estimate.
+# Cost of the newline that joins two pieces inside one candidate - here and in
+# the semantic merge pass, which joins whole candidates the same way. Counting it
+# is what keeps the running total an upper bound rather than an under-estimate.
 #
 # This is a measured bound, not a proof. cl100k's pre-tokeniser rule
 # ` ?[^\s\p{L}\p{N}]+[\r\n]*` lets a trailing punctuation run absorb the newline,
@@ -20,7 +21,7 @@ _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?。！？])\s+")
 # to a 571-token candidate under a 500-token limit. Harmless against the 8191
 # embedding ceiling at the default; the max_chunk_tokens validator in Settings is
 # what keeps the configured limit far enough below it for that to stay true.
-_NEWLINE_TOKENS = count_tokens("\n")
+NEWLINE_TOKENS = count_tokens("\n")
 
 _REPLACEMENT = "�"
 
@@ -110,23 +111,33 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
     whole accumulated string on every block append is O(n^2) tiktoken work over a
     document; omitting the separator instead makes the total an under-count, and
     an under-count is how a chunk gets past the limit it is supposed to enforce.
-    See _NEWLINE_TOKENS for the residual case where the separator costs 2, not 1.
+    See NEWLINE_TOKENS for the residual case where the separator costs 2, not 1.
     """
     candidates: list[ChunkCandidate] = []
     current: ChunkCandidate | None = None
+    pending_break = False
 
     for block in blocks:
-        for piece in split_to_token_limit(block.text, max_chunk_tokens):
-            # An empty or whitespace-only block would otherwise emit a zero-length
-            # candidate, which costs an embedding call and retrieves nothing.
-            if not piece.strip():
-                continue
+        # An empty or whitespace-only block would otherwise emit a zero-length
+        # candidate, which costs an embedding call and retrieves nothing.
+        pieces = [p for p in split_to_token_limit(block.text, max_chunk_tokens) if p.strip()]
+        if not pieces:
+            # ...but a heading with no text is still a section boundary, and
+            # text_parser emits one for a bare "#" line. Dropping it outright
+            # appended the next section's body to the previous candidate and
+            # cited it under the previous section. Only its text is empty.
+            pending_break = pending_break or block.block_type == "heading"
+            continue
+
+        for piece in pieces:
             piece_tokens = count_tokens(piece)
             starts_new = (
                 current is None
+                or pending_break
                 or block.block_type == "heading"
-                or current.token_count + _NEWLINE_TOKENS + piece_tokens > max_chunk_tokens
+                or current.token_count + NEWLINE_TOKENS + piece_tokens > max_chunk_tokens
             )
+            pending_break = False
             if starts_new:
                 current = ChunkCandidate(
                     content=piece,
@@ -138,7 +149,7 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
                 candidates.append(current)
             else:
                 current.content = f"{current.content}\n{piece}"
-                current.token_count += _NEWLINE_TOKENS + piece_tokens
+                current.token_count += NEWLINE_TOKENS + piece_tokens
                 current.char_count = len(current.content)
                 if current.page is None:
                     current.page = block.page
