@@ -23,10 +23,12 @@ async def register_user(db: AsyncSession, settings: Settings, email: str, passwo
     email = email.strip().lower()
     user_count = await db.scalar(select(func.count()).select_from(User)) or 0
 
-    # The first account bootstraps the system: it becomes admin and gets a default
-    # collection, so `docker compose up` -> open browser -> register actually works
-    # with no seeding step. Subsequent signups follow ALLOW_SELF_REGISTRATION.
-    is_first_user = user_count == 0
+    # Outside production the first account bootstraps the system: it becomes admin
+    # and gets a default collection, so `docker compose up` -> open browser ->
+    # register works with no seeding step. In production that would be a land-grab -
+    # an unauthenticated endpoint handing admin over the shared RAG corpus to
+    # whoever POSTs first - so there the admin must come from scripts/create_admin.py.
+    is_first_user = user_count == 0 and settings.environment != "production"
     if not is_first_user and not settings.allow_self_registration:
         raise AuthError("registration is disabled")
 

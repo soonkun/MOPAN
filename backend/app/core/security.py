@@ -3,8 +3,6 @@ import secrets
 import bcrypt
 from redis.asyncio import Redis
 
-from app.core.config import get_settings
-
 SESSION_KEY_PREFIX = "session:"
 MIN_PASSWORD_LENGTH = 8
 # bcrypt silently TRUNCATES at 72 bytes (verified against bcrypt 4.2.0: hashpw of
@@ -37,10 +35,11 @@ def dummy_verify() -> None:
     bcrypt.checkpw(b"mopan-dummy-password", _DUMMY_HASH.encode())
 
 
-async def create_session(redis: Redis, user_id: str) -> str:
+async def create_session(redis: Redis, user_id: str, ttl_seconds: int) -> str:
+    # TTL is a parameter, not a get_settings() read: that accessor is lru_cached and
+    # would ignore the live Settings on app.state. Callers pass get_app_settings().
     session_id = secrets.token_urlsafe(32)
-    ttl = get_settings().session_ttl_seconds
-    await redis.set(f"{SESSION_KEY_PREFIX}{session_id}", user_id, ex=ttl)
+    await redis.set(f"{SESSION_KEY_PREFIX}{session_id}", user_id, ex=ttl_seconds)
     return session_id
 
 

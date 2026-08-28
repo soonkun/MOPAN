@@ -14,8 +14,14 @@ from app.models.user import User
 @pytest_asyncio.fixture
 async def admin_client(client):
     """The first registered user is the bootstrap admin."""
-    await client.post("/api/auth/register", json={"email": "admin@example.com", "password": "pw123456"})
-    await client.post("/api/auth/login", json={"email": "admin@example.com", "password": "pw123456"})
+    registered = await client.post(
+        "/api/auth/register", json={"email": "admin@example.com", "password": "pw123456"}
+    )
+    assert registered.status_code == 200
+    logged_in = await client.post(
+        "/api/auth/login", json={"email": "admin@example.com", "password": "pw123456"}
+    )
+    assert logged_in.status_code == 200
     return client
 
 
@@ -94,10 +100,33 @@ async def test_multibyte_password_over_72_bytes_is_422_not_500(client):
     assert response.status_code == 422
 
 
-async def test_validation_errors_do_not_echo_the_password(client):
-    response = await client.post("/api/auth/register", json={"email": "h@example.com", "password": "sh0rtpw"})
+@pytest.mark.parametrize(
+    "email,password",
+    [
+        ("h@example.com", "sh0rtpw"),  # too short
+        ("h@example.com", "가" * 72),  # over 72 bytes
+        ("not-an-email", "Zq7-marker-Pw!"),  # invalid email, valid password
+        ("h@example.com", "Zq7-marker-Pw!" + "x" * 200),  # over 72 bytes, ascii
+    ],
+)
+async def test_validation_errors_do_not_echo_the_password(client, email, password):
+    # FastAPI's default handler returns the rejected value under "input"; on this
+    # route that is the plaintext password.
+    response = await client.post("/api/auth/register", json={"email": email, "password": password})
     assert response.status_code == 422
-    assert "sh0rtpw" not in response.text
+    assert password not in response.text
+
+
+async def test_malformed_json_does_not_echo_the_password(client):
+    # The raw body is the "input" for a JSON decode error, so it carries the password.
+    secret = "Zq7-marker-Pw!"
+    response = await client.post(
+        "/api/auth/register",
+        content=f'{{"email": "h@example.com", "password": "{secret}"',
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 422
+    assert secret not in response.text
 
 
 async def test_me_requires_auth(client):
@@ -110,12 +139,32 @@ async def test_login_wrong_password(client):
     assert response.status_code == 401
 
 
+async def test_login_unknown_email_matches_the_wrong_password_response(client):
+    # Exercises the dummy_verify() branch. Identical body to the wrong-password
+    # case, so the response reveals nothing about which emails exist.
+    response = await client.post("/api/auth/login", json={"email": "nobody@example.com", "password": "nope"})
+    assert response.status_code == 401
+    assert response.json() == {"detail": "invalid credentials"}
+
+
 async def test_self_registration_can_be_disabled(app, client):
     """Settings must come from app.state.settings, not the lru_cached get_settings()."""
     await client.post("/api/auth/register", json={"email": "i@example.com", "password": "pw123456"})
     app.state.settings = app.state.settings.model_copy(update={"allow_self_registration": False})
     blocked = await client.post("/api/auth/register", json={"email": "j@example.com", "password": "pw123456"})
     assert blocked.status_code == 400
+
+
+async def test_production_refuses_to_bootstrap_an_admin_by_registration(app, client):
+    """In production /api/auth/register must not hand admin to whoever POSTs first -
+    the admin comes from scripts/create_admin.py."""
+    app.state.settings = app.state.settings.model_copy(
+        update={"environment": "production", "allow_self_registration": False}
+    )
+    response = await client.post(
+        "/api/auth/register", json={"email": "landgrab@example.com", "password": "pw123456"}
+    )
+    assert response.status_code == 400
 
 
 async def test_require_admin_rejects_a_plain_user():

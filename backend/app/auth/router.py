@@ -39,7 +39,7 @@ async def login(
     except AuthError as exc:
         raise HTTPException(status_code=401, detail="invalid credentials") from exc
 
-    session_id = await create_session(redis, str(user.id))
+    session_id = await create_session(redis, str(user.id), settings.session_ttl_seconds)
     response.set_cookie(
         SESSION_COOKIE_NAME,
         session_id,

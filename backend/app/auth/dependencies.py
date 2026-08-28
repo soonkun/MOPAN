@@ -26,9 +26,11 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="session expired")
 
     try:
-        user = await db.get(User, uuid.UUID(user_id))
+        parsed_user_id = uuid.UUID(user_id)
     except ValueError as exc:
         raise HTTPException(status_code=401, detail="invalid session") from exc
+
+    user = await db.get(User, parsed_user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="user not found")
     return user
