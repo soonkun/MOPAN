@@ -446,6 +446,7 @@ RUN npm ci || npm install
 COPY frontend .
 RUN npm run build
 EXPOSE 3000
+RUN chown -R node:node /app
 USER node
 CMD ["npm", "start"]
 ```
@@ -468,10 +469,11 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mopan}"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-mopan} -d ${POSTGRES_DB:-mopan}"]
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 10s
 
   redis:
     image: redis:7-alpine
