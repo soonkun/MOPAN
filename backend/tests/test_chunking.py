@@ -249,11 +249,51 @@ def test_fixed_chunking_rejects_an_overlap_at_or_above_the_chunk_size():
 
 
 async def test_fixed_chunking_splits_by_size_with_overlap():
-    blocks = [Block(text="x" * 1000, block_type="paragraph", page=7, section="S")]
+    # Distinct characters, so the overlap assertion below cannot pass by accident
+    # on a run of identical ones.
+    text = "".join(chr(ord("a") + i % 26) for i in range(1000))
+    blocks = [Block(text=text, block_type="paragraph", page=7, section="S")]
     candidates = await FixedChunking(chunk_size=400, overlap=50).chunk(blocks, fake_embed_fn)
 
     assert len(candidates) > 1
     assert all(c.char_count <= 400 for c in candidates)
+    # The user asked for configurable size AND overlap. Without this the overlap
+    # value is free to be ignored entirely and every size assertion still passes.
+    assert candidates[0].content[-50:] == candidates[1].content[:50]
+
+
+async def test_fixed_chunking_bounds_windows_by_tokens_not_characters():
+    """chunk_size counts characters; the embedding ceiling counts tokens, and the
+    ratio is script-dependent. At the shipped defaults a Korean document produced
+    1142-token windows against a 500-token limit."""
+    blocks = [Block(text="가나다라마바사아자차카타파하" * 100, block_type="paragraph")]
+    candidates = await FixedChunking(chunk_size=800, overlap=100, max_chunk_tokens=60).chunk(
+        blocks, fake_embed_fn
+    )
+
+    assert candidates
+    assert all(count_tokens(c.content) <= 60 for c in candidates)
+
+
+@pytest.mark.parametrize(
+    ("strategy", "expected"),
+    [
+        (FixedChunking(chunk_size=400, overlap=0), "fixed"),
+        (StructureSemanticChunking(similarity_threshold=0.5, max_chunk_tokens=1000), "semantic"),
+    ],
+)
+async def test_every_candidate_is_tagged_with_its_strategy(strategy, expected):
+    """The document detail view compares strategies side by side, so an untagged
+    candidate cannot be attributed. Covers the single-candidate document too,
+    where the semantic pass returns before the merge loop."""
+    blocks = [Block(text="topic-a sentence one.", block_type="paragraph")]
+    single = await strategy.chunk(blocks, fake_embed_fn)
+    assert [c.metadata["strategy"] for c in single] == [expected]
+
+    many = await strategy.chunk(
+        [Block(text="topic-a sentence.", block_type="paragraph") for _ in range(40)], fake_embed_fn
+    )
+    assert all(c.metadata["strategy"] == expected for c in many)
 
 
 async def test_fixed_chunking_preserves_page_and_section():

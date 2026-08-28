@@ -15,7 +15,11 @@ def get_chunking_strategy(settings: Settings) -> ChunkingStrategy:
             max_chunk_tokens=settings.max_chunk_tokens,
         )
     if name == "fixed":
-        return FixedChunking(chunk_size=settings.chunk_size, overlap=settings.chunk_overlap)
+        return FixedChunking(
+            chunk_size=settings.chunk_size,
+            overlap=settings.chunk_overlap,
+            max_chunk_tokens=settings.max_chunk_tokens,
+        )
     raise ValueError(f"unknown chunking strategy: {settings.chunking_strategy}")
 
 

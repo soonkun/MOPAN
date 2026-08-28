@@ -89,6 +89,10 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"MAX_CHUNK_TOKENS must satisfy 1 <= value <= {EMBEDDING_INPUT_TOKEN_LIMIT // 2}"
             )
+        # Cosine similarity is bounded to [-1, 1]. A value outside it silently
+        # turns the semantic strategy into "always merge" or "never merge".
+        if not -1.0 <= self.semantic_similarity_threshold <= 1.0:
+            raise ValueError("SEMANTIC_SIMILARITY_THRESHOLD must satisfy -1.0 <= value <= 1.0")
         return self
 
 

@@ -413,12 +413,20 @@ RETRIEVAL_CANDIDATE_LIMIT=20
 # semantic (structure + embedding merge) or fixed (character windows).
 CHUNKING_STRATEGY=semantic
 # CHUNK_SIZE/CHUNK_OVERLAP apply to the fixed strategy; 0 <= overlap < size.
+# These count CHARACTERS. MAX_CHUNK_TOKENS still bounds the result, because 800
+# characters is ~135 tokens of English but ~1140 of Korean and ~2400 of emoji.
 CHUNK_SIZE=800
 CHUNK_OVERLAP=100
 # Valid range 1-4095. The ceiling is half of text-embedding-3-*'s 8191-token
 # input limit, which leaves room for the separator residual the chunker's token
 # accounting can under-count by. Out of range fails at startup.
+# At the low end, a limit narrower than a single character (1-2 with Korean or
+# emoji) cannot split cleanly and emits a replacement character; practical
+# values start in the hundreds.
 MAX_CHUNK_TOKENS=500
+# Cosine similarity, so -1.0 to 1.0; out of range fails at startup. Higher means
+# fewer merges. 1.0 is not "never merge" - float noise puts identical vectors at
+# or just above 1.0, so it still merges.
 SEMANTIC_SIMILARITY_THRESHOLD=0.75
 ANSWER_CONTEXT_TOKEN_BUDGET=6000
 
@@ -5051,7 +5059,7 @@ git commit -m "feat: token-aware sentence splitting and size-bounded chunk candi
 
 **Interfaces:**
 - Consumes: `ChunkCandidate`/`ChunkingStrategy`/`EmbedFn` and `build_size_bounded_candidates` (Task 9).
-- Produces: `class FixedChunking(ChunkingStrategy)` (`chunk_size`, `overlap`, validated `0 <= overlap < chunk_size`, preserves `page`/`section`); `class StructureSemanticChunking(ChunkingStrategy)` (`similarity_threshold`, `max_chunk_tokens`); `get_chunking_strategy(settings) -> ChunkingStrategy`.
+- Produces: `class FixedChunking(ChunkingStrategy)` (`chunk_size`, `overlap`, `max_chunk_tokens`, validated `0 <= overlap < chunk_size`, preserves `page`/`section`, re-splits any window over the token limit); `class StructureSemanticChunking(ChunkingStrategy)` (`similarity_threshold`, `max_chunk_tokens`); `get_chunking_strategy(settings) -> ChunkingStrategy`.
 
 - [ ] **Step 1: Append strategy tests to `backend/tests/test_chunking.py`**
 
@@ -5111,11 +5119,51 @@ def test_fixed_chunking_rejects_an_overlap_at_or_above_the_chunk_size():
 
 
 async def test_fixed_chunking_splits_by_size_with_overlap():
-    blocks = [Block(text="x" * 1000, block_type="paragraph", page=7, section="S")]
+    # Distinct characters, so the overlap assertion below cannot pass by accident
+    # on a run of identical ones.
+    text = "".join(chr(ord("a") + i % 26) for i in range(1000))
+    blocks = [Block(text=text, block_type="paragraph", page=7, section="S")]
     candidates = await FixedChunking(chunk_size=400, overlap=50).chunk(blocks, fake_embed_fn)
 
     assert len(candidates) > 1
     assert all(c.char_count <= 400 for c in candidates)
+    # The user asked for configurable size AND overlap. Without this the overlap
+    # value is free to be ignored entirely and every size assertion still passes.
+    assert candidates[0].content[-50:] == candidates[1].content[:50]
+
+
+async def test_fixed_chunking_bounds_windows_by_tokens_not_characters():
+    """chunk_size counts characters; the embedding ceiling counts tokens, and the
+    ratio is script-dependent. At the shipped defaults a Korean document produced
+    1142-token windows against a 500-token limit."""
+    blocks = [Block(text="가나다라마바사아자차카타파하" * 100, block_type="paragraph")]
+    candidates = await FixedChunking(chunk_size=800, overlap=100, max_chunk_tokens=60).chunk(
+        blocks, fake_embed_fn
+    )
+
+    assert candidates
+    assert all(count_tokens(c.content) <= 60 for c in candidates)
+
+
+@pytest.mark.parametrize(
+    ("strategy", "expected"),
+    [
+        (FixedChunking(chunk_size=400, overlap=0), "fixed"),
+        (StructureSemanticChunking(similarity_threshold=0.5, max_chunk_tokens=1000), "semantic"),
+    ],
+)
+async def test_every_candidate_is_tagged_with_its_strategy(strategy, expected):
+    """The document detail view compares strategies side by side, so an untagged
+    candidate cannot be attributed. Covers the single-candidate document too,
+    where the semantic pass returns before the merge loop."""
+    blocks = [Block(text="topic-a sentence one.", block_type="paragraph")]
+    single = await strategy.chunk(blocks, fake_embed_fn)
+    assert [c.metadata["strategy"] for c in single] == [expected]
+
+    many = await strategy.chunk(
+        [Block(text="topic-a sentence.", block_type="paragraph") for _ in range(40)], fake_embed_fn
+    )
+    assert all(c.metadata["strategy"] == expected for c in many)
 
 
 async def test_fixed_chunking_preserves_page_and_section():
@@ -5312,13 +5360,14 @@ def test_strategy_factory_honours_the_setting():
 from app.core.tokens import count_tokens
 from app.rag.blocks import Block
 from app.rag.chunking.base import ChunkCandidate, ChunkingStrategy, EmbedFn
+from app.rag.chunking.structure import split_to_token_limit
 
 
 class FixedChunking(ChunkingStrategy):
     """Character-window baseline, kept so admins can compare it against the
     semantic strategy in the document detail view."""
 
-    def __init__(self, chunk_size: int = 800, overlap: int = 100):
+    def __init__(self, chunk_size: int = 800, overlap: int = 100, max_chunk_tokens: int = 500):
         # Both values are admin-configurable, so an invalid pair is reachable
         # from configuration - fail here rather than with `range() arg 3 must not
         # be zero` in the middle of a document.
@@ -5326,6 +5375,7 @@ class FixedChunking(ChunkingStrategy):
             raise ValueError("overlap must satisfy 0 <= overlap < chunk_size")
         self.chunk_size = chunk_size
         self.overlap = overlap
+        self.max_chunk_tokens = max_chunk_tokens
 
     async def chunk(self, blocks: list[Block], embed_fn: EmbedFn) -> list[ChunkCandidate]:
         # Track where each block starts in the concatenated text so a window can
@@ -5359,16 +5409,23 @@ class FixedChunking(ChunkingStrategy):
             if not piece.strip():
                 continue
             origin = block_at(start)
-            candidates.append(
-                ChunkCandidate(
-                    content=piece,
-                    token_count=count_tokens(piece),
-                    char_count=len(piece),
-                    page=origin.page,
-                    section=origin.section,
-                    metadata={"strategy": "fixed"},
+            # chunk_size counts CHARACTERS, max_chunk_tokens counts TOKENS, and the
+            # ratio is script-dependent: 800 characters is 135 tokens of ASCII but
+            # 1142 of Korean and 2400 of emoji. So no character cap keeps a window
+            # under the embedding ceiling, and at the shipped defaults a Korean
+            # document already produced 1142-token windows against a 500 limit.
+            # Re-split here instead, reusing the size pass's splitter.
+            for part in split_to_token_limit(piece, self.max_chunk_tokens):
+                candidates.append(
+                    ChunkCandidate(
+                        content=part,
+                        token_count=count_tokens(part),
+                        char_count=len(part),
+                        page=origin.page,
+                        section=origin.section,
+                        metadata={"strategy": "fixed"},
+                    )
                 )
-            )
             if start + self.chunk_size >= len(full_text):
                 break
         return candidates
@@ -5481,7 +5538,11 @@ def get_chunking_strategy(settings: Settings) -> ChunkingStrategy:
             max_chunk_tokens=settings.max_chunk_tokens,
         )
     if name == "fixed":
-        return FixedChunking(chunk_size=settings.chunk_size, overlap=settings.chunk_overlap)
+        return FixedChunking(
+            chunk_size=settings.chunk_size,
+            overlap=settings.chunk_overlap,
+            max_chunk_tokens=settings.max_chunk_tokens,
+        )
     raise ValueError(f"unknown chunking strategy: {settings.chunking_strategy}")
 
 
@@ -5496,15 +5557,29 @@ __all__ = [
 ]
 ```
 
-- [ ] **Step 6: Run tests, expect PASS**
+- [ ] **Step 6: Modify `backend/app/core/config.py`** — bound the similarity threshold
+
+Cosine similarity is bounded to [-1, 1]. A value outside it silently turns the
+semantic strategy into "always merge" or "never merge" — the same fail-open shape
+as an unvalidated `ENVIRONMENT`. Append to the model validator, after the
+`MAX_CHUNK_TOKENS` check:
+
+```python
+        # Cosine similarity is bounded to [-1, 1]. A value outside it silently
+        # turns the semantic strategy into "always merge" or "never merge".
+        if not -1.0 <= self.semantic_similarity_threshold <= 1.0:
+            raise ValueError("SEMANTIC_SIMILARITY_THRESHOLD must satisfy -1.0 <= value <= 1.0")
+```
+
+- [ ] **Step 7: Run tests, expect PASS**
 
 Run: `pytest tests/test_chunking.py -v`
-Expected: all 30 tests PASS
+Expected: all 33 tests PASS
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add backend/app/rag/chunking backend/tests/test_chunking.py
+git add backend/app/rag/chunking backend/tests/test_chunking.py backend/app/core/config.py .env.example
 git commit -m "feat: fixed and structure+semantic chunking strategies with a settings factory"
 ```
 
