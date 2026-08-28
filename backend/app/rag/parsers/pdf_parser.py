@@ -8,14 +8,22 @@ from app.rag.parsers.base import Parser
 
 MAX_HEADING_CHARS = 80
 MAX_HEADING_WORDS = 12
-NUMBERED_HEADING = re.compile(r"^\d+(\.\d+)*[.)]?\s+\S")
+# A bare leading number is not enough: "2025 was a strong year" and "15 growers
+# reported blight" are ordinary prose. Require either a separator ("1.", "4)")
+# or a multi-level number ("3.2"), which prose effectively never opens with.
+NUMBERED_HEADING = re.compile(
+    r"^\d+(?:\.\d+)*[.)]\s+\S"  # 1. Introduction / 4) Methods / 3.2. Results
+    r"|^\d+(?:\.\d+)+\s+\S"  # 3.2 Results - multi-level needs no separator
+)
 SENTENCE_ENDINGS = ".!?,;:"
 
 
 def _is_heading(line: str, next_line: str) -> bool:
-    """Deliberately conservative. A false heading only adds a chunk boundary, but
-    the size pass in Task 9 bounds chunks anyway - so it is better to miss a
-    heading than to shred every wrapped line into its own chunk."""
+    """Deliberately conservative, because a false heading is not cheap: the
+    detected text becomes current_section and is stamped on every block that
+    follows, and section is what a citation shows the user. One misread line
+    relabels the rest of the document. Missing a heading only costs a chunk
+    boundary, which the size pass in Task 9 supplies anyway."""
     stripped = line.strip()
     if not stripped or len(stripped) > MAX_HEADING_CHARS:
         return False
@@ -31,6 +39,9 @@ def _is_heading(line: str, next_line: str) -> bool:
     # unusable here: pypdf collapses vertical whitespace, so extract_text never
     # emits a blank line between two lines of a page - that rule would be dead
     # except on the last line of a page, where it misfires on wrapped body text.
+    # istitle() buys that safety by missing headings with lowercase stop-words
+    # ("Results and Discussion"), possessives ("The Company's Results"), or a
+    # trailing colon ("Results:", rejected above as sentence punctuation).
     return len(words) <= 8 and stripped.istitle() and not next_line[:1].islower()
 
 

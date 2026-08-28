@@ -32,8 +32,17 @@ class DocxParser(Parser):
                 blocks.append(Block(text=text, block_type="paragraph", section=current_section))
 
         for table in doc.tables:
+            # row.cells expands a merge to one entry per grid column (and per row
+            # for a vertical merge), handing back the same underlying <w:tc>
+            # repeatedly. Emitting each one indexes and retrieves the same text
+            # several times - the same duplicate the HTML parser skips nested
+            # tags to avoid. Per-table, not per-row, so vertical merges dedupe too.
+            seen: set = set()
             for row in table.rows:
                 for cell in row.cells:
+                    if cell._tc in seen:
+                        continue
+                    seen.add(cell._tc)
                     text = cell.text.strip()
                     if text:
                         blocks.append(Block(text=text, block_type="table_cell", section=current_section))

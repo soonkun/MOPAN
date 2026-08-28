@@ -20,7 +20,9 @@ class HtmlParser(Parser):
 
         for tag in soup.find_all(BLOCK_TAGS):
             # A <p> inside a <td> is already covered by the <td> block above it;
-            # emitting both indexes and retrieves the same text twice.
+            # emitting both indexes and retrieves the same text twice. Cost: a
+            # heading nested in a block tag (<td><h2>S</h2>body</td>) folds into
+            # the cell and no longer sets current_section.
             if tag.find_parent(BLOCK_TAGS):
                 continue
             # Separator matters: get_text(strip=True) strips each string first

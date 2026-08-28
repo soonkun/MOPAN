@@ -99,12 +99,25 @@ def test_pdf_heading_heuristic_accepts_real_headings():
     assert _is_heading("Executive Summary", "") is True
 
 
+def test_pdf_heading_heuristic_accepts_separated_and_multilevel_numbers():
+    assert _is_heading("1. Introduction", "Body text follows.") is True
+    assert _is_heading("4) Methods", "Body text follows.") is True
+
+
 def test_pdf_heading_heuristic_rejects_wrapped_body_lines():
     # A wrapped sentence fragment also lacks terminal punctuation - lower-cased
     # words are what keep this from becoming a heading.
     assert _is_heading("the results of the experiment were", "consistent across runs.") is False
     assert _is_heading("This is a complete sentence.", "") is False
     assert _is_heading("x" * 120, "") is False
+
+
+def test_pdf_heading_heuristic_rejects_numeric_leading_prose():
+    """A bare leading number matched before, so a year- or count-leading
+    sentence became current_section and relabelled every citation after it."""
+    assert _is_heading("2025 was a strong year for the company", "Revenue rose.") is False
+    assert _is_heading("15 growers reported blight in June", "Most recovered.") is False
+    assert _is_heading("3 of the 12 plots were affected", "The rest were clean.") is False
 
 
 def test_pdf_parser_emits_headings_with_pages_and_sections(tmp_path):
@@ -186,6 +199,23 @@ def test_docx_parser_reads_styles_and_tables(tmp_path):
         ("120", "table_cell"),
     ]
     assert blocks[2].section == "Overview"
+
+
+def test_docx_parser_emits_a_merged_cell_once(tmp_path):
+    """row.cells repeats the same <w:tc> once per spanned grid column, so a
+    merged header cell would be embedded, indexed and retrieved three times."""
+    path = tmp_path / "merged.docx"
+    document = DocxDocument()
+    table = document.add_table(rows=2, cols=3)
+    table.cell(0, 0).merge(table.cell(0, 2)).text = "Regional Summary"
+    table.cell(1, 0).text = "APAC"
+    table.cell(1, 1).text = "120"
+    table.cell(1, 2).text = "up"
+    document.save(str(path))
+
+    cells = [b.text for b in get_parser("docx").parse(str(path)).blocks if b.block_type == "table_cell"]
+
+    assert cells == ["Regional Summary", "APAC", "120", "up"]
 
 
 @pytest.mark.parametrize("file_type,name", [("txt", "a.txt"), ("html", "a.html"), ("pdf", "a.pdf")])

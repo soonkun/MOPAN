@@ -4062,7 +4062,9 @@ class HtmlParser(Parser):
 
         for tag in soup.find_all(BLOCK_TAGS):
             # A <p> inside a <td> is already covered by the <td> block above it;
-            # emitting both indexes and retrieves the same text twice.
+            # emitting both indexes and retrieves the same text twice. Cost: a
+            # heading nested in a block tag (<td><h2>S</h2>body</td>) folds into
+            # the cell and no longer sets current_section.
             if tag.find_parent(BLOCK_TAGS):
                 continue
             # Separator matters: get_text(strip=True) strips each string first
@@ -4101,14 +4103,22 @@ from app.rag.parsers.base import Parser
 
 MAX_HEADING_CHARS = 80
 MAX_HEADING_WORDS = 12
-NUMBERED_HEADING = re.compile(r"^\d+(\.\d+)*[.)]?\s+\S")
+# A bare leading number is not enough: "2025 was a strong year" and "15 growers
+# reported blight" are ordinary prose. Require either a separator ("1.", "4)")
+# or a multi-level number ("3.2"), which prose effectively never opens with.
+NUMBERED_HEADING = re.compile(
+    r"^\d+(?:\.\d+)*[.)]\s+\S"  # 1. Introduction / 4) Methods / 3.2. Results
+    r"|^\d+(?:\.\d+)+\s+\S"  # 3.2 Results - multi-level needs no separator
+)
 SENTENCE_ENDINGS = ".!?,;:"
 
 
 def _is_heading(line: str, next_line: str) -> bool:
-    """Deliberately conservative. A false heading only adds a chunk boundary, but
-    the size pass in Task 9 bounds chunks anyway - so it is better to miss a
-    heading than to shred every wrapped line into its own chunk."""
+    """Deliberately conservative, because a false heading is not cheap: the
+    detected text becomes current_section and is stamped on every block that
+    follows, and section is what a citation shows the user. One misread line
+    relabels the rest of the document. Missing a heading only costs a chunk
+    boundary, which the size pass in Task 9 supplies anyway."""
     stripped = line.strip()
     if not stripped or len(stripped) > MAX_HEADING_CHARS:
         return False
@@ -4124,6 +4134,9 @@ def _is_heading(line: str, next_line: str) -> bool:
     # unusable here: pypdf collapses vertical whitespace, so extract_text never
     # emits a blank line between two lines of a page - that rule would be dead
     # except on the last line of a page, where it misfires on wrapped body text.
+    # istitle() buys that safety by missing headings with lowercase stop-words
+    # ("Results and Discussion"), possessives ("The Company's Results"), or a
+    # trailing colon ("Results:", rejected above as sentence punctuation).
     return len(words) <= 8 and stripped.istitle() and not next_line[:1].islower()
 
 
@@ -4216,8 +4229,17 @@ class DocxParser(Parser):
                 blocks.append(Block(text=text, block_type="paragraph", section=current_section))
 
         for table in doc.tables:
+            # row.cells expands a merge to one entry per grid column (and per row
+            # for a vertical merge), handing back the same underlying <w:tc>
+            # repeatedly. Emitting each one indexes and retrieves the same text
+            # several times - the same duplicate the HTML parser skips nested
+            # tags to avoid. Per-table, not per-row, so vertical merges dedupe too.
+            seen: set = set()
             for row in table.rows:
                 for cell in row.cells:
+                    if cell._tc in seen:
+                        continue
+                    seen.add(cell._tc)
                     text = cell.text.strip()
                     if text:
                         blocks.append(Block(text=text, block_type="table_cell", section=current_section))
@@ -4236,8 +4258,11 @@ from app.rag.parsers.text_parser import TextParser
 
 _TEXT = TextParser()
 
-# Adding a format is one dict entry. No import-order-dependent registration, no
-# linear supports() scan, no silently-empty registry.
+# Adding a format is one dict entry here - no import-order-dependent
+# registration, no linear supports() scan, no silently-empty registry - plus
+# matching entries in app/documents/validation.py's ALLOWED_EXTENSIONS,
+# ALLOWED_CONTENT_TYPES and EXPECTED_MAGIC_MIME, or uploads of it are rejected
+# before any parser is reached.
 PARSERS: dict[str, Parser] = {
     "txt": _TEXT,
     "md": _TEXT,
@@ -4361,12 +4386,25 @@ def test_pdf_heading_heuristic_accepts_real_headings():
     assert _is_heading("Executive Summary", "") is True
 
 
+def test_pdf_heading_heuristic_accepts_separated_and_multilevel_numbers():
+    assert _is_heading("1. Introduction", "Body text follows.") is True
+    assert _is_heading("4) Methods", "Body text follows.") is True
+
+
 def test_pdf_heading_heuristic_rejects_wrapped_body_lines():
     # A wrapped sentence fragment also lacks terminal punctuation - lower-cased
     # words are what keep this from becoming a heading.
     assert _is_heading("the results of the experiment were", "consistent across runs.") is False
     assert _is_heading("This is a complete sentence.", "") is False
     assert _is_heading("x" * 120, "") is False
+
+
+def test_pdf_heading_heuristic_rejects_numeric_leading_prose():
+    """A bare leading number matched before, so a year- or count-leading
+    sentence became current_section and relabelled every citation after it."""
+    assert _is_heading("2025 was a strong year for the company", "Revenue rose.") is False
+    assert _is_heading("15 growers reported blight in June", "Most recovered.") is False
+    assert _is_heading("3 of the 12 plots were affected", "The rest were clean.") is False
 
 
 def test_pdf_parser_emits_headings_with_pages_and_sections(tmp_path):
@@ -4448,6 +4486,23 @@ def test_docx_parser_reads_styles_and_tables(tmp_path):
         ("120", "table_cell"),
     ]
     assert blocks[2].section == "Overview"
+
+
+def test_docx_parser_emits_a_merged_cell_once(tmp_path):
+    """row.cells repeats the same <w:tc> once per spanned grid column, so a
+    merged header cell would be embedded, indexed and retrieved three times."""
+    path = tmp_path / "merged.docx"
+    document = DocxDocument()
+    table = document.add_table(rows=2, cols=3)
+    table.cell(0, 0).merge(table.cell(0, 2)).text = "Regional Summary"
+    table.cell(1, 0).text = "APAC"
+    table.cell(1, 1).text = "120"
+    table.cell(1, 2).text = "up"
+    document.save(str(path))
+
+    cells = [b.text for b in get_parser("docx").parse(str(path)).blocks if b.block_type == "table_cell"]
+
+    assert cells == ["Regional Summary", "APAC", "120", "up"]
 
 
 @pytest.mark.parametrize("file_type,name", [("txt", "a.txt"), ("html", "a.html"), ("pdf", "a.pdf")])

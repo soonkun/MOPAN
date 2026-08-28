@@ -6,8 +6,11 @@ from app.rag.parsers.text_parser import TextParser
 
 _TEXT = TextParser()
 
-# Adding a format is one dict entry. No import-order-dependent registration, no
-# linear supports() scan, no silently-empty registry.
+# Adding a format is one dict entry here - no import-order-dependent
+# registration, no linear supports() scan, no silently-empty registry - plus
+# matching entries in app/documents/validation.py's ALLOWED_EXTENSIONS,
+# ALLOWED_CONTENT_TYPES and EXPECTED_MAGIC_MIME, or uploads of it are rejected
+# before any parser is reached.
 PARSERS: dict[str, Parser] = {
     "txt": _TEXT,
     "md": _TEXT,
