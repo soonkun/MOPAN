@@ -6043,6 +6043,23 @@ async def test_embed_splits_into_batches_by_character_budget():
     assert provider.client.embeddings.create.await_count == 2
 
 
+async def test_a_single_input_over_the_character_budget_still_goes_out():
+    """The batcher cannot split one text without breaking the caller's
+    text/vector correspondence, so an over-budget input is sent alone rather
+    than dropped or looped on. MAX_CHUNK_TOKENS caps every real chunk at half
+    the 8191-token per-input limit, so this is a guard, not a hot path."""
+    provider = _provider(batch_chars=10)
+    provider.client.embeddings.create = AsyncMock(
+        side_effect=[_embedding_response([[0.0]]), _embedding_response([[1.0]])]
+    )
+
+    assert await provider.embed(["x" * 50, "y"]) == [[0.0], [1.0]]
+    assert [c.kwargs["input"] for c in provider.client.embeddings.create.await_args_list] == [
+        ["x" * 50],
+        ["y"],
+    ]
+
+
 async def test_embed_keeps_vectors_aligned_with_their_inputs_across_batches():
     """The single failure this module cannot afford.
 
@@ -6230,7 +6247,7 @@ async def test_chat_surfaces_tool_calls_when_the_model_requests_one():
 - [ ] **Step 5: Run tests, expect PASS**
 
 Run: `pytest tests/test_llm_provider.py -v`
-Expected: all 15 tests PASS (no real API call — the SDK client methods are mocked; the
+Expected: all 16 tests PASS (no real API call — the SDK client methods are mocked; the
 timeout and retry tests use a loopback socket and `httpx.MockTransport`)
 
 - [ ] **Step 6: Commit**
