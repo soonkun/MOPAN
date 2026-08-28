@@ -93,6 +93,15 @@ def test_out_of_range_max_chunk_tokens_is_rejected(value):
         Settings(max_chunk_tokens=value)
 
 
+@pytest.mark.parametrize("value", [1.5, -1.01])
+def test_out_of_range_similarity_threshold_is_rejected(value):
+    # Cosine similarity is bounded to [-1, 1]. Outside it the semantic strategy
+    # silently degrades to "always merge" (below -1) or "never merge" (above 1),
+    # which looks like working chunking right up to the retrieval quality report.
+    with pytest.raises(ValueError, match="SEMANTIC_SIMILARITY_THRESHOLD"):
+        Settings(semantic_similarity_threshold=value)
+
+
 def test_invalid_environment_value_is_rejected(monkeypatch):
     # ENVIRONMENT=Production must not silently disable every "production" check
     # (admin bootstrap gate, cookie secure flag, API-key and DB-password refusals).

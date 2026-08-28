@@ -415,6 +415,13 @@ CHUNKING_STRATEGY=semantic
 # CHUNK_SIZE/CHUNK_OVERLAP apply to the fixed strategy; 0 <= overlap < size.
 # These count CHARACTERS. MAX_CHUNK_TOKENS still bounds the result, because 800
 # characters is ~135 tokens of English but ~1140 of Korean and ~2400 of emoji.
+# Once MAX_CHUNK_TOKENS bites, a window is re-split and the stored chunk text is
+# NO LONGER a verbatim slice of the document: sentences are stripped and rejoined
+# with a single space, so newlines and repeated whitespace between them collapse
+# (measured: 40 source newlines survive as 0). Non-whitespace characters and
+# their order are always kept. The document detail view renders that normalised
+# text; Korean and other CJK reach this regime at these defaults, English
+# generally does not.
 CHUNK_SIZE=800
 CHUNK_OVERLAP=100
 # Valid range 1-4095. The ceiling is half of text-embedding-3-*'s 8191-token
@@ -5118,7 +5125,19 @@ def test_fixed_chunking_rejects_an_overlap_at_or_above_the_chunk_size():
         FixedChunking(chunk_size=100, overlap=-1)
 
 
+def test_fixed_chunking_rejects_a_non_positive_token_limit():
+    # Settings blocks 0, but FixedChunking is also constructed directly (Task 13's
+    # pipeline, the comparison view). Without this the failure surfaces as
+    # "max_tokens must be at least 1" from inside chunk(), mid-document.
+    with pytest.raises(ValueError, match="max_chunk_tokens"):
+        FixedChunking(chunk_size=100, overlap=0, max_chunk_tokens=0)
+
+
 async def test_fixed_chunking_splits_by_size_with_overlap():
+    """No-re-split regime: 400 ASCII characters is ~100 cl100k tokens against the
+    500-token default, so MAX_CHUNK_TOKENS never bites and each emitted chunk IS
+    the verbatim window. Only here does the seam between adjacent chunks equal
+    the configured overlap; the re-split regime is covered by the next test."""
     # Distinct characters, so the overlap assertion below cannot pass by accident
     # on a run of identical ones.
     text = "".join(chr(ord("a") + i % 26) for i in range(1000))
@@ -5143,6 +5162,54 @@ async def test_fixed_chunking_bounds_windows_by_tokens_not_characters():
 
     assert candidates
     assert all(count_tokens(c.content) <= 60 for c in candidates)
+
+
+async def test_fixed_chunking_loses_no_source_text_in_the_re_split_regime():
+    """Re-split regime: Korean at the shipped defaults, where 800 characters is
+    ~1140 tokens against the 500-token limit, so every window is re-split.
+
+    Overlap no longer produces a shared seam between adjacent emitted chunks
+    here - the parts are re-splits of the window, not slices of it, so measuring
+    `content[-overlap:] == next.content[:overlap]` is simply false (2 of 6
+    adjacent pairs at these defaults). What overlap still guarantees is the thing
+    it exists for: nothing falls into a gap between two windows, so every source
+    character still appears, in order, across the emitted chunks."""
+    source = "가나다라마바사아자차카타파하" * 200
+    blocks = [Block(text=source, block_type="paragraph")]
+    candidates = await FixedChunking(chunk_size=800, overlap=100, max_chunk_tokens=500).chunk(
+        blocks, fake_embed_fn
+    )
+
+    assert all(count_tokens(c.content) <= 500 for c in candidates)
+    window_count = -(-len(source) // (800 - 100))
+    assert len(candidates) > window_count, "re-splitting never fired; wrong regime"
+
+    emitted = "".join(c.content for c in candidates)
+    position = 0
+    for index, character in enumerate(source):
+        found = emitted.find(character, position)
+        assert found >= 0, f"source character {index} was dropped between windows"
+        position = found + 1
+
+
+async def test_fixed_chunking_attributes_each_part_to_the_block_it_came_from():
+    """A window spans block boundaries, so the window-start block's page/section
+    is the wrong citation for a part drawn from a later block. With re-splitting
+    active a single 2000-character window covers this whole document, and every
+    part - including the ones that contain only block two's text - was cited as
+    page 1 of "First"."""
+    blocks = [
+        Block(text="alpha. " * 60, block_type="paragraph", page=1, section="First"),
+        Block(text="omega. " * 60, block_type="paragraph", page=9, section="Second"),
+    ]
+    candidates = await FixedChunking(chunk_size=2000, overlap=0, max_chunk_tokens=60).chunk(
+        blocks, fake_embed_fn
+    )
+
+    pure_second = [c for c in candidates if "alpha" not in c.content]
+    assert pure_second, "fixture no longer produces a part drawn only from block two"
+    assert all((c.page, c.section) == (9, "Second") for c in pure_second)
+    assert candidates[0].page == 1 and candidates[0].section == "First"
 
 
 @pytest.mark.parametrize(
@@ -5363,16 +5430,46 @@ from app.rag.chunking.base import ChunkCandidate, ChunkingStrategy, EmbedFn
 from app.rag.chunking.structure import split_to_token_limit
 
 
+def _skip_whitespace(text: str, position: int) -> int:
+    while position < len(text) and text[position].isspace():
+        position += 1
+    return position
+
+
+def _advance_past(text: str, position: int, non_whitespace: int) -> int:
+    """Move `position` forward over `non_whitespace` non-whitespace characters."""
+    while non_whitespace and position < len(text):
+        if not text[position].isspace():
+            non_whitespace -= 1
+        position += 1
+    return position
+
+
 class FixedChunking(ChunkingStrategy):
     """Character-window baseline, kept so admins can compare it against the
-    semantic strategy in the document detail view."""
+    semantic strategy in the document detail view.
+
+    chunk_size and overlap count CHARACTERS of the concatenated document. An
+    emitted chunk is a verbatim slice of it only while it also fits under
+    max_chunk_tokens; past that the window is re-split by the size pass's
+    splitter, which strips each sentence and rejoins them with a single space.
+    Newlines and repeated whitespace between sentences therefore collapse -
+    measured on 41 period-terminated lines at a 20-token limit, 40 source
+    newlines survive as 0 - so the comparison view renders normalised text, not
+    the raw window. (Text with no terminal punctuation takes the hard-split path
+    instead and stays verbatim, which is why the effect looks intermittent.)
+    Non-whitespace characters and their order are always preserved, which is what
+    lets each emitted part still be traced back to its source block.
+    """
 
     def __init__(self, chunk_size: int = 800, overlap: int = 100, max_chunk_tokens: int = 500):
-        # Both values are admin-configurable, so an invalid pair is reachable
+        # All three values are admin-configurable, so an invalid one is reachable
         # from configuration - fail here rather than with `range() arg 3 must not
-        # be zero` in the middle of a document.
+        # be zero` or `max_tokens must be at least 1` in the middle of a document.
         if not 0 <= overlap < chunk_size:
             raise ValueError("overlap must satisfy 0 <= overlap < chunk_size")
+        if max_chunk_tokens < 1:
+            raise ValueError("max_chunk_tokens must be at least 1")
         self.chunk_size = chunk_size
         self.overlap = overlap
         self.max_chunk_tokens = max_chunk_tokens
@@ -5408,14 +5505,33 @@ class FixedChunking(ChunkingStrategy):
             piece = full_text[start : start + self.chunk_size]
             if not piece.strip():
                 continue
-            origin = block_at(start)
             # chunk_size counts CHARACTERS, max_chunk_tokens counts TOKENS, and the
             # ratio is script-dependent: 800 characters is 135 tokens of ASCII but
             # 1142 of Korean and 2400 of emoji. So no character cap keeps a window
             # under the embedding ceiling, and at the shipped defaults a Korean
             # document already produced 1142-token windows against a 500 limit.
             # Re-split here instead, reusing the size pass's splitter.
+            #
+            # Re-splitting each window independently leaves a short part at every
+            # window tail (Korean at the defaults: 500, 500, 142 per window).
+            # Measured, that costs nothing to fix and nothing to keep: 11 emitted
+            # parts against an 11-part floor of sum(ceil(window_tokens / limit)),
+            # and 13 against 13 for ASCII. Re-balancing would even the sizes out,
+            # not reduce the count, so it saves no embedding call - and it would
+            # mean changing split_to_token_limit, which the semantic pass shares.
+            # Left greedy deliberately.
+            #
+            # A window spans block boundaries, so attributing every part to the
+            # block the WINDOW starts in cites text under a section it did not
+            # come from. The parts are not verbatim slices - the splitter drops
+            # and normalises whitespace - but their non-whitespace characters are
+            # the window's, in order, so walking full_text in lockstep with each
+            # part's non-whitespace count recovers exactly where that part began.
+            position = start
             for part in split_to_token_limit(piece, self.max_chunk_tokens):
+                position = _skip_whitespace(full_text, position)
+                origin = block_at(position)
+                position = _advance_past(full_text, position, sum(1 for ch in part if not ch.isspace()))
                 candidates.append(
                     ChunkCandidate(
                         content=part,
@@ -5571,15 +5687,30 @@ as an unvalidated `ENVIRONMENT`. Append to the model validator, after the
             raise ValueError("SEMANTIC_SIMILARITY_THRESHOLD must satisfy -1.0 <= value <= 1.0")
 ```
 
-- [ ] **Step 7: Run tests, expect PASS**
+- [ ] **Step 7: Modify `backend/tests/test_settings.py`** — cover the new validator
 
-Run: `pytest tests/test_chunking.py -v`
-Expected: all 33 tests PASS
+Both sibling validators have a test; without one here, deleting the threshold
+check fails nothing. Append beside `test_out_of_range_max_chunk_tokens_is_rejected`:
 
-- [ ] **Step 8: Commit**
+```python
+@pytest.mark.parametrize("value", [1.5, -1.01])
+def test_out_of_range_similarity_threshold_is_rejected(value):
+    # Cosine similarity is bounded to [-1, 1]. Outside it the semantic strategy
+    # silently degrades to "always merge" (below -1) or "never merge" (above 1),
+    # which looks like working chunking right up to the retrieval quality report.
+    with pytest.raises(ValueError, match="SEMANTIC_SIMILARITY_THRESHOLD"):
+        Settings(semantic_similarity_threshold=value)
+```
+
+- [ ] **Step 8: Run tests, expect PASS**
+
+Run: `pytest tests/test_chunking.py tests/test_settings.py -v`
+Expected: all 51 tests PASS (36 chunking + 15 settings)
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add backend/app/rag/chunking backend/tests/test_chunking.py backend/app/core/config.py .env.example
+git add backend/app/rag/chunking backend/tests/test_chunking.py backend/app/core/config.py backend/tests/test_settings.py .env.example
 git commit -m "feat: fixed and structure+semantic chunking strategies with a settings factory"
 ```
 
@@ -5594,7 +5725,7 @@ git commit -m "feat: fixed and structure+semantic chunking strategies with a set
 **Interfaces:**
 - Produces: `@dataclass ToolCall(id, name, arguments)`; `@dataclass ChatMessage(role, content, name=None, tool_call_id=None)` with `to_openai() -> dict`; `@dataclass ChatResult(content, usage, model, tool_calls=None)`; `class LLMError(RuntimeError)`.
 - Produces: `class LLMProvider(ABC)` with `async embed(texts) -> list[list[float]]` and `async chat(messages, *, temperature=0.2, tools=None, **kwargs) -> ChatResult`.
-- Produces: `class OpenAIProvider(LLMProvider)` constructed as `OpenAIProvider(api_key, embedding_model, answer_model, *, timeout, max_retries, batch_size, batch_chars)`, and `async aclose()`.
+- Produces: `class OpenAIProvider(LLMProvider)` constructed as `OpenAIProvider(api_key, embedding_model, answer_model, *, timeout, max_retries, batch_size, batch_chars, embedding_dim=None)`, and `async aclose()`.
 
 `tools` / `tool_calls` are **unused in Slice 1** and present deliberately: Slice 2's MCP work needs exactly this surface, and adding it later is a breaking change to the one abstraction the user cares most about.
 
@@ -5683,26 +5814,44 @@ class OpenAIProvider(LLMProvider):
         max_retries: int = 3,
         batch_size: int = 128,
         batch_chars: int = 200_000,
+        embedding_dim: int | None = None,
     ):
         # Explicit timeout and retries. The SDK default is 600s, and one hung
         # embedding call would occupy an arq worker slot for ten minutes.
+        # Measured on openai 1.47.0: the SDK's own retry loop covers 408, 409,
+        # 429 and 5xx plus connection timeouts, and does NOT retry 401 or 400 -
+        # so a bad key costs one attempt, not max_retries of them. Nothing to
+        # reimplement here; just hand it the budget from Settings.
         self.client = AsyncOpenAI(api_key=api_key, timeout=timeout, max_retries=max_retries)
         self.embedding_model = embedding_model
         self.answer_model = answer_model
         self.batch_size = batch_size
         self.batch_chars = batch_chars
+        self.embedding_dim = embedding_dim
 
     def _batches(self, texts: list[str]) -> list[list[str]]:
         """OpenAI's embeddings endpoint caps at 2048 array elements and roughly
         300k tokens per request. One request per document blows both on a large
-        PDF, so split on item count and on a character budget."""
+        PDF, so split on item count and on a character budget.
+
+        Characters are a proxy for tokens and the ratio is script-dependent.
+        Measured with cl100k: 200_000 characters is ~44k tokens of ASCII and
+        ~215k of Korean, both under the ceiling.
+        # ponytail: an emoji-dominated document reaches ~600k tokens in the same
+        # 200_000 characters and would be rejected by the endpoint. It fails
+        # loudly as an LLMError rather than corrupting anything; budget on
+        # count_tokens() instead if that ever bites.
+
+        A single input longer than batch_chars still goes out alone rather than
+        being dropped - it cannot be split here without breaking the caller's
+        text/vector correspondence, and MAX_CHUNK_TOKENS already bounds every
+        chunk to at most half the 8191-token per-input limit.
+        """
         batches: list[list[str]] = []
         current: list[str] = []
         current_chars = 0
         for text in texts:
-            if current and (
-                len(current) >= self.batch_size or current_chars + len(text) > self.batch_chars
-            ):
+            if current and (len(current) >= self.batch_size or current_chars + len(text) > self.batch_chars):
                 batches.append(current)
                 current, current_chars = [], 0
             current.append(text)
@@ -5711,6 +5860,37 @@ class OpenAIProvider(LLMProvider):
             batches.append(current)
         return batches
 
+    def _vectors_in_input_order(self, response, expected: int) -> list[list[float]]:
+        """Unpack one embeddings response, in the order the inputs were sent.
+
+        Measured on openai 1.47.0: the SDK returns response.data in whatever
+        order the server wrote it - a server that reverses the array yields
+        indices [2, 1, 0] - and it does not check the array length, so three
+        inputs and a one-item response parse without error. Either one pairs a
+        chunk with another chunk's vector, and after ingest that is invisible
+        and unrecoverable. Sort on the per-item index the wire format carries
+        for exactly this reason, and refuse anything that is not a complete
+        0..n-1 cover.
+        """
+        data = sorted(response.data, key=lambda item: item.index)
+        if [item.index for item in data] != list(range(expected)):
+            raise LLMError(
+                f"embedding response does not cover inputs 0..{expected - 1} exactly "
+                f"({len(data)} vectors returned)"
+            )
+        vectors = [item.embedding for item in data]
+        if self.embedding_dim is not None:
+            width = next((len(v) for v in vectors if len(v) != self.embedding_dim), None)
+            if width is not None:
+                # EMBEDDING_MODEL and EMBEDDING_DIM are independent settings, and
+                # the mismatch otherwise surfaces as a pgvector insert failure
+                # after the whole document has already been paid for.
+                raise LLMError(
+                    f"{self.embedding_model} returned {width}-dimension vectors, "
+                    f"but EMBEDDING_DIM is {self.embedding_dim}"
+                )
+        return vectors
+
     async def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
@@ -5718,11 +5898,12 @@ class OpenAIProvider(LLMProvider):
         vectors: list[list[float]] = []
         try:
             for batch in self._batches(texts):
-                response = await self.client.embeddings.create(
-                    model=self.embedding_model, input=batch
-                )
-                vectors.extend(item.embedding for item in response.data)
+                response = await self.client.embeddings.create(model=self.embedding_model, input=batch)
+                vectors.extend(self._vectors_in_input_order(response, len(batch)))
         except OpenAIError as exc:
+            # str(exc) on every SDK error class is "Error code: N - {server body}"
+            # or "Request timed out."; verified not to carry the API key or a
+            # traceback. Routers still must not echo this to a client.
             raise LLMError(f"embedding request failed: {exc}") from exc
 
         log_event(
@@ -5793,8 +5974,11 @@ __all__ = ["ChatMessage", "ChatResult", "LLMError", "LLMProvider", "OpenAIProvid
 - [ ] **Step 4: Write `backend/tests/test_llm_provider.py`**
 
 ```python
+import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from openai import APITimeoutError
 
@@ -5811,17 +5995,24 @@ def _provider(**kwargs) -> OpenAIProvider:
     )
 
 
-def _embedding_response(vectors):
+def _embedding_response(vectors, indices=None):
+    """A stand-in for CreateEmbeddingResponse.
+
+    `index` is set explicitly because the provider sorts on it: OpenAI's wire
+    format carries a per-item index precisely because array order is not part of
+    the contract, and openai 1.47.0 hands back response.data in whatever order
+    the server sent.
+    """
     response = MagicMock()
-    response.data = [MagicMock(embedding=v) for v in vectors]
+    if indices is None:
+        indices = range(len(vectors))
+    response.data = [MagicMock(embedding=v, index=i) for v, i in zip(vectors, indices, strict=True)]
     return response
 
 
 async def test_embed_returns_vectors_from_the_response():
     provider = _provider()
-    provider.client.embeddings.create = AsyncMock(
-        return_value=_embedding_response([[0.1, 0.2], [0.3, 0.4]])
-    )
+    provider.client.embeddings.create = AsyncMock(return_value=_embedding_response([[0.1, 0.2], [0.3, 0.4]]))
 
     assert await provider.embed(["a", "b"]) == [[0.1, 0.2], [0.3, 0.4]]
     provider.client.embeddings.create.assert_awaited_once_with(
@@ -5852,6 +6043,70 @@ async def test_embed_splits_into_batches_by_character_budget():
     assert provider.client.embeddings.create.await_count == 2
 
 
+async def test_embed_keeps_vectors_aligned_with_their_inputs_across_batches():
+    """The single failure this module cannot afford.
+
+    Every vector is written to the chunk at the same list position, so any
+    reorder pairs each chunk with another chunk's embedding - retrieval then
+    returns confidently wrong citations, and nothing downstream can detect it.
+    Two independent reorder sources are covered: batch boundaries (the provider
+    must concatenate batches in request order) and within a batch (openai 1.47.0
+    returns response.data in the server's array order, verified by feeding a
+    reversed array through httpx.MockTransport and observing indices [2, 1, 0]).
+    """
+    texts = [f"chunk-{i}" for i in range(7)]
+    expected = {t: [float(i)] for i, t in enumerate(texts)}
+
+    async def reversing_create(*, model, input):
+        # Correct vectors, correct indices, deliberately reversed array order.
+        pairs = [(i, expected[t]) for i, t in enumerate(input)]
+        pairs.reverse()
+        return _embedding_response([v for _, v in pairs], [i for i, _ in pairs])
+
+    provider = _provider(batch_size=3)
+    provider.client.embeddings.create = AsyncMock(side_effect=reversing_create)
+
+    assert provider.client.embeddings.create.await_count == 0
+    result = await provider.embed(texts)
+
+    assert provider.client.embeddings.create.await_count == 3  # 3 + 3 + 1
+    assert result == [expected[t] for t in texts]
+
+
+async def test_embed_rejects_a_response_that_does_not_cover_every_input():
+    """openai 1.47.0 does not check the array length itself: three inputs and a
+    one-item response parse without error. Unchecked, one short batch shifts
+    every later batch's vectors by one relative to the chunk list."""
+    provider = _provider()
+    provider.client.embeddings.create = AsyncMock(return_value=_embedding_response([[0.0]]))
+
+    with pytest.raises(LLMError, match="0..2"):
+        await provider.embed(["a", "b", "c"])
+
+
+async def test_embed_rejects_a_response_with_duplicate_indices():
+    provider = _provider()
+    provider.client.embeddings.create = AsyncMock(
+        return_value=_embedding_response([[0.0], [1.0]], indices=[0, 0])
+    )
+
+    with pytest.raises(LLMError):
+        await provider.embed(["a", "b"])
+
+
+async def test_embed_rejects_vectors_of_the_wrong_width():
+    """EMBEDDING_MODEL and EMBEDDING_DIM are independent settings. Pointing the
+    model at text-embedding-3-large while EMBEDDING_DIM stays 1536 otherwise
+    fails at the pgvector insert, after paying to embed the whole document."""
+    provider = _provider(embedding_dim=3)
+    provider.client.embeddings.create = AsyncMock(
+        return_value=_embedding_response([[0.1, 0.2, 0.3], [0.4, 0.5]])
+    )
+
+    with pytest.raises(LLMError, match="EMBEDDING_DIM"):
+        await provider.embed(["a", "b"])
+
+
 async def test_embed_of_nothing_makes_no_request():
     provider = _provider()
     provider.client.embeddings.create = AsyncMock()
@@ -5861,11 +6116,64 @@ async def test_embed_of_nothing_makes_no_request():
 
 async def test_sdk_errors_are_wrapped_in_llm_error():
     provider = _provider()
-    provider.client.embeddings.create = AsyncMock(
-        side_effect=APITimeoutError(request=MagicMock())
-    )
+    provider.client.embeddings.create = AsyncMock(side_effect=APITimeoutError(request=MagicMock()))
     with pytest.raises(LLMError):
         await provider.embed(["a"])
+
+
+async def test_the_configured_timeout_fires():
+    """No network: a loopback server that accepts the connection and never
+    answers. httpx.MockTransport cannot stand in here - it bypasses the timeout
+    entirely, so a mocked test would pass against a provider with no timeout at
+    all, which is exactly the 600s-default regression this guards."""
+    stop = asyncio.Event()
+
+    async def blackhole(reader, writer):
+        await stop.wait()
+
+    server = await asyncio.start_server(blackhole, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    provider = _provider(timeout=0.3, max_retries=0)
+    provider.client.base_url = f"http://127.0.0.1:{port}/v1"
+
+    started = time.perf_counter()
+    try:
+        with pytest.raises(LLMError):
+            await provider.embed(["a"])
+        assert time.perf_counter() - started < 5.0
+    finally:
+        stop.set()
+        server.close()
+        await server.wait_closed()
+        await provider.aclose()
+
+
+async def test_retries_are_bounded_and_skip_non_retryable_statuses():
+    """A 429 or 5xx is worth another attempt; a 401 is a bad key and retrying it
+    just multiplies the failure. openai 1.47.0 draws that line itself - this
+    pins that the provider hands it the retry budget from Settings."""
+    for status, expected_attempts in ((429, 3), (500, 3), (401, 1), (400, 1)):
+        attempts: list[str] = []
+
+        def handler(request, attempts=attempts, status=status):
+            attempts.append(request.url.path)
+            return httpx.Response(status, json={"error": {"message": "nope"}})
+
+        provider = _provider(max_retries=2)
+        assert provider.client.max_retries == 2
+        provider.client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        with pytest.raises(LLMError):
+            await provider.embed(["a"])
+        assert len(attempts) == expected_attempts, status
+        await provider.aclose()
+
+
+async def test_settings_values_reach_the_sdk_client():
+    provider = _provider(timeout=12.5, max_retries=7)
+    assert provider.client.timeout == 12.5
+    assert provider.client.max_retries == 7
+    await provider.aclose()
 
 
 async def test_chat_returns_content_usage_and_model():
@@ -5922,7 +6230,8 @@ async def test_chat_surfaces_tool_calls_when_the_model_requests_one():
 - [ ] **Step 5: Run tests, expect PASS**
 
 Run: `pytest tests/test_llm_provider.py -v`
-Expected: all 8 tests PASS (no real API call — the SDK client methods are mocked)
+Expected: all 15 tests PASS (no real API call — the SDK client methods are mocked; the
+timeout and retry tests use a loopback socket and `httpx.MockTransport`)
 
 - [ ] **Step 6: Commit**
 
@@ -6355,6 +6664,7 @@ async def startup(ctx: dict) -> None:
         max_retries=settings.llm_max_retries,
         batch_size=settings.embedding_batch_size,
         batch_chars=settings.embedding_batch_chars,
+        embedding_dim=settings.embedding_dim,
     )
 
 
@@ -7642,6 +7952,7 @@ Inside `lifespan`, after the arq pool:
         max_retries=settings.llm_max_retries,
         batch_size=settings.embedding_batch_size,
         batch_chars=settings.embedding_batch_chars,
+        embedding_dim=settings.embedding_dim,
     )
 ```
 

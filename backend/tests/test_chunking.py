@@ -248,7 +248,19 @@ def test_fixed_chunking_rejects_an_overlap_at_or_above_the_chunk_size():
         FixedChunking(chunk_size=100, overlap=-1)
 
 
+def test_fixed_chunking_rejects_a_non_positive_token_limit():
+    # Settings blocks 0, but FixedChunking is also constructed directly (Task 13's
+    # pipeline, the comparison view). Without this the failure surfaces as
+    # "max_tokens must be at least 1" from inside chunk(), mid-document.
+    with pytest.raises(ValueError, match="max_chunk_tokens"):
+        FixedChunking(chunk_size=100, overlap=0, max_chunk_tokens=0)
+
+
 async def test_fixed_chunking_splits_by_size_with_overlap():
+    """No-re-split regime: 400 ASCII characters is ~100 cl100k tokens against the
+    500-token default, so MAX_CHUNK_TOKENS never bites and each emitted chunk IS
+    the verbatim window. Only here does the seam between adjacent chunks equal
+    the configured overlap; the re-split regime is covered by the next test."""
     # Distinct characters, so the overlap assertion below cannot pass by accident
     # on a run of identical ones.
     text = "".join(chr(ord("a") + i % 26) for i in range(1000))
@@ -273,6 +285,54 @@ async def test_fixed_chunking_bounds_windows_by_tokens_not_characters():
 
     assert candidates
     assert all(count_tokens(c.content) <= 60 for c in candidates)
+
+
+async def test_fixed_chunking_loses_no_source_text_in_the_re_split_regime():
+    """Re-split regime: Korean at the shipped defaults, where 800 characters is
+    ~1140 tokens against the 500-token limit, so every window is re-split.
+
+    Overlap no longer produces a shared seam between adjacent emitted chunks
+    here - the parts are re-splits of the window, not slices of it, so measuring
+    `content[-overlap:] == next.content[:overlap]` is simply false (2 of 6
+    adjacent pairs at these defaults). What overlap still guarantees is the thing
+    it exists for: nothing falls into a gap between two windows, so every source
+    character still appears, in order, across the emitted chunks."""
+    source = "가나다라마바사아자차카타파하" * 200
+    blocks = [Block(text=source, block_type="paragraph")]
+    candidates = await FixedChunking(chunk_size=800, overlap=100, max_chunk_tokens=500).chunk(
+        blocks, fake_embed_fn
+    )
+
+    assert all(count_tokens(c.content) <= 500 for c in candidates)
+    window_count = -(-len(source) // (800 - 100))
+    assert len(candidates) > window_count, "re-splitting never fired; wrong regime"
+
+    emitted = "".join(c.content for c in candidates)
+    position = 0
+    for index, character in enumerate(source):
+        found = emitted.find(character, position)
+        assert found >= 0, f"source character {index} was dropped between windows"
+        position = found + 1
+
+
+async def test_fixed_chunking_attributes_each_part_to_the_block_it_came_from():
+    """A window spans block boundaries, so the window-start block's page/section
+    is the wrong citation for a part drawn from a later block. With re-splitting
+    active a single 2000-character window covers this whole document, and every
+    part - including the ones that contain only block two's text - was cited as
+    page 1 of "First"."""
+    blocks = [
+        Block(text="alpha. " * 60, block_type="paragraph", page=1, section="First"),
+        Block(text="omega. " * 60, block_type="paragraph", page=9, section="Second"),
+    ]
+    candidates = await FixedChunking(chunk_size=2000, overlap=0, max_chunk_tokens=60).chunk(
+        blocks, fake_embed_fn
+    )
+
+    pure_second = [c for c in candidates if "alpha" not in c.content]
+    assert pure_second, "fixture no longer produces a part drawn only from block two"
+    assert all((c.page, c.section) == (9, "Second") for c in pure_second)
+    assert candidates[0].page == 1 and candidates[0].section == "First"
 
 
 @pytest.mark.parametrize(
