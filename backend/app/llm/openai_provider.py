@@ -1,0 +1,168 @@
+import logging
+import time
+
+from openai import AsyncOpenAI, OpenAIError
+
+from app.core.logging import log_event
+from app.llm.base import ChatMessage, ChatResult, LLMError, LLMProvider, ToolCall
+
+logger = logging.getLogger("mopan.llm")
+
+
+class OpenAIProvider(LLMProvider):
+    def __init__(
+        self,
+        api_key: str,
+        embedding_model: str,
+        answer_model: str,
+        *,
+        timeout: float = 30.0,
+        max_retries: int = 3,
+        batch_size: int = 128,
+        batch_chars: int = 200_000,
+        embedding_dim: int | None = None,
+    ):
+        # Explicit timeout and retries. The SDK default is 600s, and one hung
+        # embedding call would occupy an arq worker slot for ten minutes.
+        # Measured on openai 1.47.0: the SDK's own retry loop covers 408, 409,
+        # 429 and 5xx plus connection timeouts, and does NOT retry 401 or 400 -
+        # so a bad key costs one attempt, not max_retries of them. Nothing to
+        # reimplement here; just hand it the budget from Settings.
+        self.client = AsyncOpenAI(api_key=api_key, timeout=timeout, max_retries=max_retries)
+        self.embedding_model = embedding_model
+        self.answer_model = answer_model
+        self.batch_size = batch_size
+        self.batch_chars = batch_chars
+        self.embedding_dim = embedding_dim
+
+    def _batches(self, texts: list[str]) -> list[list[str]]:
+        """OpenAI's embeddings endpoint caps at 2048 array elements and roughly
+        300k tokens per request. One request per document blows both on a large
+        PDF, so split on item count and on a character budget.
+
+        Characters are a proxy for tokens and the ratio is script-dependent.
+        Measured with cl100k: 200_000 characters is ~44k tokens of ASCII and
+        ~215k of Korean, both under the ceiling.
+        # ponytail: an emoji-dominated document reaches ~600k tokens in the same
+        # 200_000 characters and would be rejected by the endpoint. It fails
+        # loudly as an LLMError rather than corrupting anything; budget on
+        # count_tokens() instead if that ever bites.
+
+        A single input longer than batch_chars still goes out alone rather than
+        being dropped - it cannot be split here without breaking the caller's
+        text/vector correspondence, and MAX_CHUNK_TOKENS already bounds every
+        chunk to at most half the 8191-token per-input limit.
+        """
+        batches: list[list[str]] = []
+        current: list[str] = []
+        current_chars = 0
+        for text in texts:
+            if current and (len(current) >= self.batch_size or current_chars + len(text) > self.batch_chars):
+                batches.append(current)
+                current, current_chars = [], 0
+            current.append(text)
+            current_chars += len(text)
+        if current:
+            batches.append(current)
+        return batches
+
+    def _vectors_in_input_order(self, response, expected: int) -> list[list[float]]:
+        """Unpack one embeddings response, in the order the inputs were sent.
+
+        Measured on openai 1.47.0: the SDK returns response.data in whatever
+        order the server wrote it - a server that reverses the array yields
+        indices [2, 1, 0] - and it does not check the array length, so three
+        inputs and a one-item response parse without error. Either one pairs a
+        chunk with another chunk's vector, and after ingest that is invisible
+        and unrecoverable. Sort on the per-item index the wire format carries
+        for exactly this reason, and refuse anything that is not a complete
+        0..n-1 cover.
+        """
+        data = sorted(response.data, key=lambda item: item.index)
+        if [item.index for item in data] != list(range(expected)):
+            raise LLMError(
+                f"embedding response does not cover inputs 0..{expected - 1} exactly "
+                f"({len(data)} vectors returned)"
+            )
+        vectors = [item.embedding for item in data]
+        if self.embedding_dim is not None:
+            width = next((len(v) for v in vectors if len(v) != self.embedding_dim), None)
+            if width is not None:
+                # EMBEDDING_MODEL and EMBEDDING_DIM are independent settings, and
+                # the mismatch otherwise surfaces as a pgvector insert failure
+                # after the whole document has already been paid for.
+                raise LLMError(
+                    f"{self.embedding_model} returned {width}-dimension vectors, "
+                    f"but EMBEDDING_DIM is {self.embedding_dim}"
+                )
+        return vectors
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        started = time.perf_counter()
+        vectors: list[list[float]] = []
+        try:
+            for batch in self._batches(texts):
+                response = await self.client.embeddings.create(model=self.embedding_model, input=batch)
+                vectors.extend(self._vectors_in_input_order(response, len(batch)))
+        except OpenAIError as exc:
+            # str(exc) on every SDK error class is "Error code: N - {server body}"
+            # or "Request timed out."; verified not to carry the API key or a
+            # traceback. Routers still must not echo this to a client.
+            raise LLMError(f"embedding request failed: {exc}") from exc
+
+        log_event(
+            logger,
+            "embeddings_created",
+            model=self.embedding_model,
+            count=len(texts),
+            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+        )
+        return vectors
+
+    async def chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        temperature: float = 0.2,
+        tools: list[dict] | None = None,
+        **kwargs,
+    ) -> ChatResult:
+        started = time.perf_counter()
+        request: dict = {
+            "model": self.answer_model,
+            "messages": [m.to_openai() for m in messages],
+            "temperature": temperature,
+            **kwargs,
+        }
+        if tools:
+            request["tools"] = tools
+
+        try:
+            response = await self.client.chat.completions.create(**request)
+        except OpenAIError as exc:
+            raise LLMError(f"chat completion failed: {exc}") from exc
+
+        choice = response.choices[0]
+        raw_tool_calls = getattr(choice.message, "tool_calls", None) or []
+        tool_calls = [
+            ToolCall(id=tc.id, name=tc.function.name, arguments=tc.function.arguments)
+            for tc in raw_tool_calls
+        ] or None
+
+        log_event(
+            logger,
+            "chat_completion",
+            model=response.model,
+            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+        )
+        return ChatResult(
+            content=choice.message.content or "",
+            usage=response.usage.model_dump() if response.usage else {},
+            model=response.model,
+            tool_calls=tool_calls,
+        )
+
+    async def aclose(self) -> None:
+        await self.client.close()
