@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 from pydantic_settings import SettingsConfigDict
 
-from app.core.config import REPO_ROOT, Settings
+from app.core.config import EMBEDDING_INPUT_TOKEN_LIMIT, REPO_ROOT, Settings
 
 
 def test_env_file_is_anchored_to_the_repo_root():
@@ -83,6 +83,14 @@ def test_self_registration_defaults_off_in_production():
 def test_invalid_chunk_overlap_is_rejected():
     with pytest.raises(ValueError, match="CHUNK_OVERLAP"):
         Settings(chunk_size=100, chunk_overlap=100)
+
+
+@pytest.mark.parametrize("value", [0, EMBEDDING_INPUT_TOKEN_LIMIT])
+def test_out_of_range_max_chunk_tokens_is_rejected(value):
+    # 0 reaches split_to_token_limit as a crash; a value near the embedding
+    # ceiling leaves no headroom for the newline accounting's rare 2-token join.
+    with pytest.raises(ValueError, match="MAX_CHUNK_TOKENS"):
+        Settings(max_chunk_tokens=value)
 
 
 def test_invalid_environment_value_is_rejected(monkeypatch):

@@ -4590,6 +4590,23 @@ from app.rag.chunking.structure import (
 
 MAX_TOKENS = 60
 
+# The pre-fix hard split rode a fixed stride over the token stream, so whether it
+# landed mid-character depended on the limit. MAX_TOKENS = 60 happens to be one of
+# the ~13% of values that survive intact for these fixtures, which is exactly how
+# the corruption shipped unnoticed. 59 corrupts both Hangul and emoji.
+CORRUPTING_LIMIT = 59
+
+
+def _separator_less_document(block_count: int = 200) -> list[Block]:
+    """Blocks with no terminal punctuation.
+
+    The under-count the size pass exists to prevent only shows when the joining
+    separator is a token the sum omits. A block ending in "." lets cl100k absorb
+    the following newline into one token, so period-terminated fixtures hide the
+    bug - which is how it survived revision 1.
+    """
+    return [Block(text="rotate crops", block_type="paragraph") for _ in range(block_count)]
+
 
 def _heading_less_document(block_count: int = 40) -> list[Block]:
     """The case the old chunker collapsed into a single chunk: a PDF with no
@@ -4637,28 +4654,33 @@ def test_split_to_token_limit_hard_splits_a_single_oversized_sentence():
 def test_split_to_token_limit_respects_the_limit_on_boundary_less_korean():
     """cl100k tokenises Hangul below the character level, so a naive stride over
     the token stream lands mid-character and decodes to U+FFFD on both sides.
-    Measured against the pre-fix splitter, that corrupted this text at 58 of 64
+    Measured against the pre-fix splitter, that corrupted this text at 378 of 512
     max_tokens values - silent data loss in the language this system targets."""
     text = "가나다라마바사아자차카타파하" * 40
-    pieces = split_to_token_limit(text, MAX_TOKENS)
+    pieces = split_to_token_limit(text, CORRUPTING_LIMIT)
 
     assert len(pieces) > 1
-    assert all(count_tokens(p) <= MAX_TOKENS for p in pieces)
+    assert all(count_tokens(p) <= CORRUPTING_LIMIT for p in pieces)
     assert "".join(pieces) == text
     assert not any("�" in p for p in pieces)
 
 
 def test_split_to_token_limit_bounds_oversized_whitespace():
     """split_sentences drops whitespace-only fragments, so a whitespace-heavy
-    block leaves nothing to rejoin; the fallback must still be size-bounded."""
-    pieces = split_to_token_limit(" " * 4000, MAX_TOKENS)
+    block leaves nothing to rejoin; the fallback must still be size-bounded.
+
+    8000 spaces, not 4000: 4000 encodes to 32 tokens, which sits under the limit
+    and returns at the size check without ever reaching the fallback."""
+    pieces = split_to_token_limit(" " * 8000, MAX_TOKENS)
+    assert count_tokens(" " * 8000) > MAX_TOKENS
     assert all(count_tokens(p) <= MAX_TOKENS for p in pieces)
 
 
 def test_split_to_token_limit_rejects_a_non_positive_limit():
     # max_chunk_tokens is an operator-facing setting, so 0 is reachable from
-    # configuration; fail with a named cause, not `range() arg 3 must not be zero`.
-    with pytest.raises(ValueError):
+    # configuration. `match` matters: the pre-fix code also raised ValueError, but
+    # as `range() arg 3 must not be zero` from deep inside a slice.
+    with pytest.raises(ValueError, match="max_tokens"):
         split_to_token_limit("some text", 0)
 
 
@@ -4675,16 +4697,26 @@ def test_size_pass_produces_many_chunks_for_a_heading_less_document():
 def test_size_pass_token_count_is_an_upper_bound_on_a_re_encode():
     """The running total is what enforces the limit, so it must never sit below
     an exact re-encode of the content it describes. Summing standalone piece
-    counts does sit below it - the joining separator is a token the sum omits."""
-    for candidate in build_size_bounded_candidates(_heading_less_document(), MAX_TOKENS):
+    counts does sit below it - the joining separator is a token the sum omits.
+
+    Uses separator-less blocks: against the pre-fix sum this document produced a
+    candidate whose content re-encodes to 89 tokens under a 60-token limit."""
+    for candidate in build_size_bounded_candidates(_separator_less_document(), MAX_TOKENS):
         assert count_tokens(candidate.content) <= candidate.token_count <= MAX_TOKENS
 
 
 def test_size_pass_never_exceeds_the_limit_even_for_one_huge_block():
-    blocks = [Block(text="Sentence about blight. " * 400, block_type="paragraph")]
-    candidates = build_size_bounded_candidates(blocks, MAX_TOKENS)
+    # Emoji, not ASCII: cl100k splits one emoji into several tokens, so a stride
+    # cut lands mid-character. The pre-fix splitter corrupted this at 13 of the 20
+    # limits in 50..69, and dropped the round trip with it.
+    text = "🍅🌱🚜" * 200
+    blocks = [Block(text=text, block_type="paragraph")]
+    candidates = build_size_bounded_candidates(blocks, CORRUPTING_LIMIT)
+
     assert len(candidates) > 1
-    assert all(count_tokens(c.content) <= MAX_TOKENS for c in candidates)
+    assert all(count_tokens(c.content) <= CORRUPTING_LIMIT for c in candidates)
+    assert "".join(c.content for c in candidates) == text
+    assert not any("�" in c.content for c in candidates)
 
 
 def test_size_pass_starts_a_new_candidate_at_every_heading():
@@ -4711,6 +4743,17 @@ def test_size_pass_preserves_page_and_section_for_citations():
 
 def test_size_pass_on_an_empty_document():
     assert build_size_bounded_candidates([], MAX_TOKENS) == []
+
+
+def test_size_pass_drops_empty_blocks():
+    """A zero-length candidate costs an embedding call and retrieves nothing, and
+    an empty leading block would prefix the next one with a stray newline."""
+    blocks = [
+        Block(text="", block_type="paragraph"),
+        Block(text="   ", block_type="paragraph"),
+        Block(text="Real text.", block_type="paragraph"),
+    ]
+    assert [c.content for c in build_size_bounded_candidates(blocks, MAX_TOKENS)] == ["Real text."]
 ```
 
 - [ ] **Step 2: Run tests, expect FAIL** (`app.rag.chunking` does not exist)
@@ -4760,11 +4803,18 @@ from app.rag.chunking.base import ChunkCandidate
 # attached to the sentence it belongs to.
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?。！？])\s+")
 
-# Cost of the newline that joins two pieces inside one candidate. cl100k's
-# pre-tokeniser always starts a new pre-token at a newline, so
-# count_tokens("\n" + piece) == 1 + count_tokens(piece) exactly - verified over
-# 300k random mixed-script strings, zero mismatches. Counting it is what keeps
-# the running total an upper bound rather than an under-estimate.
+# Cost of the newline that joins two pieces inside one candidate. Counting it is
+# what keeps the running total an upper bound rather than an under-estimate.
+#
+# This is a measured bound, not a proof. cl100k's pre-tokeniser rule
+# ` ?[^\s\p{L}\p{N}]+[\r\n]*` lets a trailing punctuation run absorb the newline,
+# so count_tokens(a + "\n" + b) can exceed count_tokens(a) + 1 + count_tokens(b)
+# by 1 per join. Measured: 3 of 65,640 realistic punctuation tails trigger it
+# (";]/", "_#{", '"=>'), and 600 punctuation-heavy random documents produced zero
+# violations - but a synthetic document alternating "x;]/" and Korean compounds it
+# to a 571-token candidate under a 500-token limit. Harmless against the 8191
+# embedding ceiling at the default; the max_chunk_tokens validator in Settings is
+# what keeps the configured limit far enough below it for that to stay true.
 _NEWLINE_TOKENS = count_tokens("\n")
 
 _REPLACEMENT = "�"
@@ -4855,12 +4905,17 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
     whole accumulated string on every block append is O(n^2) tiktoken work over a
     document; omitting the separator instead makes the total an under-count, and
     an under-count is how a chunk gets past the limit it is supposed to enforce.
+    See _NEWLINE_TOKENS for the residual case where the separator costs 2, not 1.
     """
     candidates: list[ChunkCandidate] = []
     current: ChunkCandidate | None = None
 
     for block in blocks:
         for piece in split_to_token_limit(block.text, max_chunk_tokens):
+            # An empty or whitespace-only block would otherwise emit a zero-length
+            # candidate, which costs an embedding call and retrieves nothing.
+            if not piece.strip():
+                continue
             piece_tokens = count_tokens(piece)
             starts_new = (
                 current is None
@@ -4897,15 +4952,58 @@ from app.rag.chunking.structure import build_size_bounded_candidates
 __all__ = ["ChunkCandidate", "ChunkingStrategy", "EmbedFn", "build_size_bounded_candidates"]
 ```
 
-- [ ] **Step 6: Run tests, expect PASS**
+- [ ] **Step 6: Modify `backend/app/core/config.py`** — bound `max_chunk_tokens`
 
-Run: `pytest tests/test_chunking.py -v`
-Expected: all 14 tests PASS
+`split_to_token_limit` now rejects a non-positive limit with a named cause, but
+`MAX_CHUNK_TOKENS` is operator-facing and had no validator at all. The upper bound
+matters because the newline accounting is a measured bound rather than a proof
+(see `_NEWLINE_TOKENS`): a rare punctuation tail makes a join cost 2 tokens, not 1,
+so a candidate can run a few percent over. Capping at half the embedding ceiling
+keeps that overrun harmless instead of turning it into a rejected embedding call.
 
-- [ ] **Step 7: Commit**
+Add beside `DEFAULT_DB_PASSWORDS`:
+
+```python
+# Per-input token ceiling for OpenAI's text-embedding-3-* models.
+EMBEDDING_INPUT_TOKEN_LIMIT = 8191
+```
+
+and append to the model validator, after the `CHUNK_OVERLAP` check:
+
+```python
+        # The size pass treats a joining newline as one token; a rare punctuation
+        # tail makes it two, so a candidate can run a few percent over. Capping at
+        # half the embedding ceiling keeps that overrun harmless instead of
+        # turning it into a rejected embedding call.
+        if not 1 <= self.max_chunk_tokens <= EMBEDDING_INPUT_TOKEN_LIMIT // 2:
+            raise ValueError(
+                f"MAX_CHUNK_TOKENS must satisfy 1 <= value <= {EMBEDDING_INPUT_TOKEN_LIMIT // 2}"
+            )
+```
+
+- [ ] **Step 7: Modify `backend/tests/test_settings.py`** — cover the new validator
+
+Import `EMBEDDING_INPUT_TOKEN_LIMIT` alongside `REPO_ROOT` and `Settings`, then
+append beside `test_invalid_chunk_overlap_is_rejected`:
+
+```python
+@pytest.mark.parametrize("value", [0, EMBEDDING_INPUT_TOKEN_LIMIT])
+def test_out_of_range_max_chunk_tokens_is_rejected(value):
+    # 0 reaches split_to_token_limit as a crash; a value near the embedding
+    # ceiling leaves no headroom for the newline accounting's rare 2-token join.
+    with pytest.raises(ValueError, match="MAX_CHUNK_TOKENS"):
+        Settings(max_chunk_tokens=value)
+```
+
+- [ ] **Step 8: Run tests, expect PASS**
+
+Run: `pytest tests/test_chunking.py tests/test_settings.py -v`
+Expected: all 28 tests PASS (16 chunking + 12 settings)
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add backend/app/rag/chunking backend/tests/test_chunking.py
+git add backend/app/rag/chunking backend/tests/test_chunking.py backend/app/core/config.py backend/tests/test_settings.py
 git commit -m "feat: token-aware sentence splitting and size-bounded chunk candidates"
 ```
 

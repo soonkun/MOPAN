@@ -8,11 +8,18 @@ from app.rag.chunking.base import ChunkCandidate
 # attached to the sentence it belongs to.
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?。！？])\s+")
 
-# Cost of the newline that joins two pieces inside one candidate. cl100k's
-# pre-tokeniser always starts a new pre-token at a newline, so
-# count_tokens("\n" + piece) == 1 + count_tokens(piece) exactly - verified over
-# 300k random mixed-script strings, zero mismatches. Counting it is what keeps
-# the running total an upper bound rather than an under-estimate.
+# Cost of the newline that joins two pieces inside one candidate. Counting it is
+# what keeps the running total an upper bound rather than an under-estimate.
+#
+# This is a measured bound, not a proof. cl100k's pre-tokeniser rule
+# ` ?[^\s\p{L}\p{N}]+[\r\n]*` lets a trailing punctuation run absorb the newline,
+# so count_tokens(a + "\n" + b) can exceed count_tokens(a) + 1 + count_tokens(b)
+# by 1 per join. Measured: 3 of 65,640 realistic punctuation tails trigger it
+# (";]/", "_#{", '"=>'), and 600 punctuation-heavy random documents produced zero
+# violations - but a synthetic document alternating "x;]/" and Korean compounds it
+# to a 571-token candidate under a 500-token limit. Harmless against the 8191
+# embedding ceiling at the default; the max_chunk_tokens validator in Settings is
+# what keeps the configured limit far enough below it for that to stay true.
 _NEWLINE_TOKENS = count_tokens("\n")
 
 _REPLACEMENT = "�"
@@ -103,12 +110,17 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
     whole accumulated string on every block append is O(n^2) tiktoken work over a
     document; omitting the separator instead makes the total an under-count, and
     an under-count is how a chunk gets past the limit it is supposed to enforce.
+    See _NEWLINE_TOKENS for the residual case where the separator costs 2, not 1.
     """
     candidates: list[ChunkCandidate] = []
     current: ChunkCandidate | None = None
 
     for block in blocks:
         for piece in split_to_token_limit(block.text, max_chunk_tokens):
+            # An empty or whitespace-only block would otherwise emit a zero-length
+            # candidate, which costs an embedding call and retrieves nothing.
+            if not piece.strip():
+                continue
             piece_tokens = count_tokens(piece)
             starts_new = (
                 current is None

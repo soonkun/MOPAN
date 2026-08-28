@@ -11,6 +11,9 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 DEFAULT_DB_PASSWORDS = ("mopan", "postgres", "password")
 
+# Per-input token ceiling for OpenAI's text-embedding-3-* models.
+EMBEDDING_INPUT_TOKEN_LIMIT = 8191
+
 
 class Settings(BaseSettings):
     # env_file is anchored to the repo root. Resolving it against the process CWD
@@ -78,6 +81,14 @@ class Settings(BaseSettings):
                 raise ValueError("refusing to start in production with a default database password")
         if not 0 <= self.chunk_overlap < self.chunk_size:
             raise ValueError("CHUNK_OVERLAP must satisfy 0 <= overlap < CHUNK_SIZE")
+        # The size pass treats a joining newline as one token; a rare punctuation
+        # tail makes it two, so a candidate can run a few percent over. Capping at
+        # half the embedding ceiling keeps that overrun harmless instead of
+        # turning it into a rejected embedding call.
+        if not 1 <= self.max_chunk_tokens <= EMBEDDING_INPUT_TOKEN_LIMIT // 2:
+            raise ValueError(
+                f"MAX_CHUNK_TOKENS must satisfy 1 <= value <= {EMBEDDING_INPUT_TOKEN_LIMIT // 2}"
+            )
         return self
 
 
