@@ -1,0 +1,121 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mopan}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mopan}
+      POSTGRES_DB: ${POSTGRES_DB:-mopan}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mopan}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-mopan}"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-mopan}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: brings the schema up to date before backend/worker start.
+  # This is why the quick start has no manual migration step.
+  migrate:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["alembic", "upgrade", "head"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mopan}:${POSTGRES_PASSWORD:-mopan}@postgres:5432/${POSTGRES_DB:-mopan}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-mopan}@redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    # These win over env_file. .env keeps localhost URLs for host-side tooling.
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mopan}:${POSTGRES_PASSWORD:-mopan}@postgres:5432/${POSTGRES_DB:-mopan}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-mopan}@redis:6379/0
+      UPLOAD_DIR: /app/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    volumes:
+      - uploaddata:/app/data/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mopan}:${POSTGRES_PASSWORD:-mopan}@postgres:5432/${POSTGRES_DB:-mopan}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-mopan}@redis:6379/0
+      UPLOAD_DIR: /app/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - uploaddata:/app/data/uploads
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+    # No env_file here on purpose: the frontend container has no business holding
+    # OPENAI_API_KEY, POSTGRES_PASSWORD, or DATABASE_URL.
+    environment:
+      API_INTERNAL_URL: http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:
+  redisdata:
+  uploaddata:

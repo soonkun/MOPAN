@@ -1,2 +1,13 @@
 .claude/
 .env
+.env.local
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+node_modules/
+.next/
+data/uploads/*
+!data/uploads/.gitkeep
