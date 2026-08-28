@@ -1,6 +1,7 @@
 .claude/
 .env
-.env.local
+.env.*
+!.env.example
 __pycache__/
 *.py[cod]
 .pytest_cache/

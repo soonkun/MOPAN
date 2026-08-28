@@ -303,7 +303,8 @@ ignore = ["B008"]  # FastAPI Depends() in defaults is the framework's idiom
 ```gitignore
 .claude/
 .env
-.env.local
+.env.*
+!.env.example
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -385,6 +386,14 @@ EMBEDDING_MODEL=text-embedding-3-small
 # document. The app refuses to start if this disagrees with the chunks.embedding
 # column width.
 EMBEDDING_DIM=1536
+# Embedding requests are split into batches; OpenAI caps array length and total
+# tokens per request, so a long document must not go out in one call.
+EMBEDDING_BATCH_SIZE=128
+EMBEDDING_BATCH_CHARS=200000
+# Without a timeout a hung completion holds a worker slot for the SDK default of
+# ten minutes.
+LLM_TIMEOUT_SECONDS=30.0
+LLM_MAX_RETRIES=3
 
 RRF_K=60
 RETRIEVAL_TOP_N=6
@@ -603,7 +612,7 @@ git commit -m "chore: scaffold repo, tooling config, and docker-compose"
 **Files:**
 - Create: `backend/app/core/__init__.py`, `config.py`, `logging.py`, `middleware.py`, `db.py`, `redis.py`, `tokens.py`
 - Create: `backend/app/main.py`
-- Test: `backend/tests/conftest.py`, `backend/tests/test_settings.py`, `backend/tests/test_health.py`
+- Test: `backend/tests/conftest.py`, `backend/tests/test_settings.py`, `backend/tests/test_health.py`, `backend/tests/test_db.py`
 
 **Interfaces:**
 - Produces: `Settings` + `get_settings() -> Settings` exposing every tunable in `.env.example`, with a repo-root-anchored `env_file`, `Path`-typed absolutized `upload_dir`, and production validators.
@@ -878,7 +887,7 @@ def decode_tokens(token_ids: list[int]) -> str:
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 from sqlalchemy import text
@@ -938,6 +947,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health/ready")
     async def ready(
+        request: Request,
         db: AsyncSession = Depends(get_db_session),
         redis: Redis = Depends(get_redis),
     ) -> dict[str, str]:
@@ -949,7 +959,9 @@ def create_app() -> FastAPI:
             logger.exception("readiness check failed")
             raise HTTPException(status_code=503, detail="dependencies unavailable") from exc
 
-        configured = get_settings().embedding_dim
+        # app.state, not get_settings(): the lifespan owns the live Settings and
+        # tests swap it there. Reading the module-global ignores both.
+        configured = request.app.state.settings.embedding_dim
         if deployed_dim is not None and deployed_dim != configured:
             raise HTTPException(
                 status_code=503,
@@ -1024,11 +1036,18 @@ async def _create_database_if_missing() -> None:
         await conn.close()
 
 
-@pytest.fixture(scope="session", autouse=True)
-def migrated_database() -> None:
-    """Create mopan_test if needed and bring it to head. Sync fixture on purpose:
-    it owns its own short-lived loop and leaves no connection behind."""
+@pytest.fixture(scope="session")
+def test_database_url() -> str:
+    """Ensure mopan_test exists, without requiring a schema. Sync fixture on
+    purpose: it owns its own short-lived loop and leaves no connection behind."""
     asyncio.run(_create_database_if_missing())
+    return TEST_DATABASE_URL
+
+
+@pytest.fixture(scope="session")
+def migrated_database(test_database_url) -> None:
+    """Bring mopan_test to head. Separate from test_database_url so a test that
+    only needs a connection does not drag in alembic."""
     config = Config(str(BACKEND_DIR / "alembic.ini"))
     config.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
     config.set_main_option("sqlalchemy.url", TEST_DATABASE_URL)
@@ -1094,9 +1113,19 @@ async def client(app):
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def clean_db(test_engine):
+async def clean_db(request):
+    """Truncate only after tests that actually touched the database.
+
+    Requesting test_engine eagerly would drag every pure unit test through a
+    CREATE DATABASE probe, an alembic upgrade and a six-table TRUNCATE, and would
+    make them fail on any machine without Postgres. fixturenames is the resolved
+    closure, so an indirect dependency (client -> app -> test_engine) still counts.
+    """
     yield
-    async with test_engine.begin() as conn:
+    if "test_engine" not in request.fixturenames:
+        return
+    engine = request.getfixturevalue("test_engine")
+    async with engine.begin() as conn:
         await conn.execute(
             text("TRUNCATE TABLE " + ", ".join(TABLES_IN_DELETE_ORDER) + " CASCADE")
         )
@@ -1108,8 +1137,34 @@ async def clean_db(test_engine):
 from pathlib import Path
 
 import pytest
+from pydantic_settings import SettingsConfigDict
 
 from app.core.config import REPO_ROOT, Settings
+
+
+def test_env_file_is_anchored_to_the_repo_root():
+    # The previous implementation used a bare ".env", resolved against the process
+    # CWD. Every documented command runs from backend/, where no .env exists, so it
+    # silently loaded nothing and booted on defaults with an empty API key.
+    assert Settings.model_config["env_file"] == (
+        REPO_ROOT / ".env",
+        REPO_ROOT / "backend" / ".env",
+    )
+
+
+def test_values_are_read_from_the_env_file(tmp_path, monkeypatch):
+    # Guards the same defect from the other side: the asserted value is neither a
+    # code default nor an environment variable, so it can only come from the file.
+    monkeypatch.delenv("ANSWER_MODEL", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("ANSWER_MODEL=model-from-file\n", encoding="utf-8")
+
+    class FileSettings(Settings):
+        model_config = SettingsConfigDict(
+            env_file=env_file, env_file_encoding="utf-8", extra="ignore"
+        )
+
+    assert FileSettings().answer_model == "model-from-file"
 
 
 def test_defaults_cover_binding_requirements():
@@ -1170,6 +1225,12 @@ def test_invalid_chunk_overlap_is_rejected():
 - [ ] **Step 10: Write `backend/tests/test_health.py`**
 
 ```python
+import pytest
+from sqlalchemy import text
+
+from app.main import EMBEDDING_DIM_SQL
+
+
 async def test_health_ok(client):
     response = await client.get("/api/health")
     assert response.status_code == 200
@@ -1180,20 +1241,78 @@ async def test_ready_reports_ready_when_dependencies_work(client):
     response = await client.get("/api/health/ready")
     assert response.status_code == 200
     assert response.json() == {"status": "ready"}
+
+
+async def test_ready_rejects_embedding_dim_mismatch(app, client, db):
+    """Only reachable because ready() reads app.state.settings; with the module
+    global it ignored the fixture's Settings and this branch was untestable."""
+    deployed = await db.scalar(text(EMBEDDING_DIM_SQL))
+    if deployed is None:
+        pytest.skip("chunks table does not exist until Task 3")
+
+    app.state.settings = app.state.settings.model_copy(
+        update={"embedding_dim": deployed + 1}
+    )
+    response = await client.get("/api/health/ready")
+    assert response.status_code == 503
+    assert "does not match" in response.json()["detail"]
 ```
 
-- [ ] **Step 11: Run tests, expect the settings tests to PASS and the health tests to FAIL**
+- [ ] **Step 11: Write `backend/tests/test_db.py`**
 
-Run (from `backend/`): `pip install -r requirements-dev.txt && pytest tests/test_settings.py -v`
-Expected: all 8 settings tests PASS.
+This is the regression guard for the module-global engine. Deliberately uses the
+real pooled engine — `conftest`'s `NullPool` `test_engine` sidesteps the property
+under test. It depends on `test_database_url`, not `migrated_database`, so a bare
+`SELECT 1` does not drag in alembic.
 
-Run: `pytest tests/test_health.py -v`
-Expected: FAIL — `conftest.py` runs `alembic upgrade head`, and Task 3 has not written the migration yet. This is the expected ordering; re-run at Task 3 Step 12.
+```python
+import asyncio
 
-- [ ] **Step 12: Commit**
+import pytest
+from sqlalchemy import text
+
+from app.core.config import get_settings
+from app.core.db import make_engine
+
+
+@pytest.mark.integration
+def test_engine_survives_sequential_event_loops(test_database_url):
+    """The previous implementation created the engine at module import. Pooled
+    asyncpg connections stayed bound to the loop that opened them, so the second
+    of three sequential asyncio.run() calls failed non-deterministically with
+    'Event loop is closed' then "'NoneType' object has no attribute 'send'".
+
+    make_engine is per-lifespan, so each loop builds and disposes its own pool.
+    Deliberately uses the real pooled engine -- conftest's NullPool test_engine
+    sidesteps the property under test.
+    """
+    settings = get_settings().model_copy(update={"database_url": test_database_url})
+
+    async def roundtrip() -> int:
+        engine = make_engine(settings)
+        try:
+            async with engine.connect() as conn:
+                return await conn.scalar(text("SELECT 1"))
+        finally:
+            await engine.dispose()
+
+    assert [asyncio.run(roundtrip()) for _ in range(3)] == [1, 1, 1]
+```
+
+- [ ] **Step 12: Run tests, expect everything but the health tests to PASS**
+
+Run (from `backend/`): `pip install -r requirements-dev.txt && pytest tests/ -v`
+Expected: 11 PASS (10 settings + 1 engine loop), 3 ERRORS in `test_health.py` only.
+
+The health tests reach the database through `client -> app -> test_engine -> migrated_database`, and Task 3 has not written the migration yet. This is the expected ordering; re-run at Task 3 Step 14. Every other test must be green — `clean_db` requests the engine lazily, so pure unit tests never touch Postgres. If `test_settings.py` is not green here, the fixture wiring is wrong, not the ordering.
+
+Run: `ruff check .`
+Expected: `All checks passed!`
+
+- [ ] **Step 13: Commit**
 
 ```bash
-git add backend/app/core backend/app/main.py backend/tests/conftest.py backend/tests/test_settings.py backend/tests/test_health.py
+git add backend/app/core backend/app/main.py backend/tests/conftest.py backend/tests/test_settings.py backend/tests/test_health.py backend/tests/test_db.py
 git commit -m "feat: settings, structured logging, lifespan-owned engine/redis, app factory"
 ```
 

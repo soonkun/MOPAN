@@ -53,11 +53,18 @@ async def _create_database_if_missing() -> None:
         await conn.close()
 
 
-@pytest.fixture(scope="session", autouse=True)
-def migrated_database() -> None:
-    """Create mopan_test if needed and bring it to head. Sync fixture on purpose:
-    it owns its own short-lived loop and leaves no connection behind."""
+@pytest.fixture(scope="session")
+def test_database_url() -> str:
+    """Ensure mopan_test exists, without requiring a schema. Sync fixture on
+    purpose: it owns its own short-lived loop and leaves no connection behind."""
     asyncio.run(_create_database_if_missing())
+    return TEST_DATABASE_URL
+
+
+@pytest.fixture(scope="session")
+def migrated_database(test_database_url) -> None:
+    """Bring mopan_test to head. Separate from test_database_url so a test that
+    only needs a connection does not drag in alembic."""
     config = Config(str(BACKEND_DIR / "alembic.ini"))
     config.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
     config.set_main_option("sqlalchemy.url", TEST_DATABASE_URL)
@@ -123,9 +130,19 @@ async def client(app):
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def clean_db(test_engine):
+async def clean_db(request):
+    """Truncate only after tests that actually touched the database.
+
+    Requesting test_engine eagerly would drag every pure unit test through a
+    CREATE DATABASE probe, an alembic upgrade and a six-table TRUNCATE, and would
+    make them fail on any machine without Postgres. fixturenames is the resolved
+    closure, so an indirect dependency (client -> app -> test_engine) still counts.
+    """
     yield
-    async with test_engine.begin() as conn:
+    if "test_engine" not in request.fixturenames:
+        return
+    engine = request.getfixturevalue("test_engine")
+    async with engine.begin() as conn:
         await conn.execute(
             text("TRUNCATE TABLE " + ", ".join(TABLES_IN_DELETE_ORDER) + " CASCADE")
         )

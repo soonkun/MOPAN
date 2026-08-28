@@ -1,8 +1,34 @@
 from pathlib import Path
 
 import pytest
+from pydantic_settings import SettingsConfigDict
 
 from app.core.config import REPO_ROOT, Settings
+
+
+def test_env_file_is_anchored_to_the_repo_root():
+    # The previous implementation used a bare ".env", resolved against the process
+    # CWD. Every documented command runs from backend/, where no .env exists, so it
+    # silently loaded nothing and booted on defaults with an empty API key.
+    assert Settings.model_config["env_file"] == (
+        REPO_ROOT / ".env",
+        REPO_ROOT / "backend" / ".env",
+    )
+
+
+def test_values_are_read_from_the_env_file(tmp_path, monkeypatch):
+    # Guards the same defect from the other side: the asserted value is neither a
+    # code default nor an environment variable, so it can only come from the file.
+    monkeypatch.delenv("ANSWER_MODEL", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("ANSWER_MODEL=model-from-file\n", encoding="utf-8")
+
+    class FileSettings(Settings):
+        model_config = SettingsConfigDict(
+            env_file=env_file, env_file_encoding="utf-8", extra="ignore"
+        )
+
+    assert FileSettings().answer_model == "model-from-file"
 
 
 def test_defaults_cover_binding_requirements():

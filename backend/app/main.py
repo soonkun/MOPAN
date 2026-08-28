@@ -1,7 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 from sqlalchemy import text
@@ -61,6 +61,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health/ready")
     async def ready(
+        request: Request,
         db: AsyncSession = Depends(get_db_session),
         redis: Redis = Depends(get_redis),
     ) -> dict[str, str]:
@@ -72,7 +73,9 @@ def create_app() -> FastAPI:
             logger.exception("readiness check failed")
             raise HTTPException(status_code=503, detail="dependencies unavailable") from exc
 
-        configured = get_settings().embedding_dim
+        # app.state, not get_settings(): the lifespan owns the live Settings and
+        # tests swap it there. Reading the module-global ignores both.
+        configured = request.app.state.settings.embedding_dim
         if deployed_dim is not None and deployed_dim != configured:
             raise HTTPException(
                 status_code=503,
