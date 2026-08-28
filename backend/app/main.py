@@ -2,7 +2,10 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,6 +58,13 @@ def create_app() -> FastAPI:
         allow_headers=["content-type", "authorization"],
     )
 
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # FastAPI's default handler echoes the rejected value back under "input".
+        # On /api/auth/register that value is the plaintext password. Drop it.
+        errors = [{k: v for k, v in error.items() if k != "input"} for error in exc.errors()]
+        return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
+
     @app.get("/api/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -85,6 +95,10 @@ def create_app() -> FastAPI:
                 ),
             )
         return {"status": "ready"}
+
+    from app.auth.router import router as auth_router
+
+    app.include_router(auth_router)
 
     return app
 

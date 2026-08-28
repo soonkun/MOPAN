@@ -1,8 +1,10 @@
 import fakeredis.aioredis
 import pytest
 
+from app.core.config import get_settings
 from app.core.security import (
     MAX_PASSWORD_BYTES,
+    SESSION_KEY_PREFIX,
     create_session,
     delete_session,
     dummy_verify,
@@ -48,5 +50,6 @@ async def test_session_lifecycle():
 async def test_session_has_a_ttl():
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     session_id = await create_session(redis, "user-123")
-    assert await redis.ttl(f"session:{session_id}") > 0
+    # Exact TTL, not just > 0: a regression to ex=1 would still be "> 0".
+    assert await redis.ttl(f"{SESSION_KEY_PREFIX}{session_id}") == get_settings().session_ttl_seconds
     await redis.aclose()

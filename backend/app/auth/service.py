@@ -1,0 +1,64 @@
+import logging
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import Settings
+from app.core.logging import log_event
+from app.core.security import dummy_verify, hash_password, verify_password
+from app.models.collection import Collection
+from app.models.user import User
+
+logger = logging.getLogger("mopan.auth")
+
+DEFAULT_COLLECTION_NAME = "일반"
+
+
+class AuthError(Exception):
+    """Raised for any failed registration or authentication. The message is
+    intentionally generic - specific reasons leak account existence."""
+
+
+async def register_user(db: AsyncSession, settings: Settings, email: str, password: str) -> User:
+    email = email.strip().lower()
+    user_count = await db.scalar(select(func.count()).select_from(User)) or 0
+
+    # The first account bootstraps the system: it becomes admin and gets a default
+    # collection, so `docker compose up` -> open browser -> register actually works
+    # with no seeding step. Subsequent signups follow ALLOW_SELF_REGISTRATION.
+    is_first_user = user_count == 0
+    if not is_first_user and not settings.allow_self_registration:
+        raise AuthError("registration is disabled")
+
+    existing = await db.scalar(select(User).where(User.email == email))
+    if existing is not None:
+        # Same generic message as any other failure: no account enumeration.
+        log_event(logger, "register_duplicate_email")
+        raise AuthError("registration could not be completed")
+
+    user = User(
+        email=email,
+        password_hash=hash_password(password),
+        role="admin" if is_first_user else "user",
+    )
+    db.add(user)
+    await db.flush()
+
+    if is_first_user:
+        db.add(Collection(name=DEFAULT_COLLECTION_NAME, created_by=user.id))
+
+    await db.commit()
+    await db.refresh(user)
+    log_event(logger, "user_registered", user_id=str(user.id), role=user.role)
+    return user
+
+
+async def authenticate_user(db: AsyncSession, email: str, password: str) -> User:
+    email = email.strip().lower()
+    user = await db.scalar(select(User).where(User.email == email))
+    if user is None:
+        dummy_verify()  # equalise response time with the "wrong password" path
+        raise AuthError("invalid credentials")
+    if not verify_password(password, user.password_hash):
+        raise AuthError("invalid credentials")
+    return user

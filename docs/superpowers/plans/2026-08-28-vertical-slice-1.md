@@ -2330,12 +2330,22 @@ from app.core.security import MAX_PASSWORD_BYTES, MIN_PASSWORD_LENGTH
 
 class RegisterRequest(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=MIN_PASSWORD_LENGTH, max_length=MAX_PASSWORD_BYTES)
+    password: str = Field(min_length=MIN_PASSWORD_LENGTH)
 
     @field_validator("email")
     @classmethod
     def _normalise(cls, value: str) -> str:
         return value.strip().lower()
+
+    @field_validator("password")
+    @classmethod
+    def _within_bcrypt_limit(cls, value: str) -> str:
+        # NOT Field(max_length=...): that counts CHARACTERS, and bcrypt's limit is
+        # BYTES. "가" * 72 is 72 characters but 216 bytes - it would pass schema
+        # validation and then raise out of hash_password as a 500 instead of a 422.
+        if len(value.encode("utf-8")) > MAX_PASSWORD_BYTES:
+            raise ValueError(f"password must be at most {MAX_PASSWORD_BYTES} bytes")
+        return value
 
 
 class LoginRequest(BaseModel):
@@ -2515,7 +2525,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import SESSION_COOKIE_NAME, get_current_user
 from app.auth.service import AuthError, authenticate_user, register_user
-from app.core.config import Settings, get_settings
+from app.core.config import Settings, get_app_settings
 from app.core.db import get_db_session
 from app.core.redis import get_redis
 from app.core.security import create_session, delete_session
@@ -2529,7 +2539,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 async def register(
     payload: RegisterRequest,
     db: AsyncSession = Depends(get_db_session),
-    settings: Settings = Depends(get_settings),
+    settings: Settings = Depends(get_app_settings),
 ):
     try:
         return await register_user(db, settings, payload.email, payload.password)
@@ -2543,7 +2553,7 @@ async def login(
     response: Response,
     db: AsyncSession = Depends(get_db_session),
     redis: Redis = Depends(get_redis),
-    settings: Settings = Depends(get_settings),
+    settings: Settings = Depends(get_app_settings),
 ):
     try:
         user = await authenticate_user(db, payload.email, payload.password)
@@ -2585,7 +2595,29 @@ async def me(user: User = Depends(get_current_user)):
     return user
 ```
 
-- [ ] **Step 6: Modify `backend/app/main.py`** — mount the router inside `create_app()`, immediately before `return app`
+- [ ] **Step 5b: Modify `backend/app/core/config.py`** — add a request-scoped settings dependency
+
+```python
+def get_app_settings(request: Request) -> Settings:
+    """Request-path dependency. get_settings() is lru_cached, so a route that
+    depends on it ignores the live Settings the lifespan put on app.state (and
+    the one tests swap in there). Same rule as get_db_session/get_redis."""
+    return request.app.state.settings
+```
+
+(`from fastapi import Request` at the top of the module.)
+
+- [ ] **Step 6: Modify `backend/app/main.py`** — inside `create_app()`: a validation-error
+handler that does not echo the rejected value, then mount the router immediately before `return app`
+
+```python
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # FastAPI's default handler echoes the rejected value back under "input".
+        # On /api/auth/register that value is the plaintext password. Drop it.
+        errors = [{k: v for k, v in error.items() if k != "input"} for error in exc.errors()]
+        return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
+```
 
 ```python
     from app.auth.router import router as auth_router
