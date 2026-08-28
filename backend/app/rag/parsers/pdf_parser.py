@@ -10,7 +10,14 @@ MAX_HEADING_CHARS = 80
 MAX_HEADING_WORDS = 12
 # A bare leading number is not enough: "2025 was a strong year" and "15 growers
 # reported blight" are ordinary prose. Require either a separator ("1.", "4)")
-# or a multi-level number ("3.2"), which prose effectively never opens with.
+# or a multi-level number ("3.2"). One false-positive class survives that rule -
+# a decimal quantity opening a sentence: "0.5 mg per litre was applied", "3.2
+# million units were sold", "1.2 billion won in revenue", "99.9 percent uptime
+# was achieved" and "2.5 times more than last year" all still match. It is an
+# inherited class, not one this rule introduced: a brute force over 400k strings
+# confirmed the pattern accepts a strict subset of the bare-number one it
+# replaced. Killing it needs a lookahead for a unit word, which is a bigger
+# heuristic than the one it would protect.
 NUMBERED_HEADING = re.compile(
     r"^\d+(?:\.\d+)*[.)]\s+\S"  # 1. Introduction / 4) Methods / 3.2. Results
     r"|^\d+(?:\.\d+)+\s+\S"  # 3.2 Results - multi-level needs no separator
@@ -42,6 +49,13 @@ def _is_heading(line: str, next_line: str) -> bool:
     # istitle() buys that safety by missing headings with lowercase stop-words
     # ("Results and Discussion"), possessives ("The Company's Results"), or a
     # trailing colon ("Results:", rejected above as sentence punctuation).
+    # Its blast radius is wider than it looks: bare-numbered headings now fall
+    # through to this rule and are caught by the same ceiling, so "2 Materials
+    # and Methods" and "3 Results and Discussion" - which the old bare-number
+    # regex accepted - are missed by the regex AND by istitle(). Missing a
+    # heading is still the cheap direction (Task 9's size pass supplies the
+    # boundary; a false heading mislabels every citation after it), but the
+    # tightening costs more real headings than the numbered-prose cases alone.
     return len(words) <= 8 and stripped.istitle() and not next_line[:1].islower()
 
 
