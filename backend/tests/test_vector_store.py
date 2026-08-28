@@ -1,5 +1,6 @@
 import uuid
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
@@ -121,6 +122,13 @@ async def test_search_filters_by_collection(db, seeded):
     chunk = await db.get(Chunk, uuid.UUID(results[0].chunk_id))
     assert chunk.content == "in A"
 
+    # An empty scope means "no collections", not "every collection". Under a
+    # truthiness check this returns both chunks - a default-open widening of the
+    # one filter Slice 3's Super Agent relies on.
+    assert await store.search(vec(1.0), limit=10, collection_ids=[]) == []
+    # Unscoped is still the way to ask for everything.
+    assert len(await store.search(vec(1.0), limit=10)) == 2
+
 
 async def test_delete_by_document_makes_reindexing_idempotent(db, seeded):
     store = PgVectorStore(db)
@@ -204,3 +212,27 @@ async def test_upsert_replaces_a_chunk_at_the_same_index(db, seeded):
 
 async def test_search_with_no_data_returns_empty(db, seeded):
     assert await PgVectorStore(db).search(vec(1.0), limit=5) == []
+
+
+async def test_upsert_of_nothing_is_a_no_op(db, seeded):
+    await PgVectorStore(db).upsert([])
+    await db.commit()
+    assert (await db.scalars(select(Chunk))).all() == []
+
+
+async def test_upsert_rejects_a_duplicate_chunk_index(db, seeded):
+    item = VectorItem(
+        document_id=seeded["doc_a"].id,
+        chunk_index=0,
+        content="dup",
+        token_count=1,
+        char_count=3,
+        page=None,
+        section=None,
+        metadata={},
+        embedding=vec(1.0),
+    )
+    # Postgres would raise CardinalityViolationError; Qdrant would last-write-win.
+    # Rejecting here keeps the interface's behaviour the same on both.
+    with pytest.raises(ValueError, match="unique by"):
+        await PgVectorStore(db).upsert([item, item])

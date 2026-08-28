@@ -6409,6 +6409,7 @@ This is the abstraction the user explicitly demanded ("pgvector behind a `Vector
 ```python
 import uuid
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
@@ -6530,6 +6531,13 @@ async def test_search_filters_by_collection(db, seeded):
     chunk = await db.get(Chunk, uuid.UUID(results[0].chunk_id))
     assert chunk.content == "in A"
 
+    # An empty scope means "no collections", not "every collection". Under a
+    # truthiness check this returns both chunks - a default-open widening of the
+    # one filter Slice 3's Super Agent relies on.
+    assert await store.search(vec(1.0), limit=10, collection_ids=[]) == []
+    # Unscoped is still the way to ask for everything.
+    assert len(await store.search(vec(1.0), limit=10)) == 2
+
 
 async def test_delete_by_document_makes_reindexing_idempotent(db, seeded):
     store = PgVectorStore(db)
@@ -6613,6 +6621,30 @@ async def test_upsert_replaces_a_chunk_at_the_same_index(db, seeded):
 
 async def test_search_with_no_data_returns_empty(db, seeded):
     assert await PgVectorStore(db).search(vec(1.0), limit=5) == []
+
+
+async def test_upsert_of_nothing_is_a_no_op(db, seeded):
+    await PgVectorStore(db).upsert([])
+    await db.commit()
+    assert (await db.scalars(select(Chunk))).all() == []
+
+
+async def test_upsert_rejects_a_duplicate_chunk_index(db, seeded):
+    item = VectorItem(
+        document_id=seeded["doc_a"].id,
+        chunk_index=0,
+        content="dup",
+        token_count=1,
+        char_count=3,
+        page=None,
+        section=None,
+        metadata={},
+        embedding=vec(1.0),
+    )
+    # Postgres would raise CardinalityViolationError; Qdrant would last-write-win.
+    # Rejecting here keeps the interface's behaviour the same on both.
+    with pytest.raises(ValueError, match="unique by"):
+        await PgVectorStore(db).upsert([item, item])
 ```
 
 - [ ] **Step 2: Create `backend/app/retrieval/__init__.py`** (empty) and run tests, expect FAIL
@@ -6677,14 +6709,33 @@ class VectorStore(ABC):
 
 class PgVectorStore(VectorStore):
     """The only Slice 1 implementation. Does not commit - the caller owns the
-    transaction boundary."""
+    transaction boundary.
+
+    That boundary is this seam's thinnest point, and it is relational: a remote
+    store (Qdrant) has no session and no rollback, so a caller that relies on
+    "upsert then rollback undoes the write" would silently keep the write after a
+    backend swap. Treat writes as durable once issued; do not use rollback as an
+    undo across this interface."""
 
     def __init__(self, db: AsyncSession):
         self.db = db
 
     async def upsert(self, items: list[VectorItem]) -> None:
+        """Items must be unique by (document_id, chunk_index).
+
+        Postgres refuses to touch the same row twice in one ON CONFLICT statement
+        (CardinalityViolationError), while Qdrant would last-write-win - so a
+        duplicate is rejected here rather than behaving per-backend. Task 13
+        enumerates chunk_index, so this is a contract guard, not a hot path.
+        """
         if not items:
             return
+        keys = [(item.document_id, item.chunk_index) for item in items]
+        if len(set(keys)) != len(keys):
+            raise ValueError("upsert items must be unique by (document_id, chunk_index)")
+        # ponytail: one multi-VALUES statement, 10 bind params per item, against
+        # Postgres's 65535-parameter cap - so ~6,500 chunks per call. Batch the
+        # loop if a single document ever exceeds that.
         # A real upsert, not an insert. `chunks` carries UNIQUE (document_id,
         # chunk_index), so re-indexing a document without deleting it first would
         # otherwise die on a unique violation - while a Qdrant backend, which
@@ -6709,6 +6760,8 @@ class PgVectorStore(VectorStore):
         )
         # content_tsv is a generated column - Postgres maintains it, and naming it
         # here would be an error.
+        # Core INSERT, so it bypasses the session identity map: a Chunk already
+        # loaded in this session keeps its stale content until commit or expire.
         await self.db.execute(
             statement.on_conflict_do_update(
                 constraint="uq_chunks_document_id",

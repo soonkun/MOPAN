@@ -18,6 +18,9 @@ from app.core.redis import get_redis, make_redis
 
 logger = logging.getLogger("mopan.app")
 
+# pgvector-specific and deliberately NOT behind VectorStore: it inspects the
+# Postgres catalog, which no remote backend has. Whoever adds Qdrant deletes this
+# readiness check rather than reimplementing it - see app/retrieval/vector_store.py.
 EMBEDDING_DIM_SQL = """
 SELECT a.atttypmod
 FROM pg_attribute a

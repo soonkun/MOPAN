@@ -166,7 +166,10 @@ def pair(step: Step) -> list[tuple[str, Block]] | None:
     if len(usable) == len(step.paths):
         return list(zip(step.paths, usable, strict=True))
     if len(step.paths) == 1:
-        return [(step.paths[0], b) for b in usable]
+        # An unknown fence language (```gitignore, ```dotenv, ```mako) filters out
+        # every block and would silently check nothing. One path means every block
+        # under it belongs to that path regardless of how the fence is tagged.
+        return [(step.paths[0], b) for b in (usable or step.blocks)]
     return None
 
 
@@ -181,9 +184,10 @@ def main(argv: list[str]) -> int:
     for step in steps:
         if step.verb in WHOLE_FILE_VERBS:
             created.setdefault(step.task, []).extend(step.paths)
-    unrun = {
-        task for task, paths in created.items() if not paths or not all((REPO / p).exists() for p in paths)
+    missing: dict[int, list[str]] = {
+        task: [p for p in paths if not (REPO / p).exists()] for task, paths in created.items()
     }
+    unrun = {task for task, paths in created.items() if not paths or missing[task]}
     unrun |= {s.task for s in steps} - set(created)
 
     # Rule 3: the last task that mentions a path anywhere outside a code fence.
@@ -196,6 +200,7 @@ def main(argv: list[str]) -> int:
     superseded: list[str] = []
     skipped: list[str] = []
     ambiguous: list[str] = []
+    excusable: set[tuple[str, int]] = set()
     checked = 0
 
     for step in steps:
@@ -205,7 +210,8 @@ def main(argv: list[str]) -> int:
         where = f"Task {step.task} (plan:{step.line}) {step.header[:60]}"
 
         if step.task in unrun:
-            skipped.append(f"{where} - task has not run yet")
+            absent = missing.get(step.task) or ["no Write/Create step"]
+            skipped.append(f"{where} - task has not run yet (missing: {', '.join(absent[:3])})")
             continue
         if not step.blocks:
             skipped.append(f"{where} - no code block (empty file or prose-only step)")
@@ -222,6 +228,8 @@ def main(argv: list[str]) -> int:
                 skipped.append(f"{where} - {path} does not exist yet")
                 continue
             checked += 1
+            if last_mention.get(path, 0) > step.task:
+                excusable.add((path, step.task))
             disk = norm(target.read_text(encoding="utf-8"))
             body = norm(block.body)
             if (disk == body) if whole else (body in disk):
@@ -242,6 +250,16 @@ def main(argv: list[str]) -> int:
     print(f"plan: {plan_path}")
     print(f"steps with a file claim: {claiming}")
     print(f"blocks compared against disk: {checked}")
+    # Rule 3's ceiling, stated in the output rather than only in the docstring:
+    # these blocks would be excused as SUPERSEDED if they drifted, so a mutation
+    # in any of them exits 0. Read them by hand; the tool cannot.
+    by_path: dict[str, list[int]] = {}
+    for path, task in sorted(excusable):
+        by_path.setdefault(path, []).append(task)
+    section(
+        "RULE-3 EXCUSABLE (a later task amends these; drift here would NOT be caught)",
+        [f"{p} <- Task {', '.join(map(str, t))}" for p, t in sorted(by_path.items())],
+    )
     section("SUPERSEDED (mismatch with a later amending task - expected)", superseded)
     section("AMBIGUOUS (could not pair paths to blocks - check by hand)", ambiguous)
     section("SKIPPED", skipped)

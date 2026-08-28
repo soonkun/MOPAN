@@ -55,14 +55,33 @@ class VectorStore(ABC):
 
 class PgVectorStore(VectorStore):
     """The only Slice 1 implementation. Does not commit - the caller owns the
-    transaction boundary."""
+    transaction boundary.
+
+    That boundary is this seam's thinnest point, and it is relational: a remote
+    store (Qdrant) has no session and no rollback, so a caller that relies on
+    "upsert then rollback undoes the write" would silently keep the write after a
+    backend swap. Treat writes as durable once issued; do not use rollback as an
+    undo across this interface."""
 
     def __init__(self, db: AsyncSession):
         self.db = db
 
     async def upsert(self, items: list[VectorItem]) -> None:
+        """Items must be unique by (document_id, chunk_index).
+
+        Postgres refuses to touch the same row twice in one ON CONFLICT statement
+        (CardinalityViolationError), while Qdrant would last-write-win - so a
+        duplicate is rejected here rather than behaving per-backend. Task 13
+        enumerates chunk_index, so this is a contract guard, not a hot path.
+        """
         if not items:
             return
+        keys = [(item.document_id, item.chunk_index) for item in items]
+        if len(set(keys)) != len(keys):
+            raise ValueError("upsert items must be unique by (document_id, chunk_index)")
+        # ponytail: one multi-VALUES statement, 10 bind params per item, against
+        # Postgres's 65535-parameter cap - so ~6,500 chunks per call. Batch the
+        # loop if a single document ever exceeds that.
         # A real upsert, not an insert. `chunks` carries UNIQUE (document_id,
         # chunk_index), so re-indexing a document without deleting it first would
         # otherwise die on a unique violation - while a Qdrant backend, which
@@ -87,6 +106,8 @@ class PgVectorStore(VectorStore):
         )
         # content_tsv is a generated column - Postgres maintains it, and naming it
         # here would be an error.
+        # Core INSERT, so it bypasses the session identity map: a Chunk already
+        # loaded in this session keeps its stale content until commit or expire.
         await self.db.execute(
             statement.on_conflict_do_update(
                 constraint="uq_chunks_document_id",
