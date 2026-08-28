@@ -6488,6 +6488,10 @@ async def test_upsert_then_search_returns_the_nearest_chunk_first(db, seeded):
     chunk = await db.get(Chunk, uuid.UUID(results[0].chunk_id))
     assert chunk.content == "tomato blight treatment guide"
     assert results[0].score >= results[1].score
+    # The vector has to survive the round trip at full width, or retrieval scores
+    # the wrong thing forever and nothing raises.
+    assert len(chunk.embedding) == EMBEDDING_DIM
+    assert list(chunk.embedding) == vec(1.0, 0.0, 0.0)
 
 
 async def test_search_filters_by_collection(db, seeded):
@@ -6495,14 +6499,26 @@ async def test_search_filters_by_collection(db, seeded):
     await store.upsert(
         [
             VectorItem(
-                document_id=seeded["doc_a"].id, chunk_index=0, content="in A",
-                token_count=2, char_count=4, page=None, section=None,
-                metadata={}, embedding=vec(1.0),
+                document_id=seeded["doc_a"].id,
+                chunk_index=0,
+                content="in A",
+                token_count=2,
+                char_count=4,
+                page=None,
+                section=None,
+                metadata={},
+                embedding=vec(1.0),
             ),
             VectorItem(
-                document_id=seeded["doc_b"].id, chunk_index=0, content="in B",
-                token_count=2, char_count=4, page=None, section=None,
-                metadata={}, embedding=vec(1.0),
+                document_id=seeded["doc_b"].id,
+                chunk_index=0,
+                content="in B",
+                token_count=2,
+                char_count=4,
+                page=None,
+                section=None,
+                metadata={},
+                embedding=vec(1.0),
             ),
         ]
     )
@@ -6518,9 +6534,15 @@ async def test_search_filters_by_collection(db, seeded):
 async def test_delete_by_document_makes_reindexing_idempotent(db, seeded):
     store = PgVectorStore(db)
     item = VectorItem(
-        document_id=seeded["doc_a"].id, chunk_index=0, content="first",
-        token_count=1, char_count=5, page=None, section=None,
-        metadata={}, embedding=vec(1.0),
+        document_id=seeded["doc_a"].id,
+        chunk_index=0,
+        content="first",
+        token_count=1,
+        char_count=5,
+        page=None,
+        section=None,
+        metadata={},
+        embedding=vec(1.0),
     )
     await store.upsert([item])
     await db.commit()
@@ -6529,17 +6551,71 @@ async def test_delete_by_document_makes_reindexing_idempotent(db, seeded):
     await store.upsert([item])
     await db.commit()
 
-    rows = (
-        await db.scalars(select(Chunk).where(Chunk.document_id == seeded["doc_a"].id))
-    ).all()
+    rows = (await db.scalars(select(Chunk).where(Chunk.document_id == seeded["doc_a"].id))).all()
     assert len(rows) == 1
+
+
+async def test_delete_by_document_leaves_other_documents_alone(db, seeded):
+    store = PgVectorStore(db)
+
+    def _item(document_id, content):
+        return VectorItem(
+            document_id=document_id,
+            chunk_index=0,
+            content=content,
+            token_count=1,
+            char_count=len(content),
+            page=None,
+            section=None,
+            metadata={},
+            embedding=vec(1.0),
+        )
+
+    await store.upsert([_item(seeded["doc_a"].id, "in A"), _item(seeded["doc_b"].id, "in B")])
+    await db.commit()
+
+    await store.delete_by_document(seeded["doc_a"].id)
+    await db.commit()
+
+    remaining = (await db.scalars(select(Chunk))).all()
+    assert [c.content for c in remaining] == ["in B"]
+
+
+async def test_upsert_replaces_a_chunk_at_the_same_index(db, seeded):
+    """`upsert` has to mean upsert. A Qdrant backend would overwrite by id; if
+    the pgvector one raises IntegrityError instead, the interface is not
+    swappable and a re-index that skips delete_by_document dies on a unique
+    violation."""
+    store = PgVectorStore(db)
+
+    def _item(content, embedding):
+        return VectorItem(
+            document_id=seeded["doc_a"].id,
+            chunk_index=0,
+            content=content,
+            token_count=1,
+            char_count=len(content),
+            page=None,
+            section=None,
+            metadata={},
+            embedding=embedding,
+        )
+
+    await store.upsert([_item("first", vec(1.0))])
+    await db.commit()
+    await store.upsert([_item("second", vec(0.0, 1.0))])
+    await db.commit()
+
+    rows = (await db.scalars(select(Chunk))).all()
+    assert [c.content for c in rows] == ["second"]
+    assert list(rows[0].embedding) == vec(0.0, 1.0)
 
 
 async def test_search_with_no_data_returns_empty(db, seeded):
     assert await PgVectorStore(db).search(vec(1.0), limit=5) == []
 ```
 
-- [ ] **Step 2: Run tests, expect FAIL**
+- [ ] **Step 2: Create `backend/app/retrieval/__init__.py`** (empty) and run tests, expect FAIL
 
 - [ ] **Step 3: Write `backend/app/retrieval/vector_store.py`**
 
@@ -6549,6 +6625,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chunk import Chunk
@@ -6576,7 +6653,12 @@ class ScoredId:
 
 class VectorStore(ABC):
     """The seam that lets Qdrant (or anything else) replace pgvector without
-    touching the ingestion pipeline, the retrieval service, or the ORM."""
+    touching the ingestion pipeline, the retrieval service, or the ORM.
+
+    Everything crossing this boundary is a builtin or a uuid: no Vector column,
+    no `<=>`, no distance operator, no SQL. A second backend implements these
+    three methods and nothing else changes.
+    """
 
     @abstractmethod
     async def upsert(self, items: list[VectorItem]) -> None: ...
@@ -6601,21 +6683,49 @@ class PgVectorStore(VectorStore):
         self.db = db
 
     async def upsert(self, items: list[VectorItem]) -> None:
-        for item in items:
-            self.db.add(
-                Chunk(
-                    document_id=item.document_id,
-                    chunk_index=item.chunk_index,
-                    content=item.content,
-                    token_count=item.token_count,
-                    char_count=item.char_count,
-                    page=item.page,
-                    section=item.section,
-                    chunk_metadata=item.metadata,
-                    embedding=item.embedding,
-                )
+        if not items:
+            return
+        # A real upsert, not an insert. `chunks` carries UNIQUE (document_id,
+        # chunk_index), so re-indexing a document without deleting it first would
+        # otherwise die on a unique violation - while a Qdrant backend, which
+        # overwrites by point id, would happily succeed. That difference is
+        # exactly what this interface exists to hide.
+        statement = insert(Chunk).values(
+            [
+                {
+                    "id": uuid.uuid4(),
+                    "document_id": item.document_id,
+                    "chunk_index": item.chunk_index,
+                    "content": item.content,
+                    "token_count": item.token_count,
+                    "char_count": item.char_count,
+                    "page": item.page,
+                    "section": item.section,
+                    "chunk_metadata": item.metadata,
+                    "embedding": item.embedding,
+                }
+                for item in items
+            ]
+        )
+        # content_tsv is a generated column - Postgres maintains it, and naming it
+        # here would be an error.
+        await self.db.execute(
+            statement.on_conflict_do_update(
+                constraint="uq_chunks_document_id",
+                set_={
+                    name: statement.excluded[name]
+                    for name in (
+                        "content",
+                        "token_count",
+                        "char_count",
+                        "page",
+                        "section",
+                        "chunk_metadata",
+                        "embedding",
+                    )
+                },
             )
-        await self.db.flush()
+        )
 
     async def search(
         self,
@@ -6623,17 +6733,27 @@ class PgVectorStore(VectorStore):
         limit: int,
         collection_ids: list[uuid.UUID] | None = None,
     ) -> list[ScoredId]:
-        # cosine_distance maps to the `<=>` operator, which is what the HNSW
-        # vector_cosine_ops index serves. `<->` or `<#>` would silently seq-scan.
+        # cosine_distance emits the `<=>` operator, which is the only one
+        # ix_chunks_embedding (HNSW, vector_cosine_ops) can serve. `<->` or `<#>`
+        # would silently sequential-scan. Verified with EXPLAIN, not assumed.
         distance = Chunk.embedding.cosine_distance(embedding).label("distance")
+        # A chunk whose embedding never landed distances to NULL, which ORDER BY
+        # ASC puts last - so it only surfaces when there are fewer real rows than
+        # `limit`, and then `float(None)` below raises. Exclude it here instead.
         query = select(Chunk.id, distance).where(Chunk.embedding.is_not(None))
-        if collection_ids:
+        if collection_ids is not None:
+            # `is not None` rather than truthiness: an empty list means "scoped to
+            # no collection" and must return nothing. Reading it as "unscoped"
+            # would widen a Slice 3 Super Agent query from zero collections to
+            # every collection in the system.
             query = query.join(Document, Document.id == Chunk.document_id).where(
                 Document.collection_id.in_(collection_ids)
             )
         query = query.order_by(distance).limit(limit)
 
         rows = (await self.db.execute(query)).all()
+        # cosine_distance is 1 - cosine_similarity, so this hands back a plain
+        # similarity in [-1.0, 1.0] and no pgvector distance convention leaks out.
         return [ScoredId(chunk_id=str(chunk_id), score=1.0 - float(dist)) for chunk_id, dist in rows]
 
     async def delete_by_document(self, document_id: uuid.UUID) -> None:
@@ -6643,7 +6763,7 @@ class PgVectorStore(VectorStore):
 - [ ] **Step 4: Run tests, expect PASS**
 
 Run: `pytest tests/test_vector_store.py -v` (Postgres running)
-Expected: all 4 tests PASS
+Expected: all 6 tests PASS
 
 - [ ] **Step 5: Commit**
 
