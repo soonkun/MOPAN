@@ -23,13 +23,17 @@ class Message(Base):
     )
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    citations: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    citations: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
 
     # Observability seam (Slice 5 reads these; Slice 4 fills prompt_version).
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     prompt_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     prompt_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    usage: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    usage: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     retrieval_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 

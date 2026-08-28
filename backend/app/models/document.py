@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, String, Text, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -31,7 +31,9 @@ class Document(Base):
     file_type: Mapped[str] = mapped_column(String(20), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     storage_path: Mapped[str] = mapped_column(String(1000), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="uploaded")
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="uploaded", server_default=text("'uploaded'")
+    )
     # User-facing text only. Tracebacks go to the logs, never to this column -
     # it is rendered in the Documents UI.
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

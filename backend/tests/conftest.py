@@ -63,11 +63,16 @@ def test_database_url() -> str:
 
 @pytest.fixture(scope="session")
 def migrated_database(test_database_url) -> None:
-    """Bring mopan_test to head. Separate from test_database_url so a test that
-    only needs a connection does not drag in alembic."""
+    """Rebuild mopan_test from scratch. Separate from test_database_url so a test
+    that only needs a connection does not drag in alembic.
+
+    downgrade base first, not just upgrade head: 0001 is amended in place until
+    Slice 1 ships, and upgrade head is a no-op on a database already stamped at
+    0001 - so the drift test would compare against a stale schema."""
     config = Config(str(BACKEND_DIR / "alembic.ini"))
     config.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
     config.set_main_option("sqlalchemy.url", TEST_DATABASE_URL)
+    command.downgrade(config, "base")
     command.upgrade(config, "head")
 
 

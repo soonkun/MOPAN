@@ -15,8 +15,12 @@ async def test_orm_matches_migrated_schema(test_engine):
     """The highest-value test in the project: it makes ORM/migration drift and
     silently-dropped retrieval indexes impossible to reintroduce."""
 
+    # compare_server_default is off by default, so without it a server_default
+    # that exists on one side only drifts silently - the same blindness alembic
+    # applies to nullability on computed columns.
     def _diff(connection):
-        return compare_metadata(MigrationContext.configure(connection), Base.metadata)
+        context = MigrationContext.configure(connection, opts={"compare_server_default": True})
+        return compare_metadata(context, Base.metadata)
 
     async with test_engine.connect() as conn:
         diff = await conn.run_sync(_diff)
@@ -61,20 +65,34 @@ async def test_retrieval_indexes_exist_with_expected_access_methods(test_engine)
 
 
 async def test_every_foreign_key_is_indexed_and_not_null(test_engine):
+    """pg_constraint rather than information_schema: it carries confdeltype, so
+    one query covers all three properties the name promises."""
     async with test_engine.connect() as conn:
-        nullable_fks = (
+        rows = (
             await conn.execute(
                 text(
-                    "SELECT c.table_name, c.column_name FROM information_schema.columns c "
-                    "JOIN information_schema.key_column_usage k "
-                    "  ON k.table_name = c.table_name AND k.column_name = c.column_name "
-                    "JOIN information_schema.table_constraints tc "
-                    "  ON tc.constraint_name = k.constraint_name "
-                    "WHERE tc.constraint_type = 'FOREIGN KEY' AND c.is_nullable = 'YES'"
+                    "SELECT t.relname, a.attname, a.attnotnull, con.confdeltype, "
+                    "  EXISTS (SELECT 1 FROM pg_index i "
+                    "          WHERE i.indrelid = con.conrelid "
+                    "            AND a.attnum = ANY (i.indkey[0:0])) AS indexed "
+                    "FROM pg_constraint con "
+                    "JOIN pg_class t ON t.oid = con.conrelid "
+                    "JOIN pg_namespace n ON n.oid = t.relnamespace "
+                    "JOIN pg_attribute a ON a.attrelid = con.conrelid "
+                    "  AND a.attnum = con.conkey[1] "
+                    "WHERE con.contype = 'f' AND n.nspname = 'public'"
                 )
             )
         ).all()
-    assert nullable_fks == []
+
+    assert rows, "no foreign keys found - schema is not migrated"
+    bad = [
+        (table, column, notnull, ondelete, indexed)
+        for table, column, notnull, ondelete, indexed in rows
+        # 'a' is NO ACTION: deleting a parent raises instead of cascading.
+        if not notnull or ondelete == "a" or not indexed
+    ]
+    assert bad == [], f"FKs missing NOT NULL, ondelete, or a leading index: {bad}"
 
 
 async def test_embedding_column_width_matches_settings(test_engine):
@@ -88,7 +106,7 @@ async def test_embedding_column_width_matches_settings(test_engine):
     assert typmod == get_settings().embedding_dim
 
 
-def test_downgrade_then_upgrade_round_trips(migrated_database, tmp_path):
+def test_downgrade_then_upgrade_round_trips(migrated_database):
     """A broken downgrade() is otherwise discovered at the worst possible moment."""
     from tests.conftest import BACKEND_DIR, TEST_DATABASE_URL
 

@@ -294,6 +294,13 @@ target-version = "py313"
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
 ignore = ["B008"]  # FastAPI Depends() in defaults is the framework's idiom
 
+[lint.isort]
+# The `backend/alembic/` migrations directory shadows the name of the installed
+# `alembic` package, so isort's src detection would file every `from alembic
+# import op` under first-party and reorder the imports of every file that talks
+# to Alembic - including tests/conftest.py.
+known-third-party = ["alembic"]
+
 [lint.per-file-ignores]
 "alembic/versions/*" = ["E501"]
 ```
@@ -1046,11 +1053,16 @@ def test_database_url() -> str:
 
 @pytest.fixture(scope="session")
 def migrated_database(test_database_url) -> None:
-    """Bring mopan_test to head. Separate from test_database_url so a test that
-    only needs a connection does not drag in alembic."""
+    """Rebuild mopan_test from scratch. Separate from test_database_url so a test
+    that only needs a connection does not drag in alembic.
+
+    downgrade base first, not just upgrade head: 0001 is amended in place until
+    Slice 1 ships, and upgrade head is a no-op on a database already stamped at
+    0001 - so the drift test would compare against a stale schema."""
     config = Config(str(BACKEND_DIR / "alembic.ini"))
     config.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
     config.set_main_option("sqlalchemy.url", TEST_DATABASE_URL)
+    command.downgrade(config, "base")
     command.upgrade(config, "head")
 
 
@@ -1087,9 +1099,7 @@ async def app(test_engine, test_sessionmaker, fake_redis, tmp_path_factory):
     """A real app instance wired to the test engine and a fake Redis. No lifespan
     is run, so nothing touches the developer's database or Redis."""
     application = create_app()
-    settings = get_settings().model_copy(
-        update={"upload_dir": tmp_path_factory.mktemp("uploads")}
-    )
+    settings = get_settings().model_copy(update={"upload_dir": tmp_path_factory.mktemp("uploads")})
     application.state.settings = settings
     application.state.engine = test_engine
     application.state.sessionmaker = test_sessionmaker
@@ -1126,9 +1136,7 @@ async def clean_db(request):
         return
     engine = request.getfixturevalue("test_engine")
     async with engine.begin() as conn:
-        await conn.execute(
-            text("TRUNCATE TABLE " + ", ".join(TABLES_IN_DELETE_ORDER) + " CASCADE")
-        )
+        await conn.execute(text("TRUNCATE TABLE " + ", ".join(TABLES_IN_DELETE_ORDER) + " CASCADE"))
 ```
 
 - [ ] **Step 9: Write `backend/tests/test_settings.py`**
@@ -1341,7 +1349,10 @@ from sqlalchemy.orm import DeclarativeBase
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_name)s",
     "uq": "uq_%(table_name)s_%(column_0_name)s",
-    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    # No prefix token: every CheckConstraint here is already named ck_<table>_<what>,
+    # and a convention containing %(constraint_name)s re-applies itself, so the name
+    # in Postgres would be ck_users_ck_users_role_valid.
+    "ck": "%(constraint_name)s",
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
     "pk": "pk_%(table_name)s",
 }
@@ -1357,7 +1368,7 @@ class Base(DeclarativeBase):
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, String, func
+from sqlalchemy import CheckConstraint, DateTime, String, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -1379,7 +1390,9 @@ class User(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
+    role: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="user", server_default=text("'user'")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -1422,7 +1435,7 @@ class Collection(Base):
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, String, Text, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -1452,7 +1465,9 @@ class Document(Base):
     file_type: Mapped[str] = mapped_column(String(20), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     storage_path: Mapped[str] = mapped_column(String(1000), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="uploaded")
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="uploaded", server_default=text("'uploaded'")
+    )
     # User-facing text only. Tracebacks go to the logs, never to this column -
     # it is rendered in the Documents UI.
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -1487,6 +1502,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -1526,14 +1542,28 @@ class Chunk(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     # Database-maintained generated column. Application code never writes it.
     # Typed Any because it holds a TSVECTOR, not a str.
+    #
+    # The explicit ::regconfig cast is how Postgres itself stores and reflects
+    # this expression. Writing it any other way makes alembic's computed-default
+    # comparison warn "Computed default on chunks.content_tsv cannot be modified"
+    # on every autogenerate and every run of the drift test.
+    #
+    # nullable is stated explicitly on purpose. Left implicit, alembic suppresses
+    # any nullability difference on a computed column ("Ignoring nullable change
+    # on identity column") and compare_metadata returns an empty diff even when
+    # the ORM and the database genuinely disagree.
     content_tsv: Mapped[Any] = mapped_column(
-        TSVECTOR, Computed("to_tsvector('simple', content)", persisted=True)
+        TSVECTOR,
+        Computed("to_tsvector('simple'::regconfig, content)", persisted=True),
+        nullable=False,
     )
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
     char_count: Mapped[int] = mapped_column(Integer, nullable=False)
     page: Mapped[int | None] = mapped_column(Integer, nullable=True)
     section: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    chunk_metadata: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    chunk_metadata: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -1542,13 +1572,15 @@ class Chunk(Base):
 
 Note on the `'simple'` text search configuration: it applies no stemming and strips no stopwords. That is deliberate — the primary corpus language is Korean, where English stemming would be actively wrong. **Task 15's keyword query must use `plainto_tsquery('simple', ...)`;** a different regconfig on the query side silently bypasses the GIN index.
 
+The vector side has the symmetric trap. `ix_chunks_embedding` is built with `vector_cosine_ops`, so **only the `<=>` (cosine distance) operator can use it** — SQLAlchemy's `Chunk.embedding.cosine_distance(...)`. Writing `<->` (L2) or `<#>` (inner product), or the matching `l2_distance` / `max_inner_product` helpers, silently falls back to a sequential scan over every chunk. Neither trap raises an error; both just make retrieval quietly slow and, once the corpus is large enough, quietly wrong.
+
 - [ ] **Step 6: Write `backend/app/models/conversation.py`**
 
 ```python
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, func
+from sqlalchemy import DateTime, ForeignKey, String, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -1565,7 +1597,9 @@ class Conversation(Base):
         nullable=False,
         index=True,
     )
-    title: Mapped[str] = mapped_column(String(500), nullable=False, default="New Chat")
+    title: Mapped[str] = mapped_column(
+        String(500), nullable=False, default="New Chat", server_default=text("'New Chat'")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -1591,9 +1625,7 @@ MESSAGE_ROLES = ("user", "assistant")
 
 class Message(Base):
     __tablename__ = "messages"
-    __table_args__ = (
-        CheckConstraint("role in ('user', 'assistant')", name="ck_messages_role_valid"),
-    )
+    __table_args__ = (CheckConstraint("role in ('user', 'assistant')", name="ck_messages_role_valid"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     conversation_id: Mapped[uuid.UUID] = mapped_column(
@@ -1604,13 +1636,17 @@ class Message(Base):
     )
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    citations: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    citations: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
 
     # Observability seam (Slice 5 reads these; Slice 4 fills prompt_version).
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     prompt_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     prompt_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    usage: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    usage: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     retrieval_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
@@ -1719,13 +1755,20 @@ def _database_url() -> str:
 
 
 def run_migrations_offline() -> None:
-    context.configure(url=_database_url(), target_metadata=target_metadata, literal_binds=True)
+    context.configure(
+        url=_database_url(),
+        target_metadata=target_metadata,
+        literal_binds=True,
+        compare_server_default=True,
+    )
     with context.begin_transaction():
         context.run_migrations()
 
 
 def do_run_migrations(connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    # compare_server_default matches the drift test, so autogenerate sees the
+    # same picture the test asserts on.
+    context.configure(connection=connection, target_metadata=target_metadata, compare_server_default=True)
     with context.begin_transaction():
         context.run_migrations()
 
@@ -1782,6 +1825,7 @@ Revision ID: 0001
 Revises:
 Create Date: 2026-08-28
 """
+
 import sqlalchemy as sa
 from alembic import op
 from pgvector.sqlalchemy import Vector
@@ -1822,8 +1866,10 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.PrimaryKeyConstraint("id", name="pk_collections"),
         sa.ForeignKeyConstraint(
-            ["created_by"], ["users.id"],
-            name="fk_collections_created_by_users", ondelete="RESTRICT",
+            ["created_by"],
+            ["users.id"],
+            name="fk_collections_created_by_users",
+            ondelete="RESTRICT",
         ),
     )
     op.create_index("ix_collections_created_by", "collections", ["created_by"])
@@ -1843,12 +1889,16 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.PrimaryKeyConstraint("id", name="pk_documents"),
         sa.ForeignKeyConstraint(
-            ["collection_id"], ["collections.id"],
-            name="fk_documents_collection_id_collections", ondelete="CASCADE",
+            ["collection_id"],
+            ["collections.id"],
+            name="fk_documents_collection_id_collections",
+            ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
-            ["uploaded_by"], ["users.id"],
-            name="fk_documents_uploaded_by_users", ondelete="RESTRICT",
+            ["uploaded_by"],
+            ["users.id"],
+            name="fk_documents_uploaded_by_users",
+            ondelete="RESTRICT",
         ),
         sa.CheckConstraint(
             "status in ('uploaded', 'parsing', 'chunking', 'embedding', 'indexed', 'failed')",
@@ -1869,8 +1919,14 @@ def upgrade() -> None:
             postgresql.TSVECTOR(),
             # Two-argument to_tsvector with a literal regconfig is IMMUTABLE and
             # therefore legal in a GENERATED ... STORED column. The one-argument
-            # form is not and would fail here.
-            sa.Computed("to_tsvector('simple', content)", persisted=True),
+            # form is not and would fail here. The ::regconfig cast is spelled
+            # out so this matches what Postgres reflects back, keeping the ORM
+            # drift test free of alembic's computed-default warning.
+            sa.Computed("to_tsvector('simple'::regconfig, content)", persisted=True),
+            # content is NOT NULL, so to_tsvector never yields NULL here. Stating
+            # it makes the database enforce what the ORM already claims, instead
+            # of leaving a disagreement that alembic silently declines to report.
+            nullable=False,
         ),
         sa.Column("token_count", sa.Integer(), nullable=False),
         sa.Column("char_count", sa.Integer(), nullable=False),
@@ -1881,8 +1937,10 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.PrimaryKeyConstraint("id", name="pk_chunks"),
         sa.ForeignKeyConstraint(
-            ["document_id"], ["documents.id"],
-            name="fk_chunks_document_id_documents", ondelete="CASCADE",
+            ["document_id"],
+            ["documents.id"],
+            name="fk_chunks_document_id_documents",
+            ondelete="CASCADE",
         ),
         sa.UniqueConstraint("document_id", "chunk_index", name="uq_chunks_document_id"),
     )
@@ -1909,8 +1967,10 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.PrimaryKeyConstraint("id", name="pk_conversations"),
         sa.ForeignKeyConstraint(
-            ["user_id"], ["users.id"],
-            name="fk_conversations_user_id_users", ondelete="CASCADE",
+            ["user_id"],
+            ["users.id"],
+            name="fk_conversations_user_id_users",
+            ondelete="CASCADE",
         ),
     )
     op.create_index("ix_conversations_user_id", "conversations", ["user_id"])
@@ -1936,8 +1996,10 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name="pk_messages"),
         sa.ForeignKeyConstraint(
-            ["conversation_id"], ["conversations.id"],
-            name="fk_messages_conversation_id_conversations", ondelete="CASCADE",
+            ["conversation_id"],
+            ["conversations.id"],
+            name="fk_messages_conversation_id_conversations",
+            ondelete="CASCADE",
         ),
         sa.CheckConstraint("role in ('user', 'assistant')", name="ck_messages_role_valid"),
     )
@@ -1977,8 +2039,12 @@ async def test_orm_matches_migrated_schema(test_engine):
     """The highest-value test in the project: it makes ORM/migration drift and
     silently-dropped retrieval indexes impossible to reintroduce."""
 
+    # compare_server_default is off by default, so without it a server_default
+    # that exists on one side only drifts silently - the same blindness alembic
+    # applies to nullability on computed columns.
     def _diff(connection):
-        return compare_metadata(MigrationContext.configure(connection), Base.metadata)
+        context = MigrationContext.configure(connection, opts={"compare_server_default": True})
+        return compare_metadata(context, Base.metadata)
 
     async with test_engine.connect() as conn:
         diff = await conn.run_sync(_diff)
@@ -2023,20 +2089,34 @@ async def test_retrieval_indexes_exist_with_expected_access_methods(test_engine)
 
 
 async def test_every_foreign_key_is_indexed_and_not_null(test_engine):
+    """pg_constraint rather than information_schema: it carries confdeltype, so
+    one query covers all three properties the name promises."""
     async with test_engine.connect() as conn:
-        nullable_fks = (
+        rows = (
             await conn.execute(
                 text(
-                    "SELECT c.table_name, c.column_name FROM information_schema.columns c "
-                    "JOIN information_schema.key_column_usage k "
-                    "  ON k.table_name = c.table_name AND k.column_name = c.column_name "
-                    "JOIN information_schema.table_constraints tc "
-                    "  ON tc.constraint_name = k.constraint_name "
-                    "WHERE tc.constraint_type = 'FOREIGN KEY' AND c.is_nullable = 'YES'"
+                    "SELECT t.relname, a.attname, a.attnotnull, con.confdeltype, "
+                    "  EXISTS (SELECT 1 FROM pg_index i "
+                    "          WHERE i.indrelid = con.conrelid "
+                    "            AND a.attnum = ANY (i.indkey[0:0])) AS indexed "
+                    "FROM pg_constraint con "
+                    "JOIN pg_class t ON t.oid = con.conrelid "
+                    "JOIN pg_namespace n ON n.oid = t.relnamespace "
+                    "JOIN pg_attribute a ON a.attrelid = con.conrelid "
+                    "  AND a.attnum = con.conkey[1] "
+                    "WHERE con.contype = 'f' AND n.nspname = 'public'"
                 )
             )
         ).all()
-    assert nullable_fks == []
+
+    assert rows, "no foreign keys found - schema is not migrated"
+    bad = [
+        (table, column, notnull, ondelete, indexed)
+        for table, column, notnull, ondelete, indexed in rows
+        # 'a' is NO ACTION: deleting a parent raises instead of cascading.
+        if not notnull or ondelete == "a" or not indexed
+    ]
+    assert bad == [], f"FKs missing NOT NULL, ondelete, or a leading index: {bad}"
 
 
 async def test_embedding_column_width_matches_settings(test_engine):
@@ -2050,7 +2130,7 @@ async def test_embedding_column_width_matches_settings(test_engine):
     assert typmod == get_settings().embedding_dim
 
 
-def test_downgrade_then_upgrade_round_trips(migrated_database, tmp_path):
+def test_downgrade_then_upgrade_round_trips(migrated_database):
     """A broken downgrade() is otherwise discovered at the worst possible moment."""
     from tests.conftest import BACKEND_DIR, TEST_DATABASE_URL
 

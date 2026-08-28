@@ -21,13 +21,20 @@ def _database_url() -> str:
 
 
 def run_migrations_offline() -> None:
-    context.configure(url=_database_url(), target_metadata=target_metadata, literal_binds=True)
+    context.configure(
+        url=_database_url(),
+        target_metadata=target_metadata,
+        literal_binds=True,
+        compare_server_default=True,
+    )
     with context.begin_transaction():
         context.run_migrations()
 
 
 def do_run_migrations(connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    # compare_server_default matches the drift test, so autogenerate sees the
+    # same picture the test asserts on.
+    context.configure(connection=connection, target_metadata=target_metadata, compare_server_default=True)
     with context.begin_transaction():
         context.run_migrations()
 
