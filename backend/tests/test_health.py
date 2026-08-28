@@ -23,9 +23,7 @@ async def test_ready_rejects_embedding_dim_mismatch(app, client, db):
     if deployed is None:
         pytest.skip("chunks table does not exist until Task 3")
 
-    app.state.settings = app.state.settings.model_copy(
-        update={"embedding_dim": deployed + 1}
-    )
+    app.state.settings = app.state.settings.model_copy(update={"embedding_dim": deployed + 1})
     response = await client.get("/api/health/ready")
     assert response.status_code == 503
     assert "does not match" in response.json()["detail"]

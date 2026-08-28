@@ -104,9 +104,7 @@ async def app(test_engine, test_sessionmaker, fake_redis, tmp_path_factory):
     """A real app instance wired to the test engine and a fake Redis. No lifespan
     is run, so nothing touches the developer's database or Redis."""
     application = create_app()
-    settings = get_settings().model_copy(
-        update={"upload_dir": tmp_path_factory.mktemp("uploads")}
-    )
+    settings = get_settings().model_copy(update={"upload_dir": tmp_path_factory.mktemp("uploads")})
     application.state.settings = settings
     application.state.engine = test_engine
     application.state.sessionmaker = test_sessionmaker
@@ -143,6 +141,4 @@ async def clean_db(request):
         return
     engine = request.getfixturevalue("test_engine")
     async with engine.begin() as conn:
-        await conn.execute(
-            text("TRUNCATE TABLE " + ", ".join(TABLES_IN_DELETE_ORDER) + " CASCADE")
-        )
+        await conn.execute(text("TRUNCATE TABLE " + ", ".join(TABLES_IN_DELETE_ORDER) + " CASCADE"))

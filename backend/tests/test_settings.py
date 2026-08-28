@@ -24,9 +24,7 @@ def test_values_are_read_from_the_env_file(tmp_path, monkeypatch):
     env_file.write_text("ANSWER_MODEL=model-from-file\n", encoding="utf-8")
 
     class FileSettings(Settings):
-        model_config = SettingsConfigDict(
-            env_file=env_file, env_file_encoding="utf-8", extra="ignore"
-        )
+        model_config = SettingsConfigDict(env_file=env_file, env_file_encoding="utf-8", extra="ignore")
 
     assert FileSettings().answer_model == "model-from-file"
 

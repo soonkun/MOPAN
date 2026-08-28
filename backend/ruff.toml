@@ -5,5 +5,12 @@ target-version = "py313"
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
 ignore = ["B008"]  # FastAPI Depends() in defaults is the framework's idiom
 
+[lint.isort]
+# The `backend/alembic/` migrations directory shadows the name of the installed
+# `alembic` package, so isort's src detection would file every `from alembic
+# import op` under first-party and reorder the imports of every file that talks
+# to Alembic - including tests/conftest.py.
+known-third-party = ["alembic"]
+
 [lint.per-file-ignores]
 "alembic/versions/*" = ["E501"]
