@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from pydantic_settings import SettingsConfigDict
 
 from app.core.config import REPO_ROOT, Settings
@@ -82,3 +83,11 @@ def test_self_registration_defaults_off_in_production():
 def test_invalid_chunk_overlap_is_rejected():
     with pytest.raises(ValueError, match="CHUNK_OVERLAP"):
         Settings(chunk_size=100, chunk_overlap=100)
+
+
+def test_invalid_environment_value_is_rejected(monkeypatch):
+    # ENVIRONMENT=Production must not silently disable every "production" check
+    # (admin bootstrap gate, cookie secure flag, API-key and DB-password refusals).
+    monkeypatch.setenv("ENVIRONMENT", "Production")
+    with pytest.raises(ValidationError):
+        Settings()

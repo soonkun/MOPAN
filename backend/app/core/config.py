@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Request
 from pydantic import field_validator, model_validator
@@ -21,7 +22,10 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    environment: str = "development"
+    # Literal, not str: a typo like ENVIRONMENT=Production would otherwise
+    # silently disable every production safeguard that compares against
+    # "production". Fail at startup instead.
+    environment: Literal["development", "production"] = "development"
 
     database_url: str = "postgresql+asyncpg://mopan:mopan@localhost:5432/mopan"
     redis_url: str = "redis://localhost:6379/0"
