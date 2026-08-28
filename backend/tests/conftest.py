@@ -1,6 +1,7 @@
 import asyncio
 import os
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import asyncpg
 import fakeredis.aioredis
@@ -114,6 +115,9 @@ async def app(test_engine, test_sessionmaker, fake_redis, tmp_path_factory):
     application.state.engine = test_engine
     application.state.sessionmaker = test_sessionmaker
     application.state.redis = fake_redis
+    # Stubbed here rather than per-test so an upload from any client fixture fails
+    # legibly instead of AttributeError-ing into a 500.
+    application.state.arq_pool = AsyncMock()
 
     async def _override_db():
         async with test_sessionmaker() as session:

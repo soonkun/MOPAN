@@ -1006,6 +1006,7 @@ app = create_app()
 import asyncio
 import os
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import asyncpg
 import fakeredis.aioredis
@@ -1119,6 +1120,9 @@ async def app(test_engine, test_sessionmaker, fake_redis, tmp_path_factory):
     application.state.engine = test_engine
     application.state.sessionmaker = test_sessionmaker
     application.state.redis = fake_redis
+    # Stubbed here rather than per-test so an upload from any client fixture fails
+    # legibly instead of AttributeError-ing into a 500.
+    application.state.arq_pool = AsyncMock()
 
     async def _override_db():
         async with test_sessionmaker() as session:
@@ -3000,9 +3004,7 @@ def _real_docx() -> bytes:
 
 
 def _upload(name: str, data: bytes, content_type: str) -> UploadFile:
-    return UploadFile(
-        filename=name, file=io.BytesIO(data), headers={"content-type": content_type}
-    )
+    return UploadFile(filename=name, file=io.BytesIO(data), headers={"content-type": content_type})
 
 
 async def test_save_upload_stream_round_trip(tmp_path):
@@ -3050,9 +3052,7 @@ async def test_oversize_is_detected_before_the_whole_body_is_consumed(tmp_path):
     from app.documents.storage import CHUNK_BYTES
 
     source = io.BytesIO(b"x" * (CHUNK_BYTES * 3))
-    upload = UploadFile(
-        filename="big.pdf", file=source, headers={"content-type": "application/pdf"}
-    )
+    upload = UploadFile(filename="big.pdf", file=source, headers={"content-type": "application/pdf"})
     with pytest.raises(UploadTooLarge):
         await save_upload_stream(tmp_path, "doc-4", "pdf", upload, max_bytes=10)
 
@@ -3170,18 +3170,14 @@ def extension_of(filename: str) -> str:
     return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
 
-def validate_upload_metadata(
-    filename: str, content_type: str, declared_size: int, max_size_mb: int
-) -> str:
+def validate_upload_metadata(filename: str, content_type: str, declared_size: int, max_size_mb: int) -> str:
     extension = extension_of(filename)
     if extension not in ALLOWED_EXTENSIONS:
         raise UploadValidationError(f"unsupported file extension: .{extension}")
 
     normalised = (content_type or "").split(";", 1)[0].strip().lower()
     if normalised and normalised not in ALLOWED_CONTENT_TYPES[extension]:
-        raise UploadValidationError(
-            f"content type {normalised} does not match a .{extension} file"
-        )
+        raise UploadValidationError(f"content type {normalised} does not match a .{extension} file")
 
     if declared_size > max_size_mb * 1024 * 1024:
         raise UploadTooLarge(f"file exceeds max size of {max_size_mb}MB")
@@ -3205,9 +3201,7 @@ def validate_magic_bytes(extension: str, head: bytes) -> None:
     expected = EXPECTED_MAGIC_MIME[extension]
     if guess is None or guess.mime not in expected:
         actual = guess.mime if guess else "unknown"
-        raise UploadValidationError(
-            f"file content ({actual}) does not match the .{extension} extension"
-        )
+        raise UploadValidationError(f"file content ({actual}) does not match the .{extension} extension")
 ```
 
 - [ ] **Step 4: Write `backend/app/documents/storage.py`**
@@ -3431,6 +3425,8 @@ import uuid
 from anyio import to_thread
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -3583,11 +3579,19 @@ async def upload_document(
         await enqueue_document_processing(arq_pool, str(document.id))
     except Exception:
         # Never return success for a job that was silently dropped: the document
-        # would sit at "uploaded" forever with no explanation.
+        # would sit at "uploaded" forever with no explanation. The stored file is
+        # unreachable too - nothing will ever parse it - so drop it rather than
+        # leak disk under a row that has no retry route in Slice 1.
         logger.exception("failed to enqueue document processing")
         document.status = "failed"
         document.error_message = ENQUEUE_FAILED_MESSAGE
         await db.commit()
+        await delete_document_files(settings.upload_dir, str(document.id))
+        await db.refresh(document)
+        return JSONResponse(
+            status_code=503,
+            content=jsonable_encoder(_to_response(document, collection.name, admin.email, 0)),
+        )
 
     await db.refresh(document)
     log_event(logger, "document_uploaded", document_id=str(document.id), size_bytes=size)
@@ -3692,12 +3696,30 @@ async def delete_document(
     app.include_router(documents_router)
 ```
 
+- [ ] **Step 6b: Modify `backend/tests/conftest.py`** — stub the arq pool on the shared `app` fixture
+
+Add `from unittest.mock import AsyncMock` to the imports, then set the stub
+alongside the other `app.state` wiring, so an upload from *any* client fixture
+fails legibly instead of `AttributeError`-ing into a 500:
+
+```python
+    application.state.redis = fake_redis
+    # Stubbed here rather than per-test so an upload from any client fixture fails
+    # legibly instead of AttributeError-ing into a 500.
+    application.state.arq_pool = AsyncMock()
+```
+
 - [ ] **Step 7: Write `backend/tests/test_documents_api.py`**
+
+Note the enqueue-failure branch returns **503**, not 202: a 202 whose body says
+`status: "failed"` lies in the status line, and a client keying off the code
+would show "queued". The upload also deletes the stored file in that branch —
+nothing will ever parse it and Slice 1 has no retry route, so it would just leak
+disk under an unreachable row.
 
 ```python
 import uuid
 from pathlib import Path
-from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -3708,13 +3730,8 @@ MISSING_ID = uuid.uuid4()
 
 @pytest_asyncio.fixture
 async def admin_client(client, app):
-    app.state.arq_pool = AsyncMock()
-    await client.post(
-        "/api/auth/register", json={"email": "admin@example.com", "password": "pw123456"}
-    )
-    await client.post(
-        "/api/auth/login", json={"email": "admin@example.com", "password": "pw123456"}
-    )
+    await client.post("/api/auth/register", json={"email": "admin@example.com", "password": "pw123456"})
+    await client.post("/api/auth/login", json={"email": "admin@example.com", "password": "pw123456"})
     return client
 
 
@@ -3732,9 +3749,7 @@ async def member_client(admin_client, app):
     )
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        await ac.post(
-            "/api/auth/login", json={"email": "member@example.com", "password": "pw123456"}
-        )
+        await ac.post("/api/auth/login", json={"email": "member@example.com", "password": "pw123456"})
         yield ac
 
 
@@ -3791,6 +3806,26 @@ async def test_admin_delete_removes_the_row_and_the_stored_file(admin_client, ap
     assert (await admin_client.delete(f"/api/documents/{document_id}")).status_code == 204
     assert (await admin_client.get(f"/api/documents/{document_id}")).status_code == 404
     assert not stored.exists()
+
+
+async def test_enqueue_failure_marks_the_document_failed_and_drops_the_file(admin_client, app, collection_id):
+    """A dropped job must not leave the row at "uploaded" forever, nor leak the file."""
+    app.state.arq_pool.enqueue_job.side_effect = RuntimeError("redis down")
+
+    response = await admin_client.post(
+        "/api/documents",
+        data={"collection_id": collection_id},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+    )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["error_message"]
+
+    reread = await admin_client.get(f"/api/documents/{body['id']}")
+    assert reread.json()["status"] == "failed"
+    assert not (Path(app.state.settings.upload_dir) / body["id"]).exists()
 
 
 async def test_members_can_read_the_shared_corpus(member_client, admin_client, collection_id):
@@ -3904,7 +3939,7 @@ Expected: 21 passed, 1 xfailed
 - [ ] **Step 9: Commit**
 
 ```bash
-git add backend/app/schemas/collection.py backend/app/schemas/document.py backend/app/documents/service.py backend/app/documents/router.py backend/app/main.py backend/tests/test_documents_api.py
+git add backend/app/schemas/collection.py backend/app/schemas/document.py backend/app/documents/service.py backend/app/documents/router.py backend/app/main.py backend/tests/conftest.py backend/tests/test_documents_api.py
 git commit -m "feat: admin-gated collections and document API with job enqueue"
 ```
 
@@ -4250,15 +4285,25 @@ def test_get_parser_raises_for_unsupported_type():
         get_parser("exe")
 ```
 
-- [ ] **Step 9: Run tests, expect PASS**
+- [ ] **Step 9: Remove Task 7's xfail marker from the structure-endpoint test**
+
+`app.rag.parsers` now exists, so `test_get_document_structure_returns_blocks` in
+`backend/tests/test_documents_api.py` can pass. It carries
+`@pytest.mark.xfail(raises=ModuleNotFoundError, strict=True)` from Task 7 —
+delete that decorator line. The marker is `strict=True`, so leaving it turns the
+now-passing test into an **XPASS failure**: the suite tells you if you forget.
+Drop `import pytest` too if nothing else in the file uses it.
+
+- [ ] **Step 10: Run tests, expect PASS**
 
 Run: `pytest tests/test_parsers.py tests/test_documents_api.py -v`
-Expected: all PASS (this is where Task 7's structure-endpoint test turns green)
+Expected: all PASS, with **no xfailed or xpassed entries** — the structure
+endpoint is now a normal pass.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
-git add backend/app/rag/__init__.py backend/app/rag/blocks.py backend/app/rag/parsers backend/tests/test_parsers.py
+git add backend/app/rag/__init__.py backend/app/rag/blocks.py backend/app/rag/parsers backend/tests/test_parsers.py backend/tests/test_documents_api.py
 git commit -m "feat: document parsers with a dict registry and PDF heading detection"
 ```
 

@@ -1,6 +1,5 @@
 import uuid
 from pathlib import Path
-from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -11,13 +10,8 @@ MISSING_ID = uuid.uuid4()
 
 @pytest_asyncio.fixture
 async def admin_client(client, app):
-    app.state.arq_pool = AsyncMock()
-    await client.post(
-        "/api/auth/register", json={"email": "admin@example.com", "password": "pw123456"}
-    )
-    await client.post(
-        "/api/auth/login", json={"email": "admin@example.com", "password": "pw123456"}
-    )
+    await client.post("/api/auth/register", json={"email": "admin@example.com", "password": "pw123456"})
+    await client.post("/api/auth/login", json={"email": "admin@example.com", "password": "pw123456"})
     return client
 
 
@@ -35,9 +29,7 @@ async def member_client(admin_client, app):
     )
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        await ac.post(
-            "/api/auth/login", json={"email": "member@example.com", "password": "pw123456"}
-        )
+        await ac.post("/api/auth/login", json={"email": "member@example.com", "password": "pw123456"})
         yield ac
 
 
@@ -94,6 +86,26 @@ async def test_admin_delete_removes_the_row_and_the_stored_file(admin_client, ap
     assert (await admin_client.delete(f"/api/documents/{document_id}")).status_code == 204
     assert (await admin_client.get(f"/api/documents/{document_id}")).status_code == 404
     assert not stored.exists()
+
+
+async def test_enqueue_failure_marks_the_document_failed_and_drops_the_file(admin_client, app, collection_id):
+    """A dropped job must not leave the row at "uploaded" forever, nor leak the file."""
+    app.state.arq_pool.enqueue_job.side_effect = RuntimeError("redis down")
+
+    response = await admin_client.post(
+        "/api/documents",
+        data={"collection_id": collection_id},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+    )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["error_message"]
+
+    reread = await admin_client.get(f"/api/documents/{body['id']}")
+    assert reread.json()["status"] == "failed"
+    assert not (Path(app.state.settings.upload_dir) / body["id"]).exists()
 
 
 async def test_members_can_read_the_shared_corpus(member_client, admin_client, collection_id):

@@ -4,6 +4,8 @@ import uuid
 from anyio import to_thread
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -156,11 +158,19 @@ async def upload_document(
         await enqueue_document_processing(arq_pool, str(document.id))
     except Exception:
         # Never return success for a job that was silently dropped: the document
-        # would sit at "uploaded" forever with no explanation.
+        # would sit at "uploaded" forever with no explanation. The stored file is
+        # unreachable too - nothing will ever parse it - so drop it rather than
+        # leak disk under a row that has no retry route in Slice 1.
         logger.exception("failed to enqueue document processing")
         document.status = "failed"
         document.error_message = ENQUEUE_FAILED_MESSAGE
         await db.commit()
+        await delete_document_files(settings.upload_dir, str(document.id))
+        await db.refresh(document)
+        return JSONResponse(
+            status_code=503,
+            content=jsonable_encoder(_to_response(document, collection.name, admin.email, 0)),
+        )
 
     await db.refresh(document)
     log_event(logger, "document_uploaded", document_id=str(document.id), size_bytes=size)

@@ -45,18 +45,14 @@ def extension_of(filename: str) -> str:
     return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
 
-def validate_upload_metadata(
-    filename: str, content_type: str, declared_size: int, max_size_mb: int
-) -> str:
+def validate_upload_metadata(filename: str, content_type: str, declared_size: int, max_size_mb: int) -> str:
     extension = extension_of(filename)
     if extension not in ALLOWED_EXTENSIONS:
         raise UploadValidationError(f"unsupported file extension: .{extension}")
 
     normalised = (content_type or "").split(";", 1)[0].strip().lower()
     if normalised and normalised not in ALLOWED_CONTENT_TYPES[extension]:
-        raise UploadValidationError(
-            f"content type {normalised} does not match a .{extension} file"
-        )
+        raise UploadValidationError(f"content type {normalised} does not match a .{extension} file")
 
     if declared_size > max_size_mb * 1024 * 1024:
         raise UploadTooLarge(f"file exceeds max size of {max_size_mb}MB")
@@ -80,6 +76,4 @@ def validate_magic_bytes(extension: str, head: bytes) -> None:
     expected = EXPECTED_MAGIC_MIME[extension]
     if guess is None or guess.mime not in expected:
         actual = guess.mime if guess else "unknown"
-        raise UploadValidationError(
-            f"file content ({actual}) does not match the .{extension} extension"
-        )
+        raise UploadValidationError(f"file content ({actual}) does not match the .{extension} extension")

@@ -36,9 +36,7 @@ def _real_docx() -> bytes:
 
 
 def _upload(name: str, data: bytes, content_type: str) -> UploadFile:
-    return UploadFile(
-        filename=name, file=io.BytesIO(data), headers={"content-type": content_type}
-    )
+    return UploadFile(filename=name, file=io.BytesIO(data), headers={"content-type": content_type})
 
 
 async def test_save_upload_stream_round_trip(tmp_path):
@@ -86,9 +84,7 @@ async def test_oversize_is_detected_before_the_whole_body_is_consumed(tmp_path):
     from app.documents.storage import CHUNK_BYTES
 
     source = io.BytesIO(b"x" * (CHUNK_BYTES * 3))
-    upload = UploadFile(
-        filename="big.pdf", file=source, headers={"content-type": "application/pdf"}
-    )
+    upload = UploadFile(filename="big.pdf", file=source, headers={"content-type": "application/pdf"})
     with pytest.raises(UploadTooLarge):
         await save_upload_stream(tmp_path, "doc-4", "pdf", upload, max_bytes=10)
 
