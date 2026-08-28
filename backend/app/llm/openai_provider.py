@@ -3,6 +3,7 @@ import time
 
 from openai import AsyncOpenAI, OpenAIError
 
+from app.core.config import EMBEDDING_MAX_BATCH_SIZE
 from app.core.logging import log_event
 from app.llm.base import ChatMessage, ChatResult, LLMError, LLMProvider, ToolCall
 
@@ -16,12 +17,23 @@ class OpenAIProvider(LLMProvider):
         embedding_model: str,
         answer_model: str,
         *,
+        # Settings is the source of truth for all four; both construction sites
+        # pass them explicitly. These defaults exist only so tests can build a
+        # provider without restating them - keep them in step with config.py.
         timeout: float = 30.0,
         max_retries: int = 3,
         batch_size: int = 128,
         batch_chars: int = 200_000,
         embedding_dim: int | None = None,
     ):
+        # Both are admin-configurable, so an invalid value is reachable from
+        # configuration. Unvalidated, batch_size <= 0 degrades to one request per
+        # chunk - no error, just a cost and latency blowup - and a value above
+        # the endpoint's 2048-element cap is rejected mid-document.
+        if not 1 <= batch_size <= EMBEDDING_MAX_BATCH_SIZE:
+            raise ValueError(f"batch_size must satisfy 1 <= value <= {EMBEDDING_MAX_BATCH_SIZE}")
+        if batch_chars < 1:
+            raise ValueError("batch_chars must be at least 1")
         # Explicit timeout and retries. The SDK default is 600s, and one hung
         # embedding call would occupy an arq worker slot for ten minutes.
         # Measured on openai 1.47.0: the SDK's own retry loop covers 408, 409,
@@ -41,12 +53,15 @@ class OpenAIProvider(LLMProvider):
         PDF, so split on item count and on a character budget.
 
         Characters are a proxy for tokens and the ratio is script-dependent.
-        Measured with cl100k: 200_000 characters is ~44k tokens of ASCII and
-        ~215k of Korean, both under the ceiling.
-        # ponytail: an emoji-dominated document reaches ~600k tokens in the same
+        Measured with cl100k at 200_000 characters: ASCII ~44k tokens, realistic
+        Korean prose ~168k, spaced Hangul ~225k, CJK han ~260k, and unspaced
+        Hangul - a glossary or a table column - ~286k. That worst case clears the
+        ~300k ceiling by 5%, not by the comfortable margin the spaced sample
+        suggests.
+        # ponytail: an emoji-dominated document reaches ~550k tokens in the same
         # 200_000 characters and would be rejected by the endpoint. It fails
-        # loudly as an LLMError rather than corrupting anything; budget on
-        # count_tokens() instead if that ever bites.
+        # loudly as an LLMError rather than corrupting anything; ChunkCandidate
+        # already carries token_count, so budget on that if 5% ever proves thin.
 
         A single input longer than batch_chars still goes out alone rather than
         being dropped - it cannot be split here without breaking the caller's
@@ -144,12 +159,22 @@ class OpenAIProvider(LLMProvider):
         except OpenAIError as exc:
             raise LLMError(f"chat completion failed: {exc}") from exc
 
+        # LLMError promises callers never have to import openai to handle a
+        # failure, and this abstraction exists to front OpenAI-compatible and
+        # local endpoints, where a non-conforming body is far likelier than it is
+        # from OpenAI. Unpacking a malformed response must not escape as an
+        # IndexError/AttributeError and surface as an unhandled 500.
+        if not response.choices:
+            raise LLMError("chat completion returned no choices")
         choice = response.choices[0]
         raw_tool_calls = getattr(choice.message, "tool_calls", None) or []
-        tool_calls = [
-            ToolCall(id=tc.id, name=tc.function.name, arguments=tc.function.arguments)
-            for tc in raw_tool_calls
-        ] or None
+        try:
+            tool_calls = [
+                ToolCall(id=tc.id, name=tc.function.name, arguments=tc.function.arguments)
+                for tc in raw_tool_calls
+            ] or None
+        except AttributeError as exc:
+            raise LLMError(f"chat completion returned a malformed tool call: {exc}") from exc
 
         log_event(
             logger,

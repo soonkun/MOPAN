@@ -399,6 +399,9 @@ EMBEDDING_MODEL=text-embedding-3-small
 EMBEDDING_DIM=1536
 # Embedding requests are split into batches; OpenAI caps array length and total
 # tokens per request, so a long document must not go out in one call.
+# BATCH_SIZE valid range 1-2048 (the endpoint's array cap). BATCH_CHARS is a
+# character proxy for the ~300k token cap and the ratio is script-dependent:
+# 200000 chars is ~44k tokens of ASCII but ~286k of unspaced Hangul, a 5% margin.
 EMBEDDING_BATCH_SIZE=128
 EMBEDDING_BATCH_CHARS=200000
 # Without a timeout a hung completion holds a worker slot for the SDK default of
@@ -5458,8 +5461,12 @@ class FixedChunking(ChunkingStrategy):
     newlines survive as 0 - so the comparison view renders normalised text, not
     the raw window. (Text with no terminal punctuation takes the hard-split path
     instead and stays verbatim, which is why the effect looks intermittent.)
-    Non-whitespace characters and their order are always preserved, which is what
-    lets each emitted part still be traced back to its source block.
+    Non-whitespace characters and their order are preserved at max_chunk_tokens
+    >= 3, which is what lets each emitted part be traced back to its source
+    block. At 1 or 2 the hard splitter cannot fit one character in the budget and
+    emits U+FFFD, inserting characters the source never had - measured 22 of 443
+    emoji parts mis-cited at a limit of 2. Those limits are reachable from
+    Settings but produce corrupt chunk text regardless; .env.example says so.
     """
 
     def __init__(self, chunk_size: int = 800, overlap: int = 100, max_chunk_tokens: int = 500):
@@ -5797,6 +5804,7 @@ import time
 
 from openai import AsyncOpenAI, OpenAIError
 
+from app.core.config import EMBEDDING_MAX_BATCH_SIZE
 from app.core.logging import log_event
 from app.llm.base import ChatMessage, ChatResult, LLMError, LLMProvider, ToolCall
 
@@ -5810,12 +5818,23 @@ class OpenAIProvider(LLMProvider):
         embedding_model: str,
         answer_model: str,
         *,
+        # Settings is the source of truth for all four; both construction sites
+        # pass them explicitly. These defaults exist only so tests can build a
+        # provider without restating them - keep them in step with config.py.
         timeout: float = 30.0,
         max_retries: int = 3,
         batch_size: int = 128,
         batch_chars: int = 200_000,
         embedding_dim: int | None = None,
     ):
+        # Both are admin-configurable, so an invalid value is reachable from
+        # configuration. Unvalidated, batch_size <= 0 degrades to one request per
+        # chunk - no error, just a cost and latency blowup - and a value above
+        # the endpoint's 2048-element cap is rejected mid-document.
+        if not 1 <= batch_size <= EMBEDDING_MAX_BATCH_SIZE:
+            raise ValueError(f"batch_size must satisfy 1 <= value <= {EMBEDDING_MAX_BATCH_SIZE}")
+        if batch_chars < 1:
+            raise ValueError("batch_chars must be at least 1")
         # Explicit timeout and retries. The SDK default is 600s, and one hung
         # embedding call would occupy an arq worker slot for ten minutes.
         # Measured on openai 1.47.0: the SDK's own retry loop covers 408, 409,
@@ -5835,12 +5854,15 @@ class OpenAIProvider(LLMProvider):
         PDF, so split on item count and on a character budget.
 
         Characters are a proxy for tokens and the ratio is script-dependent.
-        Measured with cl100k: 200_000 characters is ~44k tokens of ASCII and
-        ~215k of Korean, both under the ceiling.
-        # ponytail: an emoji-dominated document reaches ~600k tokens in the same
+        Measured with cl100k at 200_000 characters: ASCII ~44k tokens, realistic
+        Korean prose ~168k, spaced Hangul ~225k, CJK han ~260k, and unspaced
+        Hangul - a glossary or a table column - ~286k. That worst case clears the
+        ~300k ceiling by 5%, not by the comfortable margin the spaced sample
+        suggests.
+        # ponytail: an emoji-dominated document reaches ~550k tokens in the same
         # 200_000 characters and would be rejected by the endpoint. It fails
-        # loudly as an LLMError rather than corrupting anything; budget on
-        # count_tokens() instead if that ever bites.
+        # loudly as an LLMError rather than corrupting anything; ChunkCandidate
+        # already carries token_count, so budget on that if 5% ever proves thin.
 
         A single input longer than batch_chars still goes out alone rather than
         being dropped - it cannot be split here without breaking the caller's
@@ -5938,12 +5960,22 @@ class OpenAIProvider(LLMProvider):
         except OpenAIError as exc:
             raise LLMError(f"chat completion failed: {exc}") from exc
 
+        # LLMError promises callers never have to import openai to handle a
+        # failure, and this abstraction exists to front OpenAI-compatible and
+        # local endpoints, where a non-conforming body is far likelier than it is
+        # from OpenAI. Unpacking a malformed response must not escape as an
+        # IndexError/AttributeError and surface as an unhandled 500.
+        if not response.choices:
+            raise LLMError("chat completion returned no choices")
         choice = response.choices[0]
         raw_tool_calls = getattr(choice.message, "tool_calls", None) or []
-        tool_calls = [
-            ToolCall(id=tc.id, name=tc.function.name, arguments=tc.function.arguments)
-            for tc in raw_tool_calls
-        ] or None
+        try:
+            tool_calls = [
+                ToolCall(id=tc.id, name=tc.function.name, arguments=tc.function.arguments)
+                for tc in raw_tool_calls
+            ] or None
+        except AttributeError as exc:
+            raise LLMError(f"chat completion returned a malformed tool call: {exc}") from exc
 
         log_event(
             logger,
@@ -5982,6 +6014,7 @@ import httpx
 import pytest
 from openai import APITimeoutError
 
+from app.core.config import EMBEDDING_MAX_BATCH_SIZE
 from app.llm.base import ChatMessage, LLMError
 from app.llm.openai_provider import OpenAIProvider
 
@@ -6242,18 +6275,113 @@ async def test_chat_surfaces_tool_calls_when_the_model_requests_one():
 
     assert result.tool_calls is not None
     assert result.tool_calls[0].name == "search"
+
+
+async def test_chat_rejects_a_response_with_no_choices():
+    """A body without choices must arrive as LLMError, not IndexError.
+
+    The abstraction exists to front OpenAI-compatible and local endpoints, where
+    a non-conforming response is far likelier than from OpenAI itself. Task 14/15
+    catch LLMError; a bare IndexError becomes an unhandled 500.
+    """
+    provider = _provider()
+    provider.client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(choices=[], usage=None, model="gpt-4o")
+    )
+
+    with pytest.raises(LLMError, match="no choices"):
+        await provider.chat([ChatMessage(role="user", content="hi")])
+
+
+async def test_chat_rejects_a_tool_call_missing_its_function():
+    provider = _provider()
+    tool_call = MagicMock(id="call_1", spec=["id"])  # no .function
+    message = MagicMock(content=None, tool_calls=[tool_call])
+    provider.client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(choices=[MagicMock(message=message)], usage=None, model="gpt-4o")
+    )
+
+    with pytest.raises(LLMError, match="malformed tool call"):
+        await provider.chat([ChatMessage(role="user", content="hi")])
+
+
+@pytest.mark.parametrize("batch_size", [0, -5, EMBEDDING_MAX_BATCH_SIZE + 1, 3000])
+def test_provider_rejects_an_unusable_batch_size(batch_size):
+    """Unvalidated, 0 or -5 degrades to one request per chunk with no error."""
+    with pytest.raises(ValueError, match="batch_size"):
+        _provider(batch_size=batch_size)
+
+
+@pytest.mark.parametrize("batch_chars", [0, -1])
+def test_provider_rejects_an_unusable_batch_chars(batch_chars):
+    with pytest.raises(ValueError, match="batch_chars"):
+        _provider(batch_chars=batch_chars)
+
+
+def test_provider_accepts_the_shipped_defaults():
+    provider = _provider(batch_size=128, batch_chars=200_000)
+    assert (provider.batch_size, provider.batch_chars) == (128, 200_000)
 ```
 
-- [ ] **Step 5: Run tests, expect PASS**
+- [ ] **Step 5: Modify `backend/app/core/config.py`** — publish the array cap and bound the batch settings
 
-Run: `pytest tests/test_llm_provider.py -v`
-Expected: all 16 tests PASS (no real API call — the SDK client methods are mocked; the
+`EMBEDDING_BATCH_SIZE` and `EMBEDDING_BATCH_CHARS` are admin-configurable and
+unvalidated. Measured: `0` or a negative silently degrades to one embedding
+request per chunk — no error, just cost and latency — and a value above the
+endpoint's 2048-element cap is rejected mid-document, after the parse and chunk
+work is already paid for. Add the constant beside `EMBEDDING_INPUT_TOKEN_LIMIT`:
+
+```python
+# Element ceiling for one embeddings request's input array.
+EMBEDDING_MAX_BATCH_SIZE = 2048
+```
+
+and append to the model validator, after the `SEMANTIC_SIMILARITY_THRESHOLD` check:
+
+```python
+        # Zero or negative degrades to one embedding request per chunk with no
+        # error - just cost and latency; above 2048 the endpoint rejects the
+        # array mid-document.
+        if not 1 <= self.embedding_batch_size <= EMBEDDING_MAX_BATCH_SIZE:
+            raise ValueError(
+                f"EMBEDDING_BATCH_SIZE must satisfy 1 <= value <= {EMBEDDING_MAX_BATCH_SIZE}"
+            )
+        if self.embedding_batch_chars < 1:
+            raise ValueError("EMBEDDING_BATCH_CHARS must be at least 1")
+```
+
+- [ ] **Step 6: Modify `backend/tests/test_settings.py`** — cover the new validators
+
+Without these, deleting the batch checks fails nothing — the same gap the
+similarity-threshold validator had. Import `EMBEDDING_MAX_BATCH_SIZE` alongside
+`EMBEDDING_INPUT_TOKEN_LIMIT` and append beside the other range tests:
+
+```python
+@pytest.mark.parametrize("value", [0, -5, EMBEDDING_MAX_BATCH_SIZE + 1])
+def test_out_of_range_embedding_batch_size_is_rejected(value):
+    # 0 or negative degrades to one embedding request per chunk with no error -
+    # pure cost and latency; above 2048 the endpoint rejects the array
+    # mid-document, after the parse and chunk work is already paid for.
+    with pytest.raises(ValueError, match="EMBEDDING_BATCH_SIZE"):
+        Settings(embedding_batch_size=value)
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_out_of_range_embedding_batch_chars_is_rejected(value):
+    with pytest.raises(ValueError, match="EMBEDDING_BATCH_CHARS"):
+        Settings(embedding_batch_chars=value)
+```
+
+- [ ] **Step 7: Run tests, expect PASS**
+
+Run: `pytest tests/test_llm_provider.py tests/test_settings.py -v`
+Expected: all 25 + 15 tests PASS (no real API call — the SDK client methods are mocked; the
 timeout and retry tests use a loopback socket and `httpx.MockTransport`)
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add backend/app/llm backend/tests/test_llm_provider.py
+git add backend/app/llm backend/app/core/config.py backend/tests/test_llm_provider.py backend/tests/test_settings.py
 git commit -m "feat: LLMProvider abstraction with batching, timeouts, and a tool-calling seam"
 ```
 

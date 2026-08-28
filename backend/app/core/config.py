@@ -13,6 +13,8 @@ DEFAULT_DB_PASSWORDS = ("mopan", "postgres", "password")
 
 # Per-input token ceiling for OpenAI's text-embedding-3-* models.
 EMBEDDING_INPUT_TOKEN_LIMIT = 8191
+# Element ceiling for one embeddings request's input array.
+EMBEDDING_MAX_BATCH_SIZE = 2048
 
 
 class Settings(BaseSettings):
@@ -93,6 +95,13 @@ class Settings(BaseSettings):
         # turns the semantic strategy into "always merge" or "never merge".
         if not -1.0 <= self.semantic_similarity_threshold <= 1.0:
             raise ValueError("SEMANTIC_SIMILARITY_THRESHOLD must satisfy -1.0 <= value <= 1.0")
+        # Zero or negative degrades to one embedding request per chunk with no
+        # error - just cost and latency; above 2048 the endpoint rejects the
+        # array mid-document.
+        if not 1 <= self.embedding_batch_size <= EMBEDDING_MAX_BATCH_SIZE:
+            raise ValueError(f"EMBEDDING_BATCH_SIZE must satisfy 1 <= value <= {EMBEDDING_MAX_BATCH_SIZE}")
+        if self.embedding_batch_chars < 1:
+            raise ValueError("EMBEDDING_BATCH_CHARS must be at least 1")
         return self
 
 

@@ -6,6 +6,7 @@ import httpx
 import pytest
 from openai import APITimeoutError
 
+from app.core.config import EMBEDDING_MAX_BATCH_SIZE
 from app.llm.base import ChatMessage, LLMError
 from app.llm.openai_provider import OpenAIProvider
 
@@ -266,3 +267,49 @@ async def test_chat_surfaces_tool_calls_when_the_model_requests_one():
 
     assert result.tool_calls is not None
     assert result.tool_calls[0].name == "search"
+
+
+async def test_chat_rejects_a_response_with_no_choices():
+    """A body without choices must arrive as LLMError, not IndexError.
+
+    The abstraction exists to front OpenAI-compatible and local endpoints, where
+    a non-conforming response is far likelier than from OpenAI itself. Task 14/15
+    catch LLMError; a bare IndexError becomes an unhandled 500.
+    """
+    provider = _provider()
+    provider.client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(choices=[], usage=None, model="gpt-4o")
+    )
+
+    with pytest.raises(LLMError, match="no choices"):
+        await provider.chat([ChatMessage(role="user", content="hi")])
+
+
+async def test_chat_rejects_a_tool_call_missing_its_function():
+    provider = _provider()
+    tool_call = MagicMock(id="call_1", spec=["id"])  # no .function
+    message = MagicMock(content=None, tool_calls=[tool_call])
+    provider.client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(choices=[MagicMock(message=message)], usage=None, model="gpt-4o")
+    )
+
+    with pytest.raises(LLMError, match="malformed tool call"):
+        await provider.chat([ChatMessage(role="user", content="hi")])
+
+
+@pytest.mark.parametrize("batch_size", [0, -5, EMBEDDING_MAX_BATCH_SIZE + 1, 3000])
+def test_provider_rejects_an_unusable_batch_size(batch_size):
+    """Unvalidated, 0 or -5 degrades to one request per chunk with no error."""
+    with pytest.raises(ValueError, match="batch_size"):
+        _provider(batch_size=batch_size)
+
+
+@pytest.mark.parametrize("batch_chars", [0, -1])
+def test_provider_rejects_an_unusable_batch_chars(batch_chars):
+    with pytest.raises(ValueError, match="batch_chars"):
+        _provider(batch_chars=batch_chars)
+
+
+def test_provider_accepts_the_shipped_defaults():
+    provider = _provider(batch_size=128, batch_chars=200_000)
+    assert (provider.batch_size, provider.batch_chars) == (128, 200_000)

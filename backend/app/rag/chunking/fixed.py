@@ -32,8 +32,12 @@ class FixedChunking(ChunkingStrategy):
     newlines survive as 0 - so the comparison view renders normalised text, not
     the raw window. (Text with no terminal punctuation takes the hard-split path
     instead and stays verbatim, which is why the effect looks intermittent.)
-    Non-whitespace characters and their order are always preserved, which is what
-    lets each emitted part still be traced back to its source block.
+    Non-whitespace characters and their order are preserved at max_chunk_tokens
+    >= 3, which is what lets each emitted part be traced back to its source
+    block. At 1 or 2 the hard splitter cannot fit one character in the budget and
+    emits U+FFFD, inserting characters the source never had - measured 22 of 443
+    emoji parts mis-cited at a limit of 2. Those limits are reachable from
+    Settings but produce corrupt chunk text regardless; .env.example says so.
     """
 
     def __init__(self, chunk_size: int = 800, overlap: int = 100, max_chunk_tokens: int = 500):

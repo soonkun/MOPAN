@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 from pydantic_settings import SettingsConfigDict
 
-from app.core.config import EMBEDDING_INPUT_TOKEN_LIMIT, REPO_ROOT, Settings
+from app.core.config import EMBEDDING_INPUT_TOKEN_LIMIT, EMBEDDING_MAX_BATCH_SIZE, REPO_ROOT, Settings
 
 
 def test_env_file_is_anchored_to_the_repo_root():
@@ -91,6 +91,21 @@ def test_out_of_range_max_chunk_tokens_is_rejected(value):
     # ceiling leaves no headroom for the newline accounting's rare 2-token join.
     with pytest.raises(ValueError, match="MAX_CHUNK_TOKENS"):
         Settings(max_chunk_tokens=value)
+
+
+@pytest.mark.parametrize("value", [0, -5, EMBEDDING_MAX_BATCH_SIZE + 1])
+def test_out_of_range_embedding_batch_size_is_rejected(value):
+    # 0 or negative degrades to one embedding request per chunk with no error -
+    # pure cost and latency; above 2048 the endpoint rejects the array
+    # mid-document, after the parse and chunk work is already paid for.
+    with pytest.raises(ValueError, match="EMBEDDING_BATCH_SIZE"):
+        Settings(embedding_batch_size=value)
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_out_of_range_embedding_batch_chars_is_rejected(value):
+    with pytest.raises(ValueError, match="EMBEDDING_BATCH_CHARS"):
+        Settings(embedding_batch_chars=value)
 
 
 @pytest.mark.parametrize("value", [1.5, -1.01])
