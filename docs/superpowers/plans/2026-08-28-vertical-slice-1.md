@@ -5429,6 +5429,8 @@ def test_strategy_factory_honours_the_setting():
 - [ ] **Step 3: Write `backend/app/rag/chunking/fixed.py`**
 
 ```python
+from anyio import to_thread
+
 from app.core.tokens import count_tokens
 from app.rag.blocks import Block
 from app.rag.chunking.base import ChunkCandidate, ChunkingStrategy, EmbedFn
@@ -5489,6 +5491,13 @@ class FixedChunking(ChunkingStrategy):
         self.max_chunk_tokens = max_chunk_tokens
 
     async def chunk(self, blocks: list[Block], embed_fn: EmbedFn) -> list[ChunkCandidate]:
+        # This strategy never embeds, so the whole body is CPU-bound tiktoken
+        # work. arq runs every job on one event loop: leaving it inline stalls
+        # every other queued job and arq's own health heartbeat for as long as
+        # the document takes.
+        return await to_thread.run_sync(self._chunk_sync, blocks)
+
+    def _chunk_sync(self, blocks: list[Block]) -> list[ChunkCandidate]:
         # Track where each block starts in the concatenated text so a window can
         # inherit the page/section of the block it begins in. Without this,
         # Fixed-chunked documents lose all citation provenance.
@@ -5564,6 +5573,8 @@ class FixedChunking(ChunkingStrategy):
 - [ ] **Step 4: Write `backend/app/rag/chunking/semantic.py`**
 
 ```python
+from anyio import to_thread
+
 from app.rag.blocks import Block
 from app.rag.chunking.base import ChunkCandidate, ChunkingStrategy, EmbedFn
 from app.rag.chunking.structure import NEWLINE_TOKENS, build_size_bounded_candidates
@@ -5595,7 +5606,10 @@ class StructureSemanticChunking(ChunkingStrategy):
         self.max_chunk_tokens = max_chunk_tokens
 
     async def chunk(self, blocks: list[Block], embed_fn: EmbedFn) -> list[ChunkCandidate]:
-        candidates = build_size_bounded_candidates(blocks, self.max_chunk_tokens)
+        # tiktoken assembly is CPU-bound and arq runs every job on one event
+        # loop, so both passes go through a thread. Only the embed call in
+        # between actually belongs on the loop.
+        candidates = await to_thread.run_sync(build_size_bounded_candidates, blocks, self.max_chunk_tokens)
         for candidate in candidates:
             candidate.metadata.setdefault("strategy", "semantic")
         # One candidate cannot merge with anything, so the embedding call would
@@ -5606,7 +5620,10 @@ class StructureSemanticChunking(ChunkingStrategy):
         # One batched call for the whole document. Embedding each adjacent pair
         # separately would cost an API round trip per candidate.
         embeddings = await embed_fn([c.content for c in candidates])
+        # A 1536-dimension cosine per adjacent pair, in pure Python.
+        return await to_thread.run_sync(self._merge, candidates, embeddings)
 
+    def _merge(self, candidates: list[ChunkCandidate], embeddings: list[list[float]]) -> list[ChunkCandidate]:
         merged: list[ChunkCandidate] = []
         # The previous candidate's OWN pass-1 embedding. Reading it off
         # merged[-1] instead does not work: a merged candidate has its embedding

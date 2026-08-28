@@ -1,3 +1,5 @@
+from anyio import to_thread
+
 from app.core.tokens import count_tokens
 from app.rag.blocks import Block
 from app.rag.chunking.base import ChunkCandidate, ChunkingStrategy, EmbedFn
@@ -58,6 +60,13 @@ class FixedChunking(ChunkingStrategy):
         self.max_chunk_tokens = max_chunk_tokens
 
     async def chunk(self, blocks: list[Block], embed_fn: EmbedFn) -> list[ChunkCandidate]:
+        # This strategy never embeds, so the whole body is CPU-bound tiktoken
+        # work. arq runs every job on one event loop: leaving it inline stalls
+        # every other queued job and arq's own health heartbeat for as long as
+        # the document takes.
+        return await to_thread.run_sync(self._chunk_sync, blocks)
+
+    def _chunk_sync(self, blocks: list[Block]) -> list[ChunkCandidate]:
         # Track where each block starts in the concatenated text so a window can
         # inherit the page/section of the block it begins in. Without this,
         # Fixed-chunked documents lose all citation provenance.
