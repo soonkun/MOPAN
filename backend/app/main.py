@@ -36,9 +36,14 @@ async def lifespan(app: FastAPI):
     app.state.engine = make_engine(settings)
     app.state.sessionmaker = make_sessionmaker(app.state.engine)
     app.state.redis = make_redis(settings)
+
+    from app.documents.service import make_arq_pool
+
+    app.state.arq_pool = await make_arq_pool(settings)
     try:
         yield
     finally:
+        await app.state.arq_pool.aclose()
         await app.state.redis.aclose()
         await app.state.engine.dispose()
 
@@ -97,8 +102,10 @@ def create_app() -> FastAPI:
         return {"status": "ready"}
 
     from app.auth.router import router as auth_router
+    from app.documents.router import router as documents_router
 
     app.include_router(auth_router)
+    app.include_router(documents_router)
 
     return app
 

@@ -144,3 +144,11 @@ def test_validate_magic_bytes_rejects_a_renamed_html_file():
 def test_validate_magic_bytes_rejects_an_executable_renamed_to_txt():
     with pytest.raises(UploadValidationError):
         validate_magic_bytes("txt", b"MZ\x90\x00" + b"\x00" * 300)
+
+
+def test_validate_magic_bytes_rejects_signature_less_binary_in_a_text_upload():
+    """The MZ case above trips the `guess is not None` branch and never reaches
+    the NUL-byte check. Only a payload `filetype` cannot identify - a UTF-16 file,
+    an arbitrary blob - exercises it, and it is the last line of defence there."""
+    with pytest.raises(UploadValidationError, match="binary content"):
+        validate_magic_bytes("txt", b"hello\x00world")

@@ -1160,6 +1160,7 @@ async def clean_db(request):
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from pydantic_settings import SettingsConfigDict
 
 from app.core.config import REPO_ROOT, Settings
@@ -1241,6 +1242,16 @@ def test_self_registration_defaults_off_in_production():
 def test_invalid_chunk_overlap_is_rejected():
     with pytest.raises(ValueError, match="CHUNK_OVERLAP"):
         Settings(chunk_size=100, chunk_overlap=100)
+
+
+def test_invalid_environment_value_is_rejected(monkeypatch):
+    # ENVIRONMENT=Production must not silently disable every "production" check
+    # (admin bootstrap gate, cookie secure flag, API-key and DB-password refusals).
+    monkeypatch.setenv("ENVIRONMENT", "Production")
+    # match=: without it this passes on a ValidationError from any unrelated
+    # field, so it would not notice the Literal being loosened back to str.
+    with pytest.raises(ValidationError, match="environment"):
+        Settings()
 ```
 
 - [ ] **Step 10: Write `backend/tests/test_health.py`**
@@ -3097,6 +3108,14 @@ def test_validate_magic_bytes_rejects_a_renamed_html_file():
 def test_validate_magic_bytes_rejects_an_executable_renamed_to_txt():
     with pytest.raises(UploadValidationError):
         validate_magic_bytes("txt", b"MZ\x90\x00" + b"\x00" * 300)
+
+
+def test_validate_magic_bytes_rejects_signature_less_binary_in_a_text_upload():
+    """The MZ case above trips the `guess is not None` branch and never reaches
+    the NUL-byte check. Only a payload `filetype` cannot identify - a UTF-16 file,
+    an arbitrary blob - exercises it, and it is the last line of defence there."""
+    with pytest.raises(UploadValidationError, match="binary content"):
+        validate_magic_bytes("txt", b"hello\x00world")
 ```
 
 - [ ] **Step 2: Run test, expect FAIL** (`app.documents.storage` does not exist)
@@ -3433,7 +3452,6 @@ from app.models.chunk import Chunk
 from app.models.collection import Collection
 from app.models.document import Document
 from app.models.user import User
-from app.rag.parsers import get_parser
 from app.schemas.collection import CollectionCreate, CollectionResponse
 from app.schemas.document import BlockResponse, ChunkResponse, DocumentResponse
 
@@ -3539,6 +3557,12 @@ async def upload_document(
     db.add(document)
     await db.flush()
 
+    # MEMORY is bounded here, DISK is not. Starlette spools each multipart part to
+    # a SpooledTemporaryFile(max_size=1MB) before this handler runs, and
+    # save_upload_stream writes in CHUNK_BYTES pieces, so nothing ever holds the
+    # whole body in RAM. But an oversized body is still written to the spool's temp
+    # file in full before max_bytes can reject it. Capping that needs a
+    # proxy-level client_max_body_size - deployment work, see Task 24.
     try:
         path, size = await save_upload_stream(
             settings.upload_dir,
@@ -3617,6 +3641,10 @@ async def get_document_structure(
     """Left pane of the document detail view: the parsed original structure, so an
     admin can eyeball chunking quality against it. Re-parsed on demand (in a
     thread) rather than duplicating every document's text into a JSONB column."""
+    # Imported here, not at module scope: app.rag.parsers lands in Task 8, and a
+    # module-level import would stop app.main from importing at all until then.
+    from app.rag.parsers import get_parser
+
     document = await get_readable_document(db, document_id)
     parser = get_parser(document.file_type)
     try:
@@ -3671,8 +3699,11 @@ import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+
+MISSING_ID = uuid.uuid4()
 
 
 @pytest_asyncio.fixture
@@ -3735,6 +3766,33 @@ async def test_create_collection_requires_admin(member_client):
     assert (await member_client.post("/api/collections", json={"name": "X"})).status_code == 403
 
 
+async def test_delete_document_requires_admin(member_client, admin_client, collection_id):
+    upload = await admin_client.post(
+        "/api/documents",
+        data={"collection_id": collection_id},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+    )
+    document_id = upload.json()["id"]
+    assert (await member_client.delete(f"/api/documents/{document_id}")).status_code == 403
+    # The refusal must be real, not cosmetic: the row is still there afterwards.
+    assert (await admin_client.get(f"/api/documents/{document_id}")).status_code == 200
+
+
+async def test_admin_delete_removes_the_row_and_the_stored_file(admin_client, app, collection_id):
+    upload = await admin_client.post(
+        "/api/documents",
+        data={"collection_id": collection_id},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+    )
+    document_id = upload.json()["id"]
+    stored = Path(app.state.settings.upload_dir) / document_id
+    assert stored.exists()
+
+    assert (await admin_client.delete(f"/api/documents/{document_id}")).status_code == 204
+    assert (await admin_client.get(f"/api/documents/{document_id}")).status_code == 404
+    assert not stored.exists()
+
+
 async def test_members_can_read_the_shared_corpus(member_client, admin_client, collection_id):
     upload = await admin_client.post(
         "/api/documents",
@@ -3742,6 +3800,8 @@ async def test_members_can_read_the_shared_corpus(member_client, admin_client, c
         files={"file": ("note.txt", b"hello", "text/plain")},
     )
     document_id = upload.json()["id"]
+    assert (await member_client.get("/api/collections")).status_code == 200
+    assert (await member_client.get("/api/documents")).status_code == 200
     assert (await member_client.get(f"/api/documents/{document_id}")).status_code == 200
     assert (await member_client.get(f"/api/documents/{document_id}/chunks")).status_code == 200
 
@@ -3792,10 +3852,35 @@ async def test_list_documents_requires_auth(client):
     assert (await client.get("/api/documents")).status_code == 401
 
 
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/collections"),
+        ("GET", "/api/collections"),
+        ("POST", "/api/documents"),
+        ("GET", "/api/documents"),
+        ("GET", f"/api/documents/{MISSING_ID}"),
+        ("DELETE", f"/api/documents/{MISSING_ID}"),
+        ("GET", f"/api/documents/{MISSING_ID}/chunks"),
+        ("GET", f"/api/documents/{MISSING_ID}/structure"),
+        ("GET", f"/api/chunks/{MISSING_ID}"),
+    ],
+)
+async def test_every_route_requires_authentication(client, method, path):
+    """401 before anything else - no route may answer an anonymous caller, and
+    none may leak existence through a 404/422 on the way to the auth check."""
+    assert (await client.request(method, path)).status_code == 401
+
+
 async def test_get_unknown_chunk_returns_404(admin_client):
     assert (await admin_client.get(f"/api/chunks/{uuid.uuid4()}")).status_code == 404
 
 
+@pytest.mark.xfail(
+    raises=ModuleNotFoundError,
+    strict=True,
+    reason="app.rag.parsers arrives in Task 8; strict so Task 8 cannot forget to drop this marker",
+)
 async def test_document_structure_returns_parsed_blocks(admin_client, collection_id):
     upload = await admin_client.post(
         "/api/documents",
@@ -3812,9 +3897,9 @@ async def test_document_structure_returns_parsed_blocks(admin_client, collection
 
 - [ ] **Step 8: Run tests, expect PASS**
 
-Run: `pytest tests/test_documents_api.py -v` (Postgres running)
-Note: `test_document_structure_returns_parsed_blocks` and the `get_parser` import depend on Task 8. If executing strictly in order, write Task 8 first or temporarily mark that one test `@pytest.mark.xfail` and remove the marker at Task 8 Step 10.
-Expected: all 12 tests PASS
+Run: `pytest tests/test_documents_api.py` (Postgres running)
+Note: the structure endpoint needs `get_parser`, which lands in Task 8. `get_parser` is therefore imported *inside* `get_document_structure`, not at module scope - a module-level import would stop `app.main` from importing at all and take the whole suite down with it, so xfailing the one test is not enough on its own. `test_document_structure_returns_parsed_blocks` carries `@pytest.mark.xfail(raises=ModuleNotFoundError, strict=True)`; strict means it fails the suite as an XPASS the moment Task 8 lands, so the marker cannot be forgotten. Task 8 Step 10 must drop the marker and include `backend/tests/test_documents_api.py` in its `git add`.
+Expected: 21 passed, 1 xfailed
 
 - [ ] **Step 9: Commit**
 

@@ -89,5 +89,7 @@ def test_invalid_environment_value_is_rejected(monkeypatch):
     # ENVIRONMENT=Production must not silently disable every "production" check
     # (admin bootstrap gate, cookie secure flag, API-key and DB-password refusals).
     monkeypatch.setenv("ENVIRONMENT", "Production")
-    with pytest.raises(ValidationError):
+    # match=: without it this passes on a ValidationError from any unrelated
+    # field, so it would not notice the Literal being loosened back to str.
+    with pytest.raises(ValidationError, match="environment"):
         Settings()
