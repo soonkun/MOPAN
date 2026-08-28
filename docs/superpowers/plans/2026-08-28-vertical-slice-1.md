@@ -2952,12 +2952,14 @@ The user asked for pluggable **vector stores**, not pluggable file storage. A on
 
 ```python
 import io
+import zipfile
 
 import pytest
 from fastapi import UploadFile
 
 from app.documents.storage import document_dir, read_upload, save_upload_stream
 from app.documents.validation import (
+    MAGIC_SNIFF_BYTES,
     UploadTooLarge,
     UploadValidationError,
     extension_of,
@@ -2967,6 +2969,23 @@ from app.documents.validation import (
 
 PDF_HEAD = b"%PDF-1.4\n" + b"0" * 300
 DOCX_HEAD = b"PK\x03\x04" + b"0" * 300
+
+
+def _real_docx() -> bytes:
+    """A structurally valid OOXML package - `filetype` only reports the docx mime
+    (rather than the plain zip container) when it can read the whole archive."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            '<?xml version="1.0"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Override PartName="/word/document.xml" ContentType="application/vnd.'
+            'openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+        )
+        archive.writestr("_rels/.rels", "<?xml version='1.0'?><Relationships/>")
+        archive.writestr("word/document.xml", "<?xml version='1.0'?><w:document/>")
+    return buf.getvalue()
 
 
 def _upload(name: str, data: bytes, content_type: str) -> UploadFile:
@@ -2984,15 +3003,26 @@ async def test_save_upload_stream_round_trip(tmp_path):
     assert await read_upload(path) == PDF_HEAD
 
 
-async def test_storage_path_ignores_the_client_filename(tmp_path):
+@pytest.mark.parametrize(
+    "evil_name",
+    [
+        "../../evil.txt",
+        "..\\..\\evil.txt",  # Windows separator: ntpath treats this as traversal too
+        "../../../../evil.pdf",
+        "/etc/passwd.pdf",
+    ],
+)
+async def test_storage_path_ignores_the_client_filename(tmp_path, evil_name):
     """A traversal filename must not influence the path at all: the server names
     the file from the validated extension."""
-    upload = _upload("../../../../evil.pdf", PDF_HEAD, "application/pdf")
+    upload = _upload(evil_name, PDF_HEAD, "application/pdf")
     path, _ = await save_upload_stream(tmp_path, "doc-2", "pdf", upload, max_bytes=4096)
 
     assert path.resolve().is_relative_to(tmp_path.resolve())
     assert path.name == "source.pdf"
     assert path.parent == document_dir(tmp_path, "doc-2")
+    # Nothing was created outside the upload root.
+    assert not (tmp_path.parent / "evil.txt").exists()
 
 
 async def test_oversized_upload_is_rejected_while_streaming(tmp_path):
@@ -3001,6 +3031,22 @@ async def test_oversized_upload_is_rejected_while_streaming(tmp_path):
         await save_upload_stream(tmp_path, "doc-3", "pdf", upload, max_bytes=1000)
     # Partial output must not survive a rejected upload.
     assert not (tmp_path / "doc-3" / "source.pdf").exists()
+
+
+async def test_oversize_is_detected_before_the_whole_body_is_consumed(tmp_path):
+    """Proves the limit is enforced *during* the stream: the source is left with
+    unread bytes, so the rejection cannot have required reading it all."""
+    from app.documents.storage import CHUNK_BYTES
+
+    source = io.BytesIO(b"x" * (CHUNK_BYTES * 3))
+    upload = UploadFile(
+        filename="big.pdf", file=source, headers={"content-type": "application/pdf"}
+    )
+    with pytest.raises(UploadTooLarge):
+        await save_upload_stream(tmp_path, "doc-4", "pdf", upload, max_bytes=10)
+
+    assert source.tell() == CHUNK_BYTES
+    assert not document_dir(tmp_path, "doc-4").exists()
 
 
 def test_extension_of():
@@ -3033,9 +3079,24 @@ def test_validate_magic_bytes_accepts_matching_content():
     validate_magic_bytes("txt", "안녕하세요".encode())
 
 
+def test_validate_magic_bytes_accepts_a_real_docx_at_any_sniff_length():
+    """`filetype` reports application/zip from a truncated head but the full OOXML
+    mime once it can read the archive's central directory. Both must be accepted:
+    keying on application/zip alone rejects every real .docx the moment a caller
+    hands over more than MAGIC_SNIFF_BYTES."""
+    docx = _real_docx()
+    validate_magic_bytes("docx", docx[:MAGIC_SNIFF_BYTES])
+    validate_magic_bytes("docx", docx)
+
+
 def test_validate_magic_bytes_rejects_a_renamed_html_file():
     with pytest.raises(UploadValidationError):
         validate_magic_bytes("pdf", b"<html><body>not a pdf</body></html>")
+
+
+def test_validate_magic_bytes_rejects_an_executable_renamed_to_txt():
+    with pytest.raises(UploadValidationError):
+        validate_magic_bytes("txt", b"MZ\x90\x00" + b"\x00" * 300)
 ```
 
 - [ ] **Step 2: Run test, expect FAIL** (`app.documents.storage` does not exist)
@@ -3060,11 +3121,19 @@ ALLOWED_CONTENT_TYPES = {
     "html": {"text/html", "application/xhtml+xml", "text/plain"},
 }
 
-# Expected sniffed mime for binary formats. Text formats are checked by ruling
+# Expected sniffed mimes for binary formats. Text formats are checked by ruling
 # OUT binary signatures instead, because plain text has no magic bytes.
 EXPECTED_MAGIC_MIME = {
-    "pdf": "application/pdf",
-    "docx": "application/zip",  # a .docx IS a zip; filetype reports the container
+    "pdf": {"application/pdf"},
+    # A .docx IS a zip, and which mime `filetype` reports depends entirely on how
+    # many bytes it was given: the plain container from a truncated head, the real
+    # OOXML type once it can read the archive's central directory. Accepting only
+    # application/zip rejects every real .docx the moment a caller sniffs more than
+    # MAGIC_SNIFF_BYTES, so both are listed.
+    "docx": {
+        "application/zip",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    },
 }
 TEXT_EXTENSIONS = {"txt", "md", "html"}
 MAGIC_SNIFF_BYTES = 261  # what `filetype` needs to identify every supported format
@@ -3115,7 +3184,7 @@ def validate_magic_bytes(extension: str, head: bytes) -> None:
         return
 
     expected = EXPECTED_MAGIC_MIME[extension]
-    if guess is None or guess.mime != expected:
+    if guess is None or guess.mime not in expected:
         actual = guess.mime if guess else "unknown"
         raise UploadValidationError(
             f"file content ({actual}) does not match the .{extension} extension"
@@ -3194,7 +3263,7 @@ async def delete_document_files(upload_dir: Path, document_id: str) -> None:
 - [ ] **Step 5: Run tests, expect PASS**
 
 Run: `pytest tests/test_storage.py -v`
-Expected: all 11 tests PASS
+Expected: all 16 tests PASS
 
 - [ ] **Step 6: Commit**
 
