@@ -211,7 +211,12 @@ def main(argv: list[str]) -> int:
 
         if step.task in unrun:
             absent = missing.get(step.task) or ["no Write/Create step"]
-            skipped.append(f"{where} - task has not run yet (missing: {', '.join(absent[:3])})")
+            # Spell out the truncation: Task 20 is missing 14 files, and a bare
+            # absent[:3] printed as if those three were the whole list.
+            shown = ", ".join(absent[:3])
+            if len(absent) > 3:
+                shown += f", ... (+{len(absent) - 3} more)"
+            skipped.append(f"{where} - task has not run yet (missing: {shown})")
             continue
         if not step.blocks:
             skipped.append(f"{where} - no code block (empty file or prose-only step)")

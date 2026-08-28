@@ -6693,7 +6693,14 @@ class VectorStore(ABC):
     """
 
     @abstractmethod
-    async def upsert(self, items: list[VectorItem]) -> None: ...
+    async def upsert(self, items: list[VectorItem]) -> None:
+        """Insert or replace chunks by (document_id, chunk_index).
+
+        Items MUST be unique by (document_id, chunk_index); a duplicate raises
+        ValueError. The precondition lives here, not only on PgVectorStore: a
+        second backend that last-write-wins on a duplicate instead of raising
+        restores exactly the per-backend divergence this interface removes.
+        """
 
     @abstractmethod
     async def search(
@@ -6813,15 +6820,29 @@ class PgVectorStore(VectorStore):
         await self.db.execute(delete(Chunk).where(Chunk.document_id == document_id))
 ```
 
-- [ ] **Step 4: Run tests, expect PASS**
+- [ ] **Step 4: Modify `backend/app/main.py`** — say why the readiness check is not behind `VectorStore`
+
+The dimension probe reads the Postgres catalog, which a remote backend does not
+have, so it is the one place pgvector is allowed to leak. Without this note the
+next reader "fixes" it by pushing it behind the interface. Insert directly above
+`EMBEDDING_DIM_SQL`:
+
+```python
+# pgvector-specific and deliberately NOT behind VectorStore: it inspects the
+# Postgres catalog, which no remote backend has. Whoever adds Qdrant deletes this
+# readiness check rather than reimplementing it - see app/retrieval/vector_store.py.
+EMBEDDING_DIM_SQL = """
+```
+
+- [ ] **Step 5: Run tests, expect PASS**
 
 Run: `pytest tests/test_vector_store.py -v` (Postgres running)
-Expected: all 6 tests PASS
+Expected: all 8 tests PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add backend/app/retrieval/__init__.py backend/app/retrieval/vector_store.py backend/tests/test_vector_store.py
+git add backend/app/retrieval/__init__.py backend/app/retrieval/vector_store.py backend/tests/test_vector_store.py backend/app/main.py
 git commit -m "feat: VectorStore interface with a pgvector implementation"
 ```
 

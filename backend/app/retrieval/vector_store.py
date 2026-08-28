@@ -39,7 +39,14 @@ class VectorStore(ABC):
     """
 
     @abstractmethod
-    async def upsert(self, items: list[VectorItem]) -> None: ...
+    async def upsert(self, items: list[VectorItem]) -> None:
+        """Insert or replace chunks by (document_id, chunk_index).
+
+        Items MUST be unique by (document_id, chunk_index); a duplicate raises
+        ValueError. The precondition lives here, not only on PgVectorStore: a
+        second backend that last-write-wins on a duplicate instead of raising
+        restores exactly the per-backend divergence this interface removes.
+        """
 
     @abstractmethod
     async def search(
