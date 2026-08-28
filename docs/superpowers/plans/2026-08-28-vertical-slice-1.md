@@ -2245,7 +2245,10 @@ from app.core.config import get_settings
 
 SESSION_KEY_PREFIX = "session:"
 MIN_PASSWORD_LENGTH = 8
-# bcrypt 4.x raises ValueError above 72 bytes rather than silently truncating.
+# bcrypt silently TRUNCATES at 72 bytes (verified against bcrypt 4.2.0: hashpw of
+# a 73-byte password succeeds, and checkpw then matches any longer string sharing
+# the first 72 bytes). It does not raise. So this limit has to be enforced here -
+# do not delete the check in hash_password believing the library covers it.
 MAX_PASSWORD_BYTES = 72
 
 # Pre-computed hash of a value nobody will submit, used to burn the same CPU on
