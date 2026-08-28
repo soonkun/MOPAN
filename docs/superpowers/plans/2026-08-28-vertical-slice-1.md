@@ -422,7 +422,8 @@ CHUNKING_STRATEGY=semantic
 # NO LONGER a verbatim slice of the document: sentences are stripped and rejoined
 # with a single space, so newlines and repeated whitespace between them collapse
 # (measured: 40 source newlines survive as 0). Non-whitespace characters and
-# their order are always kept. The document detail view renders that normalised
+# their order are kept at MAX_CHUNK_TOKENS >= 4 but NOT below it - see the low
+# end note below. The document detail view renders that normalised
 # text; Korean and other CJK reach this regime at these defaults, English
 # generally does not.
 CHUNK_SIZE=800
@@ -430,9 +431,10 @@ CHUNK_OVERLAP=100
 # Valid range 1-4095. The ceiling is half of text-embedding-3-*'s 8191-token
 # input limit, which leaves room for the separator residual the chunker's token
 # accounting can under-count by. Out of range fails at startup.
-# At the low end, a limit narrower than a single character (1-2 with Korean or
-# emoji) cannot split cleanly and emits a replacement character; practical
-# values start in the hundreds.
+# At the low end, a limit narrower than the widest single character (1-3: over
+# a million codepoints, CJK Extension B among them, encode to 4 cl100k tokens)
+# cannot split cleanly and emits a replacement character the source never had;
+# practical values start in the hundreds.
 MAX_CHUNK_TOKENS=500
 # Cosine similarity, so -1.0 to 1.0; out of range fails at startup. Higher means
 # fewer merges. 1.0 is not "never merge" - float noise puts identical vectors at
@@ -5462,11 +5464,16 @@ class FixedChunking(ChunkingStrategy):
     the raw window. (Text with no terminal punctuation takes the hard-split path
     instead and stays verbatim, which is why the effect looks intermittent.)
     Non-whitespace characters and their order are preserved at max_chunk_tokens
-    >= 3, which is what lets each emitted part be traced back to its source
-    block. At 1 or 2 the hard splitter cannot fit one character in the budget and
-    emits U+FFFD, inserting characters the source never had - measured 22 of 443
-    emoji parts mis-cited at a limit of 2. Those limits are reachable from
-    Settings but produce corrupt chunk text regardless; .env.example says so.
+    >= 4, which is what lets each emitted part be traced back to its source
+    block. Below 4 the hard splitter cannot fit the widest character in the
+    budget and emits U+FFFD, inserting characters the source never had. Swept
+    against cl100k, every one of the 1,007,676 codepoints that encode to 4
+    tokens is exposed: a 64-character corpus of them (CJK Extension B, plausible
+    in Korean and Chinese name and historical data) takes 256 U+FFFD at a limit
+    of 3 and 0 at 4. Common emoji merge to 3 or fewer (U+1F600 is 2, U+1F389 is
+    3), which is why an emoji corpus looked clean at 3. Those limits are
+    reachable from Settings but produce corrupt chunk text regardless;
+    .env.example says so.
     """
 
     def __init__(self, chunk_size: int = 800, overlap: int = 100, max_chunk_tokens: int = 500):
@@ -6343,9 +6350,7 @@ and append to the model validator, after the `SEMANTIC_SIMILARITY_THRESHOLD` che
         # error - just cost and latency; above 2048 the endpoint rejects the
         # array mid-document.
         if not 1 <= self.embedding_batch_size <= EMBEDDING_MAX_BATCH_SIZE:
-            raise ValueError(
-                f"EMBEDDING_BATCH_SIZE must satisfy 1 <= value <= {EMBEDDING_MAX_BATCH_SIZE}"
-            )
+            raise ValueError(f"EMBEDDING_BATCH_SIZE must satisfy 1 <= value <= {EMBEDDING_MAX_BATCH_SIZE}")
         if self.embedding_batch_chars < 1:
             raise ValueError("EMBEDDING_BATCH_CHARS must be at least 1")
 ```
@@ -6375,7 +6380,7 @@ def test_out_of_range_embedding_batch_chars_is_rejected(value):
 - [ ] **Step 7: Run tests, expect PASS**
 
 Run: `pytest tests/test_llm_provider.py tests/test_settings.py -v`
-Expected: all 25 + 15 tests PASS (no real API call — the SDK client methods are mocked; the
+Expected: all 25 + 20 tests PASS (no real API call — the SDK client methods are mocked; the
 timeout and retry tests use a loopback socket and `httpx.MockTransport`)
 
 - [ ] **Step 8: Commit**

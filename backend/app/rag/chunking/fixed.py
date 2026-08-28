@@ -33,11 +33,16 @@ class FixedChunking(ChunkingStrategy):
     the raw window. (Text with no terminal punctuation takes the hard-split path
     instead and stays verbatim, which is why the effect looks intermittent.)
     Non-whitespace characters and their order are preserved at max_chunk_tokens
-    >= 3, which is what lets each emitted part be traced back to its source
-    block. At 1 or 2 the hard splitter cannot fit one character in the budget and
-    emits U+FFFD, inserting characters the source never had - measured 22 of 443
-    emoji parts mis-cited at a limit of 2. Those limits are reachable from
-    Settings but produce corrupt chunk text regardless; .env.example says so.
+    >= 4, which is what lets each emitted part be traced back to its source
+    block. Below 4 the hard splitter cannot fit the widest character in the
+    budget and emits U+FFFD, inserting characters the source never had. Swept
+    against cl100k, every one of the 1,007,676 codepoints that encode to 4
+    tokens is exposed: a 64-character corpus of them (CJK Extension B, plausible
+    in Korean and Chinese name and historical data) takes 256 U+FFFD at a limit
+    of 3 and 0 at 4. Common emoji merge to 3 or fewer (U+1F600 is 2, U+1F389 is
+    3), which is why an emoji corpus looked clean at 3. Those limits are
+    reachable from Settings but produce corrupt chunk text regardless;
+    .env.example says so.
     """
 
     def __init__(self, chunk_size: int = 800, overlap: int = 100, max_chunk_tokens: int = 500):
