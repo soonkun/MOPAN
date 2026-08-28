@@ -52,6 +52,10 @@ Every task must honour all of these. They are the distilled binding requirements
 **Testing**
 - Every task that touches Python logic ends with a passing pytest run. Test-only dependencies live in `requirements-dev.txt` and are not installed into production images.
 - Tests run against a dedicated `mopan_test` database with a `NullPool` engine and dependency overrides. `@pytest_asyncio.fixture` for async fixtures — never bare `@pytest.fixture`.
+- ⚠️ **The suite is serial-only. Do not add `-n auto` / `pytest-xdist`, and do not run two pytest sessions at once.** The session-scoped `migrated_database` fixture runs `alembic downgrade base` then `upgrade head` against a single fixed `mopan_test`, and `clean_db` truncates all six tables after every DB-touching test. Two concurrent sessions therefore drop and truncate each other's schema mid-run; under xdist each worker gets its own session-scoped fixture instance, so N workers would `downgrade base` on top of each other. Failures from this look like random, unreproducible "table does not exist" / missing-row errors, not like a race.
+  - Parallelising later requires **one** of: (a) per-worker databases — derive the name in `_test_database_url()` from `PYTEST_XDIST_WORKER` (falling back to the pid), so each worker migrates and truncates its own; or (b) a Postgres advisory lock (`pg_advisory_lock`) held around `migrated_database` so only one worker migrates while the others wait — this fixes the migration race but **not** `clean_db` truncation, so it only helps combined with per-worker schemas.
+  - Most of the motive would disappear anyway with a test-only bcrypt-rounds setting: `tests/test_auth.py` already costs ~100s and almost all of it is bcrypt work factor, not I/O.
+  - None of this is in scope for Slice 1 — this bullet records the constraint and the options so the next person does not discover it by debugging a phantom failure.
 
 ---
 
@@ -631,9 +635,17 @@ git commit -m "chore: scaffold repo, tooling config, and docker-compose"
 
 - [ ] **Step 1: Write `backend/app/core/config.py`**
 
+`environment` is typed `Literal["development", "production"]`, not `str`. Four separate
+production behaviours key off the exact literal `"production"` — the admin bootstrap gate
+(Task 5), the session cookie's `secure` flag (Task 5), the OpenAI-key requirement, and the
+default-DB-password refusal. With a free-form `str`, `ENVIRONMENT=Production` or
+`ENVIRONMENT=prod` silently disables **all four** and the app boots looking healthy: a
+fail-open configuration error. `Literal` turns that typo into a startup validation failure.
+
 ```python
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -654,7 +666,10 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    environment: str = "development"
+    # Literal, not str: a typo like ENVIRONMENT=Production would otherwise
+    # silently disable every production safeguard that compares against
+    # "production". Fail at startup instead.
+    environment: Literal["development", "production"] = "development"
 
     database_url: str = "postgresql+asyncpg://mopan:mopan@localhost:5432/mopan"
     redis_url: str = "redis://localhost:6379/0"
@@ -1168,9 +1183,7 @@ def test_values_are_read_from_the_env_file(tmp_path, monkeypatch):
     env_file.write_text("ANSWER_MODEL=model-from-file\n", encoding="utf-8")
 
     class FileSettings(Settings):
-        model_config = SettingsConfigDict(
-            env_file=env_file, env_file_encoding="utf-8", extra="ignore"
-        )
+        model_config = SettingsConfigDict(env_file=env_file, env_file_encoding="utf-8", extra="ignore")
 
     assert FileSettings().answer_model == "model-from-file"
 
@@ -1258,9 +1271,7 @@ async def test_ready_rejects_embedding_dim_mismatch(app, client, db):
     if deployed is None:
         pytest.skip("chunks table does not exist until Task 3")
 
-    app.state.settings = app.state.settings.model_copy(
-        update={"embedding_dim": deployed + 1}
-    )
+    app.state.settings = app.state.settings.model_copy(update={"embedding_dim": deployed + 1})
     response = await client.get("/api/health/ready")
     assert response.status_code == 503
     assert "does not match" in response.json()["detail"]
@@ -2169,7 +2180,7 @@ git commit -m "feat: ORM models, initial migration, and ORM/schema drift test"
 
 **Interfaces:**
 - Consumes: `get_settings()` (Task 2).
-- Produces: `hash_password(password) -> str`, `verify_password(password, password_hash) -> bool` (never raises), `dummy_verify() -> None`, `async create_session(redis, user_id) -> str`, `async get_session_user_id(redis, session_id) -> str | None`, `async delete_session(redis, session_id) -> None`, `MIN_PASSWORD_LENGTH`, `MAX_PASSWORD_BYTES`, `SESSION_KEY_PREFIX`.
+- Produces: `hash_password(password) -> str`, `verify_password(password, password_hash) -> bool` (never raises), `dummy_verify() -> None`, `async create_session(redis, user_id, ttl_seconds) -> str` (TTL is an explicit parameter with no default, so a caller that forgets it fails loudly rather than silently using a stale `@lru_cache`d setting), `async get_session_user_id(redis, session_id) -> str | None`, `async delete_session(redis, session_id) -> None`, `MIN_PASSWORD_LENGTH`, `MAX_PASSWORD_BYTES`, `SESSION_KEY_PREFIX`.
 
 - [ ] **Step 1: Write `backend/tests/test_security.py`**
 
@@ -2624,6 +2635,9 @@ handler that does not echo the rejected value, then mount the router immediately
         errors = [{k: v for k, v in error.items() if k != "input"} for error in exc.errors()]
         return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 ```
+
+(at the top of the module: `from fastapi.encoders import jsonable_encoder`,
+`from fastapi.exceptions import RequestValidationError`, `from fastapi.responses import JSONResponse`.)
 
 ```python
     from app.auth.router import router as auth_router
@@ -3334,7 +3348,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.authorization import get_readable_document
 from app.auth.dependencies import get_current_user, require_admin
-from app.core.config import Settings, get_settings
+from app.core.config import Settings, get_app_settings
 from app.core.db import get_db_session
 from app.core.logging import log_event
 from app.documents.service import enqueue_document_processing, get_arq_pool
@@ -3420,7 +3434,7 @@ async def upload_document(
     file: UploadFile = File(...),
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db_session),
-    settings: Settings = Depends(get_settings),
+    settings: Settings = Depends(get_app_settings),
     arq_pool: ArqRedis = Depends(get_arq_pool),
 ):
     collection = await db.get(Collection, collection_id)
@@ -3565,7 +3579,7 @@ async def delete_document(
     document_id: uuid.UUID,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db_session),
-    settings: Settings = Depends(get_settings),
+    settings: Settings = Depends(get_app_settings),
 ):
     document = await get_readable_document(db, document_id)
     await db.delete(document)  # chunks cascade via ON DELETE CASCADE
@@ -6785,7 +6799,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.auth.authorization import get_owned_conversation
 from app.auth.dependencies import get_current_user
 from app.chat.service import answer, load_history, persist_turn, retrieve
-from app.core.config import Settings, get_settings
+from app.core.config import Settings, get_app_settings
 from app.core.db import get_db_session
 from app.llm.base import LLMError, LLMProvider
 from app.models.conversation import Conversation
@@ -6818,7 +6832,7 @@ async def chat(
     user: User = Depends(get_current_user),
     llm_provider: LLMProvider = Depends(get_llm_provider),
     sessionmaker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
-    settings: Settings = Depends(get_settings),
+    settings: Settings = Depends(get_app_settings),
 ):
     """Server-Sent Events. Slice 1 emits status -> citations -> done; the `token`
     event type is reserved, and Slice 3 will add per-step execution status here
@@ -6891,7 +6905,7 @@ async def search(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
     llm_provider: LLMProvider = Depends(get_llm_provider),
-    settings: Settings = Depends(get_settings),
+    settings: Settings = Depends(get_app_settings),
 ):
     """Retrieval on its own, so search quality can be inspected without going
     through the chat model."""

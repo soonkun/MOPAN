@@ -117,13 +117,17 @@ Alembic으로 스키마를 마이그레이션 관리한다. `vector` extension �
 
 - RAG 코퍼스는 조직 공용이다. 그래서 문서/청크는 인증된 사용자면 읽을 수 있어야 인용 클릭이 동작한다. 대신 **코퍼스에 무엇이 들어가는지는 admin만 결정**한다 — 아무나 가입해 문서를 올릴 수 있으면 그 문서가 다른 모든 사용자의 답변 근거가 되는 corpus poisoning이 성립한다.
 - 대화 이력은 정반대다. 사용자별로 완전히 격리하고, 남의 대화 UUID로 접근하면 존재 여부를 흘리지 않도록 403이 아니라 **404**를 반환한다.
-- 최초 가입자는 자동으로 `admin`이 되고 기본 Collection이 함께 생성된다. 이후 self-signup 허용 여부는 `ALLOW_SELF_REGISTRATION`으로 제어하며 `ENVIRONMENT=production`에서는 기본 비활성이다. `scripts/create_admin.py`로도 시드할 수 있다.
+- **admin 부트스트랩은 production에서 비활성이다.** 구현은 `is_first_user = user_count == 0 and settings.environment != "production"`이다.
+  - production **밖**에서는 최초 가입자가 자동으로 `admin`이 되고 기본 Collection이 함께 생성된다. `docker compose up` → 브라우저 열고 가입 → 바로 사용, 시딩 단계가 없다.
+  - production에서는 이 경로가 **완전히 닫힌다**. 인증 없는 엔드포인트가 공용 RAG 코퍼스의 admin 권한을 "먼저 POST한 사람"에게 넘기는 land-grab이 되기 때문이다. production의 최초 admin은 반드시 `scripts/create_admin.py`로 만든다.
+  - `ALLOW_SELF_REGISTRATION`은 production에서 기본 비활성(`None` → `environment != "production"`)이므로, production의 기본 상태에서 `POST /api/auth/register`는 최초 요청부터 전부 거부된다.
+  - 운영자가 production에서 `ALLOW_SELF_REGISTRATION=true`를 명시적으로 켜면 가입은 열리지만, 생성되는 계정은 항상 `role="user"`이고 기본 Collection도 만들어지지 않는다. 즉 **API를 통해서는 admin이 될 수 없다.**
 - `require_admin` 의존성은 Slice 4/5의 모든 관리 화면이 딛고 설 토대다.
 
 ## 데이터 흐름
 
 ### 인증
-- `POST /api/auth/register` — 최초 사용자는 admin, 이후는 `ALLOW_SELF_REGISTRATION` 정책에 따름. 중복 이메일도 일반화된 메시지로 응답해 계정 열거를 막는다. 비밀번호는 8–72바이트로 제한한다(bcrypt 4.x는 72바이트 초과 시 예외를 던진다).
+- `POST /api/auth/register` — production **밖**에서만 최초 사용자가 admin이 된다(위 권한 모델 참고). production에서는 admin 승격 경로가 없고 가입 자체도 `ALLOW_SELF_REGISTRATION` 기본값(비활성)에 따라 거부된다. 중복 이메일도 일반화된 메시지로 응답해 계정 열거를 막는다. 비밀번호는 8–72바이트로 제한한다(bcrypt 4.x는 72바이트 초과 시 예외를 던진다).
 - `POST /api/auth/login` → bcrypt로 검증 → Redis에 세션 생성 → httpOnly 쿠키로 session id 반환. 사용자가 없을 때도 더미 해시를 검증해 응답 시간 오라클을 없앤다.
 - `POST /api/auth/logout` → **쿠키의 session id로 Redis 세션을 실제로 삭제**한 뒤 쿠키 제거
 - 인증 미들웨어: 쿠키의 session id로 Redis 조회, 없거나 만료 시 401
