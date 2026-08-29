@@ -82,7 +82,7 @@ backend/
       auth.py  document.py  collection.py  chat.py  search.py
     auth/
       dependencies.py             # get_current_user, require_admin
-      authorization.py            # get_owned_conversation, get_document_or_404
+      authorization.py            # get_owned_conversation, get_readable_document
       service.py                  # register/login/logout logic
       router.py                   # /api/auth
     documents/
@@ -9412,8 +9412,9 @@ Four properties this module owns that no downstream test reaches:
 
   **The corollary for Slice 3:** because `retrieve()` commits, an Orchestrator
   must give each step its own short session — exactly as Task 18's router already
-  does, opening one session for conversation+history+retrieval, holding none
-  across `answer()`, and opening a fresh one to persist. A single session held as
+  does, resolving the conversation and its history on the request's own session
+  before the stream starts, opening a second short session for retrieval, holding
+  none across `answer()`, and opening a third to persist. A single session held as
   a unit of work across a whole plan would have `retrieve()` make partial
   plan/step rows durable mid-flight, past the point a later step's failure could
   roll them back.
@@ -12157,7 +12158,7 @@ git commit -m "docs: README and cross-platform Python smoke test"
 
 ## Self-Review Notes
 
-- **Spec coverage.** Auth + admin role (Task 5), authorization (Tasks 5, 7, 18), upload validation (Tasks 6–7), parsing (Task 8), chunking (Tasks 9–10), LLM provider (Task 11), `VectorStore` (Task 12), pipeline/worker (Task 13), RRF (Task 14), hybrid retrieval + reranker + `Evidence` (Task 15), prompt safety (Task 16), `retrieve`/`answer` split (Task 17), SSE chat + search + chunks (Task 18), end-to-end proof (Task 19), frontend (Tasks 20–23), Compose + README (Tasks 1, 24). Logging exists from Task 2 onward.
+- **Spec coverage.** Auth + admin role (Task 5), authorization (Tasks 5, 7, 18), upload validation (Tasks 6–7), parsing (Task 8), chunking (Tasks 9–10), LLM provider (Task 11), `VectorStore` (Task 12), pipeline/worker (Task 13), RRF (Task 14), hybrid retrieval + reranker + `Evidence` (Task 15), prompt safety (Task 16), `retrieve`/`answer` split (Task 17), SSE chat + search + owner-scoped conversations (Task 18; `/api/chunks/{id}` is Task 7's), end-to-end proof (Task 19), frontend (Tasks 20–23), Compose + README (Tasks 1, 24). Logging exists from Task 2 onward.
 - **Type consistency.** `ChunkCandidate`, `VectorItem`, `ScoredId`, `RetrievedChunk`, `Evidence`, `ChatMessage`, `ChatResult`, `ChatAnswer`, citation dicts, and `DocumentStatus` are used identically wherever they are produced and consumed. `EMBEDDING_DIM` has exactly one definition and the model, migration, tests, and a startup check all read it.
 - **No placeholders.** Every step is runnable code or a shell command with a stated expected result.
 - **Ordering caveats.** Task 7's structure endpoint imports `get_parser` from Task 8; Task 2's health test needs Task 3's migration. Both are called out in their steps. Everything else is strictly forward-referencing.
