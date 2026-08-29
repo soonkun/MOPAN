@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { Conversation, User } from "@/lib/types";
@@ -17,6 +17,8 @@ export default function Sidebar() {
   // for the length of the fetch, including for users who do have conversations.
   const [conversations, setConversations] = useState<Conversation[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const drawerRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -39,15 +41,39 @@ export default function Sidebar() {
     void load();
   }, [load, pathname]);
 
+  // Without these the drawer is only technically keyboard-usable: nothing moves
+  // focus into it on open, so dismissing it means tabbing past every history
+  // link to reach the closing overlay - ~34 presses with 30 conversations.
+  // Escape closes it, and focus returns to the toggle that opened it.
+  useEffect(() => {
+    if (!open) return;
+    drawerRef.current?.querySelector<HTMLElement>("a, button")?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      toggleRef.current?.focus();
+    };
+  }, [open]);
+
   async function handleLogout() {
+    // Navigate only on success. A `finally` here lands the user on /login after
+    // a failed request - with mopan_session still in the browser and the Redis
+    // session still valid, because neither delete_cookie nor delete_session
+    // ran. "Logged out" with a live session is the worst outcome available, so
+    // a failure stays put and says so through the same ErrorBanner.
     try {
       await apiFetch("/api/auth/logout", { method: "POST" });
-    } finally {
-      router.push("/login");
-      // The App Router caches rendered segments client-side. Without this the
-      // authenticated pages stay in that cache after the cookie is gone.
-      router.refresh();
+    } catch (err) {
+      setError(errorMessage(err));
+      return;
     }
+    router.push("/login");
+    // The App Router caches rendered segments client-side. Without this the
+    // authenticated pages stay in that cache after the cookie is gone.
+    router.refresh();
   }
 
   const navLinks = [
@@ -90,11 +116,15 @@ export default function Sidebar() {
       </div>
 
       <div className="mt-3 border-t border-gray-200 pt-3">
+        {/* The placeholder is U+00A0, not an ASCII space: a plain space is
+            collapsible, so the line gets no line box and is 0px tall until
+            /api/auth/me lands - at which point it grows 16px and shoves
+            로그아웃 down under the pointer already resting on it. */}
         <div className="truncate px-3 text-xs text-gray-500">
-          {user ? `${user.email}${user.role === "admin" ? " · 관리자" : ""}` : " "}
+          {user ? `${user.email}${user.role === "admin" ? " · 관리자" : ""}` : "\u00a0"}
         </div>
         <button
-          onClick={handleLogout}
+          onClick={() => void handleLogout()}
           className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm hover:bg-gray-200"
         >
           로그아웃
@@ -105,17 +135,24 @@ export default function Sidebar() {
 
   return (
     <>
-      <button
-        aria-label="메뉴 열기"
-        aria-expanded={open}
-        className="fixed left-2 top-2 z-20 rounded border border-gray-300 bg-white px-2 py-1 text-sm md:hidden"
-        onClick={() => setOpen(true)}
-      >
-        ☰
-      </button>
+      {/* Not rendered while the drawer is open: at z-20 it sits *under* the
+          z-30 drawer, so a pointer user cannot reach it while a keyboard user
+          can still focus it and press it for nothing. No aria-expanded either
+          - it only opens; the drawer closes via its overlay or Escape. */}
+      {!open && (
+        <button
+          ref={toggleRef}
+          aria-label="메뉴 열기"
+          aria-controls="sidebar-drawer"
+          className="fixed left-2 top-2 z-20 rounded border border-gray-300 bg-white px-2 py-1 text-sm md:hidden"
+          onClick={() => setOpen(true)}
+        >
+          ☰
+        </button>
+      )}
       <div className="hidden md:block">{content}</div>
       {open && (
-        <div className="fixed inset-0 z-30 flex md:hidden">
+        <div id="sidebar-drawer" ref={drawerRef} className="fixed inset-0 z-30 flex md:hidden">
           <div className="relative">{content}</div>
           {/* A button, not a div: this overlay is the only way to close the
               drawer, and as a div it is unreachable without a pointer. */}

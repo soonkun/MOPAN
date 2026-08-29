@@ -11669,9 +11669,13 @@ export function safeNextPath(raw: string | null, fallback = "/chat"): string {
   return raw;
 }
 
+/** Only an ApiError carries a message worth showing: it came from the backend
+ *  and is already Korean. A generic Error does not - a failed fetch throws a
+ *  TypeError whose message is the browser's own English string ("Failed to
+ *  fetch", "NetworkError when attempting to fetch resource.", "Load failed"),
+ *  and returning that verbatim puts English in front of the user. */
 export function errorMessage(err: unknown): string {
   if (err instanceof ApiError) return err.message;
-  if (err instanceof Error) return err.message;
   return "알 수 없는 오류가 발생했습니다.";
 }
 
@@ -12031,17 +12035,34 @@ git commit -m "feat: frontend scaffold, same-origin api proxy, login/register"
 - Consumes: `apiFetch` (Task 20), `/api/conversations`, `/api/auth/me`, `/api/auth/logout`.
 - Produces: `<Sidebar />` — nav links, conversation history, current user, and a **logout button** (backend logout existed in revision 1 and nothing ever called it); `(app)` route group layout wrapping every authenticated page.
 
+**The `(app)` group has no page of its own until Task 22.** A route group with
+only a `layout.tsx` emits no route, so nothing in the running app renders the
+Sidebar while Task 21 is the head commit — `/chat` and `/documents` are 404 until
+Tasks 22 and 23 land. Every browser measurement below was taken against a
+throwaway `app/(app)/probe/page.tsx`, created for the measurement and deleted
+before the commit. Do not assume `/chat` will show you the sidebar.
+
 **`h-screen`, not `min-h-screen`, on the `(app)` container — measured.** The
 Sidebar is a full-height column: a `flex-1 overflow-y-auto` history region with
 the user line and the logout button pinned under it. That only works if
 something bounds the column's height, and `main`'s `overflow-y-auto` likewise
-only scrolls if its height is bounded. Measured in a real browser at 1280×800
-with a 4000px-tall child inside `main`: under `h-screen` the nav is 800px, `main`
-scrolls internally by 500px, the document does not scroll at all, and the logout
-button sits at `top: 750` — on screen. Under `min-h-screen` the same DOM gives a
-**4024px** nav, `main` scrolls by **0** (its `overflow-y-auto` is dead), the
-document scrolls instead, and the logout button lands at `top: 3974` — 3174px
-below the fold. Task 23's documents table is exactly the tall page that hits this.
+only scrolls if its height is bounded. Measured in headless Chrome at a
+**1280×800 viewport** with a **single 4000px-tall child** inside `main` and 31
+conversations in the history list, toggling only the container's class:
+
+| container | nav height | `main` scrollable | document scrollable | 로그아웃 `top` |
+|---|---|---|---|---|
+| `h-screen` | 800 | 3200 | 0 | 750 |
+| `min-h-screen` | 4000 | 0 | 3200 | 3950 |
+
+Under `h-screen` the overflow lands where it belongs: `main` scrolls its own
+4000px of content past an 800px window and the logout button stays on screen.
+Under `min-h-screen` the container grows to the content instead, `main`'s
+`overflow-y-auto` is dead (0px to scroll), the *document* takes the 3200px
+instead, the nav stretches to the full 4000px, and the logout button lands at
+`top: 3950` — 3150px below an 800px fold. Task 23's documents table is exactly
+the tall page that hits this. (`min-h-screen` computes to `min-height: 800px`
+here, so the difference is entirely `height` vs `min-height`, not a bad class.)
 
 **`conversations` starts as `null`, not `[]`.** `[]` is indistinguishable from
 "the fetch came back empty", so every page load paints "아직 대화가 없습니다."
@@ -12052,18 +12073,73 @@ while the real conversation title was present in 112 and 111 samples respectivel
 
 **Nothing user-visible is in English.** The history heading is `대화 기록`; the
 plan's earlier `History` was the only English string in an otherwise Korean
-sidebar. The error line reuses `ErrorBanner` (Task 20) rather than a bare `<p>`,
-which is what gives the failure a `role="alert"` — an error that appears
-asynchronously with no live region is silent to a screen reader. Verified by
-forcing `/api/conversations` to 500 with a Korean `detail`: the sidebar kept
-rendering, the empty state stayed suppressed, no uncaught exception, and
-`nav [role=alert]` held the backend's message.
+sidebar. This is a rule for the whole UI, not for the sidebar: Tasks 22 and 23
+were amended to obey it (`Collection` → `분류`, `Chunk` → `청크`, `Section:` →
+`소제목:`, `tokens`/`chars` → `토큰 n개`/`n자`, `p.12` → `12쪽`, and the two
+`uppercase`d enum columns replaced by `BLOCK_LABEL` / `FILE_TYPE_LABEL` maps, so
+a user never reads `HEADING` or `DOCX`). `errorMessage` (Task 20) is the same
+rule enforced at the boundary: it returns the Korean fallback for anything that
+is not an `ApiError`, because a failed `fetch` throws a `TypeError` whose
+`message` is the browser's own English ("Failed to fetch" in Chrome,
+"NetworkError when attempting to fetch resource." in Firefox, "Load failed" in
+Safari). Task 21's two background fetches are the first place that would have
+reached a user.
 
-**The drawer close control is a `<button>`, not a `<div>`.** It is the only way
-to dismiss the drawer, so as a div it is unreachable without a pointer. The
-toggle also carries `aria-expanded`. Verified in a 390px viewport:
-`aria-expanded` went `false → true → false` across open and close, and the
-`메뉴 닫기` control took focus.
+The error line reuses `ErrorBanner` (Task 20) rather than a bare `<p>`, which is
+what gives the failure a `role="alert"` — an error that appears asynchronously
+with no live region is silent to a screen reader. Verified by forcing
+`/api/conversations` to 500 with a Korean `detail`: the sidebar kept rendering,
+the empty state stayed suppressed, no uncaught exception, and `nav [role=alert]`
+held the backend's message.
+
+**Logout navigates only on success.** Wrapping the request in
+`try { … } finally { router.push("/login") }` navigates even when the POST
+throws, and then the user is on the login page believing they are logged out
+while `delete_cookie` and `delete_session` never ran — the cookie is still in
+the browser and the Redis session is still valid, so typing `/chat` walks
+straight back in. Staged with CDP `Network.emulateNetworkConditions
+{offline: true}` and a real click on 로그아웃: the page stayed on the scratch
+route (`location.pathname` unchanged), `[role="alert"]` carried
+"알 수 없는 오류가 발생했습니다.", `window.unhandledrejection` fired 0 times, and
+after going back online `/api/auth/me` still answered **200** with the same
+cookie — proof that the session the `finally` version claimed to end was live.
+The handler is also called as `onClick={() => void handleLogout()}`; an `async`
+function passed straight to `onClick` turns any rejection into an
+`unhandledrejection`.
+
+**The footer placeholder is `"\u00a0"`, not `" "`.** An ASCII space is
+collapsible, so the user line gets no line box at all and is 0px tall until
+`/api/auth/me` lands. Measured on the same node with the same classes at
+1280×800: `\u00a0` → 16px line, footer top edge at `y=713`; a plain ASCII space
+→ **0px**, footer top edge at `y=729`; the loaded email → 16px, `y=713`. So the
+plain-space version moves the footer border and the bottom of the history region
+16px the moment the fetch resolves. (The 로그아웃 button itself does **not**
+move: it is the last child of a height-bounded column, so its `top` is 750 in
+all three states. The shift is the footer boundary, not the button.) The escape
+is written `\u00a0` rather than a literal U+00A0 on purpose — an invisible byte
+in the source is exactly what got silently downgraded to `0x20` once already.
+
+**The drawer close control is a `<button>`, not a `<div>`,** and the drawer is
+dismissable from the keyboard in one key. As a div the overlay is unreachable
+without a pointer; as the *last* focusable element in the drawer it is reachable
+but 34 Tab presses away (measured: 35 focusables in the drawer with 31
+conversations, close button at index 34). So `Escape` closes the drawer and
+focus moves into it on open and back to the toggle on close. The toggle carries
+`aria-controls="sidebar-drawer"` but **no `aria-expanded`**: it only opens, and
+it is not rendered at all while the drawer is up — at `z-20` under the `z-30`
+drawer it would otherwise be a control a pointer cannot reach, a keyboard can
+focus, and pressing does nothing, announced as "메뉴 열기, expanded". Verified at
+390×800: toggle absent while open, focus lands on the first drawer link
+(index 0 of 35), Escape closes it, and `document.activeElement` is the toggle
+again.
+
+**`pt-12 md:pt-0` on `main` belongs here, not on each page.** The toggle is
+`fixed` and reserves no space of its own. Measured at 390×800 against the real
+compiled CSS with a Task 23-shaped page (`mx-auto max-w-5xl p-6` + `<h1>문서</h1>`):
+the toggle occupies (8,8)–(39,38); without the padding the heading sits at
+(24,24)–(366,52), a **15×14px** overlap over its first glyph; with it the
+heading moves to (24,72) and the overlap is gone. Above `md` the sidebar is
+docked, the toggle is hidden, and the padding is 0.
 
 - [ ] **Step 1: Write `frontend/components/layout/Sidebar.tsx`**
 
@@ -12072,7 +12148,7 @@ toggle also carries `aria-expanded`. Verified in a 390px viewport:
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { Conversation, User } from "@/lib/types";
@@ -12087,6 +12163,8 @@ export default function Sidebar() {
   // for the length of the fetch, including for users who do have conversations.
   const [conversations, setConversations] = useState<Conversation[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const drawerRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -12109,15 +12187,39 @@ export default function Sidebar() {
     void load();
   }, [load, pathname]);
 
+  // Without these the drawer is only technically keyboard-usable: nothing moves
+  // focus into it on open, so dismissing it means tabbing past every history
+  // link to reach the closing overlay - ~34 presses with 30 conversations.
+  // Escape closes it, and focus returns to the toggle that opened it.
+  useEffect(() => {
+    if (!open) return;
+    drawerRef.current?.querySelector<HTMLElement>("a, button")?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      toggleRef.current?.focus();
+    };
+  }, [open]);
+
   async function handleLogout() {
+    // Navigate only on success. A `finally` here lands the user on /login after
+    // a failed request - with mopan_session still in the browser and the Redis
+    // session still valid, because neither delete_cookie nor delete_session
+    // ran. "Logged out" with a live session is the worst outcome available, so
+    // a failure stays put and says so through the same ErrorBanner.
     try {
       await apiFetch("/api/auth/logout", { method: "POST" });
-    } finally {
-      router.push("/login");
-      // The App Router caches rendered segments client-side. Without this the
-      // authenticated pages stay in that cache after the cookie is gone.
-      router.refresh();
+    } catch (err) {
+      setError(errorMessage(err));
+      return;
     }
+    router.push("/login");
+    // The App Router caches rendered segments client-side. Without this the
+    // authenticated pages stay in that cache after the cookie is gone.
+    router.refresh();
   }
 
   const navLinks = [
@@ -12160,11 +12262,15 @@ export default function Sidebar() {
       </div>
 
       <div className="mt-3 border-t border-gray-200 pt-3">
+        {/* The placeholder is U+00A0, not an ASCII space: a plain space is
+            collapsible, so the line gets no line box and is 0px tall until
+            /api/auth/me lands - at which point it grows 16px and shoves
+            로그아웃 down under the pointer already resting on it. */}
         <div className="truncate px-3 text-xs text-gray-500">
-          {user ? `${user.email}${user.role === "admin" ? " · 관리자" : ""}` : " "}
+          {user ? `${user.email}${user.role === "admin" ? " · 관리자" : ""}` : "\u00a0"}
         </div>
         <button
-          onClick={handleLogout}
+          onClick={() => void handleLogout()}
           className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm hover:bg-gray-200"
         >
           로그아웃
@@ -12175,17 +12281,24 @@ export default function Sidebar() {
 
   return (
     <>
-      <button
-        aria-label="메뉴 열기"
-        aria-expanded={open}
-        className="fixed left-2 top-2 z-20 rounded border border-gray-300 bg-white px-2 py-1 text-sm md:hidden"
-        onClick={() => setOpen(true)}
-      >
-        ☰
-      </button>
+      {/* Not rendered while the drawer is open: at z-20 it sits *under* the
+          z-30 drawer, so a pointer user cannot reach it while a keyboard user
+          can still focus it and press it for nothing. No aria-expanded either
+          - it only opens; the drawer closes via its overlay or Escape. */}
+      {!open && (
+        <button
+          ref={toggleRef}
+          aria-label="메뉴 열기"
+          aria-controls="sidebar-drawer"
+          className="fixed left-2 top-2 z-20 rounded border border-gray-300 bg-white px-2 py-1 text-sm md:hidden"
+          onClick={() => setOpen(true)}
+        >
+          ☰
+        </button>
+      )}
       <div className="hidden md:block">{content}</div>
       {open && (
-        <div className="fixed inset-0 z-30 flex md:hidden">
+        <div id="sidebar-drawer" ref={drawerRef} className="fixed inset-0 z-30 flex md:hidden">
           <div className="relative">{content}</div>
           {/* A button, not a div: this overlay is the only way to close the
               drawer, and as a div it is unreachable without a pointer. */}
@@ -12217,7 +12330,14 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-screen">
       <Sidebar />
-      <main className="flex-1 overflow-y-auto">{children}</main>
+      {/* pt-12 md:pt-0 reserves the strip the fixed hamburger occupies. It is
+          part of the layout, not of each page: without it every page's first
+          element sits under the toggle at (8,8)-(39,38).
+          overflow-y-auto is load-bearing twice over. It bounds the scroll, and
+          it makes the computed overflow-x `auto` too, which zeroes this flex
+          item's automatic minimum size - that is what stops Task 23's wide
+          table from pushing the 256px sidebar off-screen. */}
+      <main className="flex-1 overflow-y-auto pt-12 md:pt-0">{children}</main>
     </div>
   );
 }
@@ -12264,7 +12384,7 @@ import type { Chunk, Citation } from "@/lib/types";
 
 function label(citation: Citation): string {
   const parts = [citation.filename ?? "출처"];
-  if (citation.page !== null) parts.push(`p.${citation.page}`);
+  if (citation.page !== null) parts.push(`${citation.page}쪽`);
   if (citation.section) parts.push(citation.section);
   return parts.join(", ");
 }
@@ -12300,7 +12420,8 @@ export default function CitationBadge({ citation }: { citation: Citation }) {
             className="max-h-[80vh] w-full max-w-2xl overflow-y-auto rounded border border-gray-200 bg-white p-4"
             onClick={(e) => e.stopPropagation()}
           >
-            <p className="mb-2 text-xs uppercase tracking-wide text-gray-400">
+            {/* No `uppercase`: this line is a filename plus Korean labels. */}
+            <p className="mb-2 text-xs tracking-wide text-gray-400">
               [{citation.index}] {label(citation)}
             </p>
             {error && <p className="text-sm text-red-600">{error}</p>}
@@ -12360,7 +12481,7 @@ export default function MessageBubble({ message }: { message: Message }) {
             {message.citations.map((c) => (
               <div key={c.chunk_id} className="truncate">
                 [{c.index}] {c.filename ?? "출처"}
-                {c.page !== null ? `, p.${c.page}` : ""}
+                {c.page !== null ? `, ${c.page}쪽` : ""}
                 {c.section ? `, ${c.section}` : ""}
               </div>
             ))}
@@ -12467,8 +12588,12 @@ export default function ChatWindow({
     }
   }
 
+  // h-full, not h-screen: this fills `main`, which the (app) layout already
+  // bounds at h-screen. h-screen only happened to match because main stretches
+  // to 100vh - a coincidence, not a contract, and it double-counts the moment
+  // main gains a header or padding (it already has pt-12 below md).
   return (
-    <div className="flex h-screen flex-col">
+    <div className="flex h-full flex-col">
       <div className="flex-1 space-y-3 overflow-y-auto p-4">
         {messages.length === 0 && !sending && (
           <p className="mt-16 text-center text-sm text-gray-400">
@@ -12653,6 +12778,17 @@ const STATUS_LABEL: Record<string, string> = {
   failed: "실패",
 };
 
+// Raw enum values are not labels. `uppercase` on doc.file_type printed DOCX and
+// MD at the user; the five values are the ALLOWED_EXTENSIONS set in
+// backend/app/documents/validation.py.
+const FILE_TYPE_LABEL: Record<string, string> = {
+  pdf: "PDF",
+  docx: "워드",
+  txt: "텍스트",
+  md: "마크다운",
+  html: "웹문서",
+};
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -12669,11 +12805,11 @@ export default function DocumentTable({ documents }: { documents: DocumentItem[]
         <thead>
           <tr className="border-b border-gray-200 text-gray-500">
             <th className="py-2 pr-3">문서명</th>
-            <th className="py-2 pr-3">Collection</th>
+            <th className="py-2 pr-3">분류</th>
             <th className="py-2 pr-3">형식</th>
             <th className="py-2 pr-3">등록자</th>
             <th className="py-2 pr-3">등록일</th>
-            <th className="py-2 pr-3 text-right">Chunk</th>
+            <th className="py-2 pr-3 text-right">청크 수</th>
             <th className="py-2 pr-3">상태</th>
             <th className="py-2 text-right">크기</th>
           </tr>
@@ -12687,7 +12823,9 @@ export default function DocumentTable({ documents }: { documents: DocumentItem[]
                 </Link>
               </td>
               <td className="py-2 pr-3 text-gray-500">{doc.collection_name ?? "-"}</td>
-              <td className="py-2 pr-3 uppercase text-gray-500">{doc.file_type}</td>
+              <td className="py-2 pr-3 text-gray-500">
+                {FILE_TYPE_LABEL[doc.file_type] ?? doc.file_type}
+              </td>
               <td className="py-2 pr-3 text-gray-500">{doc.uploader_email ?? "-"}</td>
               <td className="py-2 pr-3 text-gray-500">
                 {new Date(doc.created_at).toLocaleDateString()}
@@ -12725,11 +12863,11 @@ export default function ChunkViewer({ chunks }: { chunks: Chunk[] }) {
       {chunks.map((chunk) => (
         <div key={chunk.id} className="rounded border border-gray-200 p-3 text-sm">
           <div className="mb-1 flex flex-wrap gap-3 text-xs text-gray-400">
-            <span>Chunk {chunk.chunk_index}</span>
-            {chunk.section && <span>Section: {chunk.section}</span>}
-            {chunk.page !== null && <span>Page {chunk.page}</span>}
-            <span>{chunk.token_count} tokens</span>
-            <span>{chunk.char_count} chars</span>
+            <span>청크 {chunk.chunk_index}</span>
+            {chunk.section && <span>소제목: {chunk.section}</span>}
+            {chunk.page !== null && <span>{chunk.page}쪽</span>}
+            <span>토큰 {chunk.token_count}개</span>
+            <span>{chunk.char_count}자</span>
           </div>
           <p className="whitespace-pre-wrap text-gray-800">{chunk.content}</p>
         </div>
@@ -12742,6 +12880,17 @@ export default function ChunkViewer({ chunks }: { chunks: Chunk[] }) {
 ```tsx
 import type { Block } from "@/lib/types";
 
+// `uppercase` on block.block_type showed the user HEADING / PARAGRAPH /
+// LIST_ITEM / TABLE_CELL. The four keys are Block["block_type"] in lib/types.ts,
+// so a new parser block type is a compile error here rather than English on
+// screen.
+const BLOCK_LABEL: Record<Block["block_type"], string> = {
+  heading: "제목",
+  paragraph: "본문",
+  list_item: "목록",
+  table_cell: "표",
+};
+
 /** Left pane of the detail view: the parsed original structure, so chunking
  *  quality can be judged against what the parser actually saw. */
 export default function StructureViewer({ blocks }: { blocks: Block[] }) {
@@ -12752,7 +12901,7 @@ export default function StructureViewer({ blocks }: { blocks: Block[] }) {
     <div className="space-y-2">
       {blocks.map((block, index) => (
         <div key={index} className="text-sm">
-          <span className="mr-2 text-xs uppercase text-gray-400">{block.block_type}</span>
+          <span className="mr-2 text-xs text-gray-400">{BLOCK_LABEL[block.block_type]}</span>
           <span
             className={
               block.block_type === "heading" ? "font-semibold text-gray-900" : "text-gray-700"
@@ -12848,7 +12997,7 @@ export default function DocumentsPage() {
       {user?.role === "admin" ? (
         <div className="space-y-3">
           <div className="flex items-center gap-2">
-            <label className="text-sm text-gray-500">Collection</label>
+            <label className="text-sm text-gray-500">분류</label>
             <select
               value={selectedCollectionId}
               onChange={(e) => setSelectedCollectionId(e.target.value)}
@@ -12872,7 +13021,7 @@ export default function DocumentsPage() {
       <input
         value={filter}
         onChange={(e) => setFilter(e.target.value)}
-        placeholder="문서명 / Collection / 등록자 검색"
+        placeholder="문서명 / 분류 / 등록자 검색"
         className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
       />
       <DocumentTable documents={visible} />
@@ -12932,7 +13081,7 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
           </div>
         </section>
         <section className="rounded border border-gray-200 p-4">
-          <h2 className="mb-3 text-sm font-medium text-gray-500">Chunk 목록 ({chunks.length})</h2>
+          <h2 className="mb-3 text-sm font-medium text-gray-500">청크 목록 ({chunks.length})</h2>
           <div className="max-h-[70vh] overflow-y-auto">
             <ChunkViewer chunks={chunks} />
           </div>

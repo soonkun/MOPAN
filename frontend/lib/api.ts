@@ -88,9 +88,13 @@ export function safeNextPath(raw: string | null, fallback = "/chat"): string {
   return raw;
 }
 
+/** Only an ApiError carries a message worth showing: it came from the backend
+ *  and is already Korean. A generic Error does not - a failed fetch throws a
+ *  TypeError whose message is the browser's own English string ("Failed to
+ *  fetch", "NetworkError when attempting to fetch resource.", "Load failed"),
+ *  and returning that verbatim puts English in front of the user. */
 export function errorMessage(err: unknown): string {
   if (err instanceof ApiError) return err.message;
-  if (err instanceof Error) return err.message;
   return "알 수 없는 오류가 발생했습니다.";
 }
 
