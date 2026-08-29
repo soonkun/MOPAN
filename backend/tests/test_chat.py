@@ -1,11 +1,13 @@
 import json
 import uuid
+from contextlib import contextmanager
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 
 from app.core.config import Settings
 from app.llm.base import ChatResult, LLMError
@@ -14,9 +16,34 @@ from app.models.message import Message
 from app.models.user import User
 
 IDLE_IN_TRANSACTION = text(
-    "SELECT count(*) FROM pg_stat_activity "
-    "WHERE datname = current_database() AND state = 'idle in transaction'"
+    "SELECT count(*) FROM pg_stat_activity WHERE pid = ANY(:pids) AND state = 'idle in transaction'"
 )
+
+
+@contextmanager
+def recorded_backend_pids(engine):
+    """Every Postgres backend the block's connections open.
+
+    Scoped to those pids rather than counting the whole database: a database-wide
+    count is only exact while nothing else holds a connection to mopan_test, which
+    is a property of how the suite happens to be run, not of the code under test.
+    NullPool means one backend per session, so this is exactly the set of
+    connections the block created - the probe's own included, and it is never
+    idle-in-transaction while it is running the probe query.
+    """
+    pids: list[int] = []
+
+    def _record(dbapi_connection, _record_) -> None:
+        pids.append(dbapi_connection.driver_connection.get_server_pid())
+
+    event.listen(engine.sync_engine, "connect", _record)
+    try:
+        yield pids
+    finally:
+        event.remove(engine.sync_engine, "connect", _record)
+    # `pid = ANY('{}')` matches nothing, so a block that opened no connection at
+    # all would make every probe inside it pass without measuring anything.
+    assert pids, "no backend was opened inside the block; the probe would be vacuous"
 
 
 def vec(*leading: float) -> list[float]:
@@ -201,13 +228,15 @@ async def test_no_connection_is_idle_in_transaction_across_the_llm_call(logged_i
     exits before the response body is sent), and a version bump could move it."""
     observed = {}
 
-    async def spy_chat(messages, **kwargs):
-        async with test_engine.connect() as probe:
-            observed["idle_in_transaction"] = await probe.scalar(IDLE_IN_TRANSACTION)
-        return ChatResult(content="ok", usage={"total_tokens": 1}, model="gpt-4o")
+    with recorded_backend_pids(test_engine) as pids:
 
-    fake_llm.chat = spy_chat
-    response = await logged_in.post("/api/chat", json={"message": "hi"})
+        async def spy_chat(messages, **kwargs):
+            async with test_engine.connect() as probe:
+                observed["idle_in_transaction"] = await probe.scalar(IDLE_IN_TRANSACTION, {"pids": pids})
+            return ChatResult(content="ok", usage={"total_tokens": 1}, model="gpt-4o")
+
+        fake_llm.chat = spy_chat
+        response = await logged_in.post("/api/chat", json={"message": "hi"})
 
     assert parse_sse(response.text)[-1]["type"] == "done"
     assert observed["idle_in_transaction"] == 0
@@ -222,37 +251,110 @@ async def test_a_client_disconnect_mid_stream_leaves_no_connection_and_no_half_t
     from app.chat.router import chat
     from app.schemas.chat import ChatRequest
 
-    user = User(email="disconnect@example.com", password_hash="x", role="user")
-    db.add(user)
-    await db.commit()
+    with recorded_backend_pids(test_engine) as pids:
+        user = User(email="disconnect@example.com", password_hash="x", role="user")
+        db.add(user)
+        await db.commit()
 
-    response = await chat(
-        payload=ChatRequest(message="hi"),
-        user=user,
-        db=db,
-        llm_provider=make_fake_llm(),
-        sessionmaker=test_sessionmaker,
-        settings=Settings(),
-    )
-    events = response.body_iterator
-    assert "searching" in await events.__anext__()
-    assert "answering" in await events.__anext__()
-    await events.aclose()
+        response = await chat(
+            payload=ChatRequest(message="hi"),
+            user=user,
+            db=db,
+            llm_provider=make_fake_llm(),
+            sessionmaker=test_sessionmaker,
+            settings=Settings(),
+        )
+        events = response.body_iterator
+        assert "searching" in await events.__anext__()
+        assert "answering" in await events.__anext__()
+        await events.aclose()
 
-    await db.close()
-    async with test_engine.connect() as probe:
-        assert await probe.scalar(IDLE_IN_TRANSACTION) == 0
+        await db.close()
+        async with test_engine.connect() as probe:
+            assert await probe.scalar(IDLE_IN_TRANSACTION, {"pids": pids}) == 0
     assert (await db.scalars(select(Message))).all() == []
+
+
+async def test_a_real_client_disconnect_stops_the_stream(app, logged_in, fake_llm, db):
+    """One layer above the test above, which closes the generator itself and so
+    only proves the generator survives being closed. Here the CLIENT goes away and
+    Starlette is what stops the stream. httpx's ASGITransport cannot express that -
+    it runs the app to completion before it hands back a response - so the app is
+    driven as raw ASGI: `receive` reports the disconnect the moment the "answering"
+    frame is on the wire, which is exactly when the generator is parked in an LLM
+    call that will never return. That the call below terminates at all IS the
+    assertion; without the teardown it hangs until fail_after fires.
+
+    "answering" and not the first frame on purpose: retrieval is finished by then,
+    so the cancellation lands in the LLM call rather than in an asyncpg query, and
+    tearing a query down mid-flight logs an "unexpected connection_lost()" future
+    exception that nothing here can retrieve."""
+
+    async def never_answers(messages, **kwargs):
+        await anyio.sleep_forever()
+
+    fake_llm.chat = never_answers
+
+    body = json.dumps({"message": "hi"}).encode()
+    cookie = "; ".join(f"{k}={v}" for k, v in logged_in.cookies.items()).encode()
+    chunks: list[bytes] = []
+    streaming = anyio.Event()
+    request_sent = False
+
+    async def receive() -> dict:
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        await streaming.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message) -> None:
+        if message["type"] == "http.response.body":
+            chunks.append(message["body"])
+            if b"answering" in message["body"]:
+                streaming.set()
+
+    with anyio.fail_after(10):
+        await app(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/api/chat",
+                "raw_path": b"/api/chat",
+                "root_path": "",
+                "query_string": b"",
+                "server": ("test", 80),
+                "client": ("test", 12345),
+                "headers": [
+                    (b"host", b"test"),
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                    (b"cookie", cookie),
+                ],
+            },
+            receive,
+            send,
+        )
+
+    assert b"answering" in b"".join(chunks)
+    assert b"done" not in b"".join(chunks)  # the stream was cut short, not finished
+    assert (await db.scalars(select(Message))).all() == []  # and no half turn was written
 
 
 # --- Search ------------------------------------------------------------------
 
 
 async def test_search_endpoint_returns_evidence(logged_in):
+    """Shape and emptiness, against an empty corpus - `results` must be exactly
+    empty, not merely a list. That a real hit comes back from a real indexed
+    document is tests/test_end_to_end.py's job."""
     response = await logged_in.post("/api/search", json={"query": "tomato"})
     assert response.status_code == 200
-    assert response.json()["query"] == "tomato"
-    assert isinstance(response.json()["results"], list)
+    assert response.json() == {"query": "tomato", "results": []}
 
 
 async def test_search_top_n_is_bounded(logged_in):
