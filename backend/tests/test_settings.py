@@ -116,6 +116,15 @@ def test_negative_rrf_k_is_rejected(value):
         Settings(rrf_k=value)
 
 
+@pytest.mark.parametrize("field", ["retrieval_top_n", "retrieval_candidate_limit"])
+@pytest.mark.parametrize("value", [0, -1])
+def test_non_positive_retrieval_limits_are_rejected(field, value):
+    """Neither knob raises at query time, it just returns less: top_n=-1 boots
+    cleanly and silently drops the last evidence item off every answer."""
+    with pytest.raises(ValueError, match=field.upper()):
+        Settings(**{field: value})
+
+
 def test_rrf_k_zero_is_accepted():
     # k=0 is pure reciprocal rank, the most top-heavy legal setting.
     assert Settings(rrf_k=0).rrf_k == 0

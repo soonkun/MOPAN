@@ -61,8 +61,11 @@ async def hybrid_search(
     cross-encoder means passing a different `Reranker`; nothing here changes.
     """
     started = time.perf_counter()
-    # Embedding first, before the first DB statement, so the session has no
-    # transaction open across this network call.
+    # Embedding first, before the first DB statement, so THIS function opens no
+    # transaction across the network call. That is only half of it: the property
+    # holds end to end only if the caller has nothing open either. A caller that
+    # loads the conversation from `db` and then calls in here re-opens the exact
+    # hazard - Task 17 is that caller, and it must commit or close first.
     [query_embedding] = await llm_provider.embed([query])
 
     vector_hits = await vector_store.search(query_embedding, candidate_limit, collection_ids)

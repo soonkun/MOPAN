@@ -155,7 +155,12 @@ class PgVectorStore(VectorStore):
             query = query.join(Document, Document.id == Chunk.document_id).where(
                 Document.collection_id.in_(collection_ids)
             )
-        query = query.order_by(distance).limit(limit)
+        # Tie-broken by id for exactly the reason keyword_search is: two chunks
+        # holding the same embedding are the same distance from the query, and
+        # Postgres may return those in any order. An unstable dense ranking makes
+        # RRF's own tie-break - and any test comparing two separate searches -
+        # non-reproducible.
+        query = query.order_by(distance, Chunk.id).limit(limit)
 
         rows = (await self.db.execute(query)).all()
         # cosine_distance is 1 - cosine_similarity, so this hands back a plain

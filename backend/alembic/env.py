@@ -9,7 +9,13 @@ from app.models import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False is load-bearing, not cargo cult. The default
+    # is True, which sets .disabled on every logger that already exists. Under the
+    # CLI that is nothing; called in-process - conftest runs `command.upgrade` at
+    # session setup, long after the test modules imported app.* - it silently kills
+    # every "mopan.*" logger for the rest of the process, so log_event writes
+    # nothing and no caplog assertion can ever see a record.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

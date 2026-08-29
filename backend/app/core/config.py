@@ -108,6 +108,14 @@ class Settings(BaseSettings):
         # the first query that reaches fusion.
         if self.rrf_k < 0:
             raise ValueError("RRF_K must be >= 0")
+        # Neither knob errors when it goes non-positive, it just quietly returns
+        # less: RETRIEVAL_TOP_N=-1 drops the last evidence item off every answer,
+        # and CANDIDATE_LIMIT=0 empties the candidate set before the reranker is
+        # ever asked to score it. Boot failure beats a silently smaller corpus.
+        if self.retrieval_top_n < 1:
+            raise ValueError("RETRIEVAL_TOP_N must be >= 1")
+        if self.retrieval_candidate_limit < 1:
+            raise ValueError("RETRIEVAL_CANDIDATE_LIMIT must be >= 1")
         return self
 
 

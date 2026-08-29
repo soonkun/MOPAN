@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 import pytest
@@ -252,6 +253,30 @@ async def test_keyword_search_survives_a_query_with_no_lexemes(db, corpus, query
     """plainto_tsquery reduces these to an empty tsquery, which matches nothing.
     A crash here would 500 on a user pasting punctuation into the search box."""
     assert await keyword_search(db, query, 20) == []
+
+
+@pytest.mark.parametrize("query", ["", "   ", "!!! ??? ---", "\n\t"])
+async def test_hybrid_search_survives_a_query_with_no_lexemes(db, corpus, query):
+    """End to end, not just the sparse half. The sparse side contributes nothing
+    for any of these, so fusion runs on a single ranking and the answer path still
+    gets evidence - a user pasting punctuation into the box must not 500."""
+    evidence = await _search(db, corpus, query=query)
+    assert evidence
+    assert all(e.metadata["keyword_rank"] is None for e in evidence)
+
+
+async def test_hybrid_search_logs_its_stage_counts(db, corpus, caplog):
+    """Slice 5's dashboard reads these fields off the record, so they are an
+    interface, not a debug print. Unpinned, the whole log_event call could be
+    deleted and the suite would stay green."""
+    with caplog.at_level(logging.INFO, logger="mopan.retrieval"):
+        await _search(db, corpus, top_n=1)
+    record = next(r for r in caplog.records if r.getMessage() == "hybrid_search")
+    fields = record.extra_fields
+    assert fields["vector_hits"] > 0
+    assert fields["keyword_hits"] > 0
+    assert fields["candidates"] >= fields["selected"] == 1
+    assert fields["duration_ms"] >= 0
 
 
 async def test_keyword_search_scopes_to_the_named_collections(db, corpus):

@@ -1794,7 +1794,13 @@ from app.models import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False is load-bearing, not cargo cult. The default
+    # is True, which sets .disabled on every logger that already exists. Under the
+    # CLI that is nothing; called in-process - conftest runs `command.upgrade` at
+    # session setup, long after the test modules imported app.* - it silently kills
+    # every "mopan.*" logger for the rest of the process, so log_event writes
+    # nothing and no caplog assertion can ever see a record.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
@@ -6845,7 +6851,12 @@ class PgVectorStore(VectorStore):
             query = query.join(Document, Document.id == Chunk.document_id).where(
                 Document.collection_id.in_(collection_ids)
             )
-        query = query.order_by(distance).limit(limit)
+        # Tie-broken by id for exactly the reason keyword_search is: two chunks
+        # holding the same embedding are the same distance from the query, and
+        # Postgres may return those in any order. An unstable dense ranking makes
+        # RRF's own tie-break - and any test comparing two separate searches -
+        # non-reproducible.
+        query = query.order_by(distance, Chunk.id).limit(limit)
 
         rows = (await self.db.execute(query)).all()
         # cosine_distance is 1 - cosine_similarity, so this hands back a plain
@@ -7915,7 +7926,11 @@ from app.retrieval.evidence import RetrievedChunk
 class Reranker(ABC):
     """Operates on domain objects, never ORM models, and may reorder AND rescore.
     It is called on the full candidate set before top-N truncation, otherwise a
-    real cross-encoder could never promote anything."""
+    real cross-encoder could never promote anything.
+
+    The RETURNED ORDER IS AUTHORITATIVE: the caller truncates the list as it comes
+    back and never re-sorts by `rerank_score`, so an implementation that sets
+    scores without reordering is a silent no-op."""
 
     @abstractmethod
     async def rerank(self, query: str, candidates: list[RetrievedChunk]) -> list[RetrievedChunk]: ...
@@ -7999,8 +8014,11 @@ async def hybrid_search(
     cross-encoder means passing a different `Reranker`; nothing here changes.
     """
     started = time.perf_counter()
-    # Embedding first, before the first DB statement, so the session has no
-    # transaction open across this network call.
+    # Embedding first, before the first DB statement, so THIS function opens no
+    # transaction across the network call. That is only half of it: the property
+    # holds end to end only if the caller has nothing open either. A caller that
+    # loads the conversation from `db` and then calls in here re-opens the exact
+    # hazard - Task 17 is that caller, and it must commit or close first.
     [query_embedding] = await llm_provider.embed([query])
 
     vector_hits = await vector_store.search(query_embedding, candidate_limit, collection_ids)
@@ -8058,6 +8076,7 @@ async def hybrid_search(
 - [ ] **Step 5: Write `backend/tests/test_retrieval.py`**
 
 ```python
+import logging
 import uuid
 
 import pytest
@@ -8314,6 +8333,30 @@ async def test_keyword_search_survives_a_query_with_no_lexemes(db, corpus, query
     assert await keyword_search(db, query, 20) == []
 
 
+@pytest.mark.parametrize("query", ["", "   ", "!!! ??? ---", "\n\t"])
+async def test_hybrid_search_survives_a_query_with_no_lexemes(db, corpus, query):
+    """End to end, not just the sparse half. The sparse side contributes nothing
+    for any of these, so fusion runs on a single ranking and the answer path still
+    gets evidence - a user pasting punctuation into the box must not 500."""
+    evidence = await _search(db, corpus, query=query)
+    assert evidence
+    assert all(e.metadata["keyword_rank"] is None for e in evidence)
+
+
+async def test_hybrid_search_logs_its_stage_counts(db, corpus, caplog):
+    """Slice 5's dashboard reads these fields off the record, so they are an
+    interface, not a debug print. Unpinned, the whole log_event call could be
+    deleted and the suite would stay green."""
+    with caplog.at_level(logging.INFO, logger="mopan.retrieval"):
+        await _search(db, corpus, top_n=1)
+    record = next(r for r in caplog.records if r.getMessage() == "hybrid_search")
+    fields = record.extra_fields
+    assert fields["vector_hits"] > 0
+    assert fields["keyword_hits"] > 0
+    assert fields["candidates"] >= fields["selected"] == 1
+    assert fields["duration_ms"] >= 0
+
+
 async def test_keyword_search_scopes_to_the_named_collections(db, corpus):
     scoped = await keyword_search(db, "tomato blight", 20, collection_ids=[corpus["b"].id])
     assert scoped == [str(corpus["chunks"][2].id)]
@@ -8361,7 +8404,7 @@ def test_evidence_keeps_every_stage_score_in_metadata():
 - [ ] **Step 6: Run tests, expect PASS**
 
 Run: `pytest tests/test_retrieval.py -v` (Postgres running)
-Expected: all 19 tests PASS
+Expected: all 24 tests PASS
 
 - [ ] **Step 7: Commit**
 
@@ -8382,6 +8425,49 @@ git commit -m "feat: hybrid retrieval returning Evidence with per-stage scores a
 - Consumes: `Evidence` (Task 15), `ChatMessage` (Task 11), `count_tokens` (Task 2).
 - Produces: `@dataclass PromptTemplate(name, version, text)`; `async get_prompt(name) -> PromptTemplate`; `def build_prompt(question, history, evidence, *, prompt, nonce=None, token_budget) -> tuple[list[ChatMessage], list[Evidence]]` returning the messages **and** the evidence that actually fit the budget (so citations can only reference evidence the model was shown).
 - Produces: `def sanitize_history(rows) -> list[dict]`.
+
+**Carried from the Task 15 review.** These land as one commit before Step 1. Four
+are edits to blocks printed under earlier tasks, refreshed there rather than
+duplicated here: the dense ranking in app/retrieval/vector\_store.py gets the same
+`.order_by(distance, Chunk.id)` tie-break the sparse path already has (two chunks
+with identical embeddings are a Postgres tie, and the order flips the moment a row
+is rewritten — measured, not assumed); the Reranker ABC in app/retrieval/reranker.py
+states that the returned order is authoritative, since nothing re-sorts by
+`rerank_score`; the no-open-transaction comment in app/retrieval/service.py is
+reworded as a caller-side constraint, because a caller that loads the conversation
+first re-opens the hazard; and app/alembic/env.py passes
+`disable_existing_loggers=False` to `fileConfig` — the default is `True`, which,
+when conftest runs `command.upgrade` in-process at session setup, sets `.disabled`
+on every `mopan.*` logger already imported and silences `log_event` for the rest of
+the run. Two new tests in tests/test\_retrieval.py cover the remaining items: an
+end-to-end `hybrid_search` on a punctuation-only query, and a `caplog` assertion
+pinning the retrieval log's fields. The two steps below are the only ones that add
+a block of their own.
+
+- [ ] **Step 0a: Modify `backend/app/core/config.py`** — bound the retrieval limits
+
+```python
+        # Neither knob errors when it goes non-positive, it just quietly returns
+        # less: RETRIEVAL_TOP_N=-1 drops the last evidence item off every answer,
+        # and CANDIDATE_LIMIT=0 empties the candidate set before the reranker is
+        # ever asked to score it. Boot failure beats a silently smaller corpus.
+        if self.retrieval_top_n < 1:
+            raise ValueError("RETRIEVAL_TOP_N must be >= 1")
+        if self.retrieval_candidate_limit < 1:
+            raise ValueError("RETRIEVAL_CANDIDATE_LIMIT must be >= 1")
+```
+
+- [ ] **Step 0b: Modify `backend/tests/test_settings.py`** — cover the retrieval limit guard
+
+```python
+@pytest.mark.parametrize("field", ["retrieval_top_n", "retrieval_candidate_limit"])
+@pytest.mark.parametrize("value", [0, -1])
+def test_non_positive_retrieval_limits_are_rejected(field, value):
+    """Neither knob raises at query time, it just returns less: top_n=-1 boots
+    cleanly and silently drops the last evidence item off every answer."""
+    with pytest.raises(ValueError, match=field.upper()):
+        Settings(**{field: value})
+```
 
 - [ ] **Step 1: Write `backend/tests/test_prompt.py`**
 
@@ -8637,7 +8723,7 @@ def _evidence_label(item: Evidence) -> str:
 - [ ] **Step 4: Run tests, expect PASS**
 
 Run: `pytest tests/test_prompt.py -v`
-Expected: all 10 tests PASS
+Expected: all 12 tests PASS
 
 - [ ] **Step 5: Commit**
 
