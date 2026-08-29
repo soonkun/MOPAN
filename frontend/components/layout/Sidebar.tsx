@@ -17,6 +17,12 @@ export default function Sidebar() {
   // for the length of the fetch, including for users who do have conversations.
   const [conversations, setConversations] = useState<Conversation[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Separate from `error` on purpose. The history region is scrollable, so an
+  // ErrorBanner rendered at its top is off-screen for anyone with enough
+  // conversations to have scrolled - measured 0 visible pixels at 1280x800
+  // with 31 conversations. A logout failure has to report next to the button
+  // that was clicked. It is also cleared per attempt rather than by load().
+  const [logoutError, setLogoutError] = useState<string | null>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
 
@@ -49,7 +55,24 @@ export default function Sidebar() {
     if (!open) return;
     drawerRef.current?.querySelector<HTMLElement>("a, button")?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") {
+        setOpen(false);
+        return;
+      }
+      // The drawer covers the page but does not remove it from the tab order,
+      // so without this Tab walks into content hidden behind the overlay.
+      if (event.key !== "Tab") return;
+      const focusable = drawerRef.current?.querySelectorAll<HTMLElement>("a, button");
+      if (!focusable?.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     document.addEventListener("keydown", onKeyDown);
     return () => {
@@ -63,11 +86,12 @@ export default function Sidebar() {
     // a failed request - with mopan_session still in the browser and the Redis
     // session still valid, because neither delete_cookie nor delete_session
     // ran. "Logged out" with a live session is the worst outcome available, so
-    // a failure stays put and says so through the same ErrorBanner.
+    // a failure stays put and says so next to the button that was clicked.
+    setLogoutError(null);
     try {
       await apiFetch("/api/auth/logout", { method: "POST" });
     } catch (err) {
-      setError(errorMessage(err));
+      setLogoutError(errorMessage(err));
       return;
     }
     router.push("/login");
@@ -123,6 +147,7 @@ export default function Sidebar() {
         <div className="truncate px-3 text-xs text-gray-500">
           {user ? `${user.email}${user.role === "admin" ? " · 관리자" : ""}` : "\u00a0"}
         </div>
+        {logoutError && <ErrorBanner message={logoutError} />}
         <button
           onClick={() => void handleLogout()}
           className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm hover:bg-gray-200"
@@ -152,7 +177,14 @@ export default function Sidebar() {
       )}
       <div className="hidden md:block">{content}</div>
       {open && (
-        <div id="sidebar-drawer" ref={drawerRef} className="fixed inset-0 z-30 flex md:hidden">
+        <div
+          id="sidebar-drawer"
+          ref={drawerRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="메뉴"
+          className="fixed inset-0 z-30 flex md:hidden"
+        >
           <div className="relative">{content}</div>
           {/* A button, not a div: this overlay is the only way to close the
               drawer, and as a div it is unreachable without a pointer. */}

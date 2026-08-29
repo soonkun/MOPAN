@@ -12107,6 +12107,16 @@ The handler is also called as `onClick={() => void handleLogout()}`; an `async`
 function passed straight to `onClick` turns any rejection into an
 `unhandledrejection`.
 
+The message goes into a **separate `logoutError` state rendered in the footer**,
+next to the button. Reusing the shared `error` puts the banner at the top of the
+`flex-1 overflow-y-auto` history region: measured at 1280×800 with 31
+conversations and the history scrolled to the bottom, the alert sat at viewport
+`y = -473…-415` against a visible box of `136…701` — **0 visible pixels**, while
+the button sat at `y = 750`. A sighted user would have clicked 로그아웃 and seen
+nothing change. (Screen-reader users still got it: `role="alert"` fires wherever
+the node lives.) The separate state also means a logout failure clears on the
+next attempt rather than lingering until `load()` reruns.
+
 **The footer placeholder is `"\u00a0"`, not `" "`.** An ASCII space is
 collapsible, so the user line gets no line box at all and is 0px tall until
 `/api/auth/me` lands. Measured on the same node with the same classes at
@@ -12128,10 +12138,19 @@ focus moves into it on open and back to the toggle on close. The toggle carries
 `aria-controls="sidebar-drawer"` but **no `aria-expanded`**: it only opens, and
 it is not rendered at all while the drawer is up — at `z-20` under the `z-30`
 drawer it would otherwise be a control a pointer cannot reach, a keyboard can
-focus, and pressing does nothing, announced as "메뉴 열기, expanded". Verified at
+focus, and pressing does nothing, announced as "메뉴 열기, expanded". The
+trade-off is that `aria-controls` points at an id that does not resolve while
+the drawer is closed, which AT simply ignores — an accepted wart, taken over
+keeping an unreachable control mounted. Verified at
 390×800: toggle absent while open, focus lands on the first drawer link
 (index 0 of 35), Escape closes it, and `document.activeElement` is the toggle
-again.
+again — React reattaches the toggle's ref during commit, before the effect
+cleanup runs, so focus has somewhere to land.
+
+The drawer also carries `role="dialog" aria-modal="true"` and wraps Tab at both
+ends. Without the wrap, Tab off the last element lands on `<main>` — content the
+drawer visually covers — so the modal was one that a keyboard could walk out of
+while a pointer could not.
 
 **`pt-12 md:pt-0` on `main` belongs here, not on each page.** The toggle is
 `fixed` and reserves no space of its own. Measured at 390×800 against the real
@@ -12163,6 +12182,12 @@ export default function Sidebar() {
   // for the length of the fetch, including for users who do have conversations.
   const [conversations, setConversations] = useState<Conversation[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Separate from `error` on purpose. The history region is scrollable, so an
+  // ErrorBanner rendered at its top is off-screen for anyone with enough
+  // conversations to have scrolled - measured 0 visible pixels at 1280x800
+  // with 31 conversations. A logout failure has to report next to the button
+  // that was clicked. It is also cleared per attempt rather than by load().
+  const [logoutError, setLogoutError] = useState<string | null>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
 
@@ -12195,7 +12220,24 @@ export default function Sidebar() {
     if (!open) return;
     drawerRef.current?.querySelector<HTMLElement>("a, button")?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") {
+        setOpen(false);
+        return;
+      }
+      // The drawer covers the page but does not remove it from the tab order,
+      // so without this Tab walks into content hidden behind the overlay.
+      if (event.key !== "Tab") return;
+      const focusable = drawerRef.current?.querySelectorAll<HTMLElement>("a, button");
+      if (!focusable?.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     document.addEventListener("keydown", onKeyDown);
     return () => {
@@ -12209,11 +12251,12 @@ export default function Sidebar() {
     // a failed request - with mopan_session still in the browser and the Redis
     // session still valid, because neither delete_cookie nor delete_session
     // ran. "Logged out" with a live session is the worst outcome available, so
-    // a failure stays put and says so through the same ErrorBanner.
+    // a failure stays put and says so next to the button that was clicked.
+    setLogoutError(null);
     try {
       await apiFetch("/api/auth/logout", { method: "POST" });
     } catch (err) {
-      setError(errorMessage(err));
+      setLogoutError(errorMessage(err));
       return;
     }
     router.push("/login");
@@ -12269,6 +12312,7 @@ export default function Sidebar() {
         <div className="truncate px-3 text-xs text-gray-500">
           {user ? `${user.email}${user.role === "admin" ? " · 관리자" : ""}` : "\u00a0"}
         </div>
+        {logoutError && <ErrorBanner message={logoutError} />}
         <button
           onClick={() => void handleLogout()}
           className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm hover:bg-gray-200"
@@ -12298,7 +12342,14 @@ export default function Sidebar() {
       )}
       <div className="hidden md:block">{content}</div>
       {open && (
-        <div id="sidebar-drawer" ref={drawerRef} className="fixed inset-0 z-30 flex md:hidden">
+        <div
+          id="sidebar-drawer"
+          ref={drawerRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="메뉴"
+          className="fixed inset-0 z-30 flex md:hidden"
+        >
           <div className="relative">{content}</div>
           {/* A button, not a div: this overlay is the only way to close the
               drawer, and as a div it is unreachable without a pointer. */}
@@ -12767,9 +12818,12 @@ export default function UploadDropzone({
 
 ```tsx
 import Link from "next/link";
-import type { DocumentItem } from "@/lib/types";
+import type { DocumentItem, DocumentStatus } from "@/lib/types";
 
-const STATUS_LABEL: Record<string, string> = {
+// Keyed on the DocumentStatus union, not `string`, so a new backend status is a
+// compile error here rather than a raw enum value on screen. The `?? raw`
+// fallback at the call site still covers a backend deployed ahead of this.
+const STATUS_LABEL: Record<DocumentStatus, string> = {
   uploaded: "대기 중",
   parsing: "파싱 중",
   chunking: "청킹 중",
@@ -12901,7 +12955,12 @@ export default function StructureViewer({ blocks }: { blocks: Block[] }) {
     <div className="space-y-2">
       {blocks.map((block, index) => (
         <div key={index} className="text-sm">
-          <span className="mr-2 text-xs text-gray-400">{BLOCK_LABEL[block.block_type]}</span>
+          <span className="mr-2 text-xs text-gray-400">
+            {/* The Record type makes a new block type a compile error, but the
+                wire type is `str` - a backend deployed ahead of the frontend
+                would otherwise render an empty label with no clue why. */}
+            {BLOCK_LABEL[block.block_type] ?? block.block_type}
+          </span>
           <span
             className={
               block.block_type === "heading" ? "font-semibold text-gray-900" : "text-gray-700"
