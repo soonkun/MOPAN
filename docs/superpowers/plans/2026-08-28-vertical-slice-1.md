@@ -518,7 +518,7 @@ USER node
 CMD ["npm", "start"]
 ```
 
-The frontend needs no `NEXT_PUBLIC_*` build arg: all API calls are same-origin relative paths resolved by `next.config.js` `rewrites()` at runtime (Task 20).
+The frontend needs no `NEXT_PUBLIC_*` build arg: every API call the browser makes is a same-origin relative path, and `next.config.js` `rewrites()` forwards `/api/*` to the backend server-side (Task 20). It does need `API_INTERNAL_URL` as a build `ARG`, though — corrected during Task 20, where the original "resolved at runtime" claim was measured to be false. `next build` evaluates `rewrites()` once and writes the destination into `.next/routes-manifest.json`; `next start` never re-reads the variable, so supplying it at container runtime silently leaves the image proxying to whatever was in scope at build time.
 
 - [ ] **Step 12: Create `docker-compose.yml`**
 
