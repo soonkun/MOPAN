@@ -127,10 +127,12 @@ def create_app() -> FastAPI:
     from app.auth.router import router as auth_router
     from app.chat.router import router as chat_router
     from app.documents.router import router as documents_router
+    from app.users.router import router as users_router
 
     app.include_router(auth_router)
     app.include_router(chat_router)
     app.include_router(documents_router)
+    app.include_router(users_router)
 
     return app
 

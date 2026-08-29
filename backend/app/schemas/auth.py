@@ -1,4 +1,6 @@
 import uuid
+from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -41,3 +43,21 @@ class UserResponse(BaseModel):
     role: str
 
     model_config = {"from_attributes": True}
+
+
+class AdminUserResponse(UserResponse):
+    """The user-management list. Kept separate from UserResponse, which is what
+    /api/auth/me returns to every logged-in user - is_active and created_at are
+    for the admin screen, not for advertising to the account itself."""
+
+    is_active: bool
+    created_at: datetime
+
+
+class UserUpdate(BaseModel):
+    """PATCH body, dumped with `exclude_unset=True, exclude_none=True`. Both
+    columns are NOT NULL, so an explicit null can only mean "no change" here -
+    unlike CollectionUpdate.description, where null is a real value."""
+
+    role: Literal["admin", "user"] | None = None
+    is_active: bool | None = None

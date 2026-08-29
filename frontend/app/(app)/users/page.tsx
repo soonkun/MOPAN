@@ -1,0 +1,180 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { apiFetch, errorMessage } from "@/lib/api";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import ErrorBanner from "@/components/ui/ErrorBanner";
+import type { ManagedUser, User } from "@/lib/types";
+
+const ROLE_LABEL: Record<ManagedUser["role"], string> = {
+  admin: "관리자",
+  user: "일반",
+};
+
+export default function UsersPage() {
+  const [me, setMe] = useState<User | null>(null);
+  // null is "not loaded yet". GET /api/users answers a non-admin with 403
+  // 관리자 권한이 필요합니다., which lands in loadError - so this page needs no
+  // role branch of its own; there is nothing to render either way.
+  const [users, setUsers] = useState<ManagedUser[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  // One row acts at a time. The 409s this screen exists to show - 마지막
+  // 관리자입니다..., 자신의 권한은 변경할 수 없습니다... - name the row that was
+  // touched, so they render in it rather than in a banner at the top.
+  const [rowError, setRowError] = useState<{ id: string; message: string } | null>(null);
+  const [deactivateTarget, setDeactivateTarget] = useState<ManagedUser | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setUsers(await apiFetch<ManagedUser[]>("/api/users"));
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(errorMessage(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    apiFetch<User>("/api/auth/me").then(setMe).catch(() => undefined);
+    void load();
+  }, [load]);
+
+  /** Applies the server's returned user, never the value that was submitted.
+   * A role change that renders as done but was refused is worse than a slow
+   * one: `users` is untouched on failure, so the <select> - controlled by that
+   * state - snaps back to the role the backend still holds.
+   *
+   * `inline` is false for the call the confirmation dialog makes: it renders
+   * the failure itself, and setting the row error too would print the same 409
+   * twice, once of them behind the open modal. It always rethrows, which is how
+   * the dialog knows to stay open. */
+  async function patch(
+    id: string,
+    body: { role?: string; is_active?: boolean },
+    inline = true,
+  ) {
+    setBusyId(id);
+    setRowError(null);
+    try {
+      const updated = await apiFetch<ManagedUser>(`/api/users/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+      setUsers((prev) => (prev ?? []).map((u) => (u.id === id ? updated : u)));
+    } catch (err) {
+      if (inline) setRowError({ id, message: errorMessage(err) });
+      throw err;
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <div className="mx-auto max-w-5xl space-y-6 p-6">
+      <h1 className="text-lg font-semibold">사용자 관리</h1>
+      <ErrorBanner message={loadError} />
+
+      {users === null ? (
+        !loadError && <p className="py-8 text-center text-sm text-gray-400">불러오는 중...</p>
+      ) : users.length === 0 ? (
+        <p className="py-8 text-center text-sm text-gray-400">사용자가 없습니다.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-gray-200 text-gray-500">
+                <th scope="col" className="py-2 pr-3">이메일</th>
+                <th scope="col" className="py-2 pr-3">권한</th>
+                <th scope="col" className="py-2 pr-3">상태</th>
+                <th scope="col" className="py-2 pr-3">가입일</th>
+                <th scope="col" className="py-2">관리</th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.map((u) => (
+                <tr key={u.id} className="border-b border-gray-100 align-top">
+                  <td className="py-2 pr-3">
+                    {u.email}
+                    {/* Which row is you is what makes 자신의 권한은 변경할 수
+                        없습니다. readable as an explanation instead of a riddle. */}
+                    {me?.id === u.id && <span className="ml-1 text-xs text-gray-400">(나)</span>}
+                  </td>
+                  <td className="py-2 pr-3">
+                    <select
+                      value={u.role}
+                      disabled={busyId === u.id}
+                      // No visible <label> per row - the column header is the
+                      // label a sighted user reads, and repeating it 40 times
+                      // would say nothing about WHICH user. The email does.
+                      aria-label={`${u.email} 권한`}
+                      onChange={(e) => {
+                        void patch(u.id, { role: e.target.value }).catch(() => undefined);
+                      }}
+                      className="rounded border border-gray-300 px-2 py-1 text-sm disabled:opacity-50"
+                    >
+                      {Object.entries(ROLE_LABEL).map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="py-2 pr-3">
+                    <span className={u.is_active ? "text-gray-700" : "text-red-600"}>
+                      {u.is_active ? "활성" : "비활성"}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-3 text-gray-500">
+                    {new Date(u.created_at).toLocaleDateString()}
+                  </td>
+                  <td className="py-2">
+                    {u.is_active ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRowError(null);
+                          setDeactivateTarget(u);
+                        }}
+                        className="rounded border border-red-300 px-2 py-1 text-xs text-red-700 hover:bg-red-50"
+                      >
+                        비활성화
+                      </button>
+                    ) : (
+                      // Reactivating takes nothing away, so it needs no
+                      // confirmation step - only the deactivation does.
+                      <button
+                        type="button"
+                        disabled={busyId === u.id}
+                        onClick={() => {
+                          void patch(u.id, { is_active: true }).catch(() => undefined);
+                        }}
+                        className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-100 disabled:opacity-50"
+                      >
+                        활성화
+                      </button>
+                    )}
+                    {rowError?.id === u.id && (
+                      <div className="mt-2 max-w-sm">
+                        <ErrorBanner message={rowError.message} />
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {deactivateTarget && (
+        <ConfirmDialog
+          title="사용자 비활성화"
+          message={`${deactivateTarget.email} 계정을 비활성화할까요? 로그인할 수 없게 되고, 사용 중인 세션도 즉시 끊깁니다.`}
+          confirmLabel="비활성화"
+          onClose={() => setDeactivateTarget(null)}
+          onConfirm={() => patch(deactivateTarget.id, { is_active: false }, false)}
+        />
+      )}
+    </div>
+  );
+}

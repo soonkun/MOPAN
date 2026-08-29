@@ -3,12 +3,15 @@ import uuid
 import pytest
 import pytest_asyncio
 from fastapi import HTTPException
+from httpx import ASGITransport, AsyncClient
 
 from app.auth.authorization import get_owned_conversation, get_readable_document
 from app.auth.dependencies import require_admin
 from app.core.security import SESSION_KEY_PREFIX, hash_password
 from app.models.conversation import Conversation
 from app.models.user import User
+
+MISSING_ID = uuid.uuid4()
 
 
 @pytest_asyncio.fixture
@@ -201,3 +204,178 @@ async def test_missing_document_is_404(db):
     with pytest.raises(HTTPException) as exc:
         await get_readable_document(db, uuid.uuid4())
     assert exc.value.status_code == 404
+
+
+# --- user management (GET /api/users, PATCH /api/users/{id}) -------------------
+
+
+async def _user_id(admin_client, email: str) -> str:
+    listing = await admin_client.get("/api/users")
+    assert listing.status_code == 200
+    return next(u["id"] for u in listing.json() if u["email"] == email)
+
+
+@pytest_asyncio.fixture
+async def member_client(admin_client, app):
+    """A second, non-admin account on its own cookie jar."""
+    await admin_client.post(
+        "/api/auth/register", json={"email": "member@example.com", "password": "pw123456"}
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        await ac.post("/api/auth/login", json={"email": "member@example.com", "password": "pw123456"})
+        yield ac
+
+
+@pytest_asyncio.fixture
+async def two_admins(admin_client):
+    """admin@example.com plus a promoted second@example.com, so the self-guards
+    are reachable without the last-admin guard firing first."""
+    await admin_client.post(
+        "/api/auth/register", json={"email": "second@example.com", "password": "pw123456"}
+    )
+    second_id = await _user_id(admin_client, "second@example.com")
+    promoted = await admin_client.patch(f"/api/users/{second_id}", json={"role": "admin"})
+    assert promoted.status_code == 200
+    return admin_client
+
+
+async def test_list_users_returns_the_admin_fields_sorted_by_created_at(admin_client):
+    await admin_client.post(
+        "/api/auth/register", json={"email": "later@example.com", "password": "pw123456"}
+    )
+    response = await admin_client.get("/api/users")
+    assert response.status_code == 200
+    body = response.json()
+    assert [u["email"] for u in body] == ["admin@example.com", "later@example.com"]
+    assert body[0]["role"] == "admin"
+    assert body[1]["role"] == "user"
+    assert all(u["is_active"] is True for u in body)
+    assert set(body[0]) == {"id", "email", "role", "is_active", "created_at"}
+
+
+async def test_user_management_is_admin_only(member_client, admin_client):
+    member_id = await _user_id(admin_client, "member@example.com")
+    assert (await member_client.get("/api/users")).status_code == 403
+    patched = await member_client.patch(f"/api/users/{member_id}", json={"role": "admin"})
+    assert patched.status_code == 403
+    # The refusal must be real, not cosmetic.
+    assert (await admin_client.get("/api/users")).json()[1]["role"] == "user"
+
+
+async def test_unknown_user_id_is_404(admin_client):
+    response = await admin_client.patch(f"/api/users/{MISSING_ID}", json={"role": "admin"})
+    assert response.status_code == 404
+    assert response.json()["detail"] == "사용자를 찾을 수 없습니다."
+
+
+async def test_admin_can_promote_and_demote_another_user(two_admins):
+    second_id = await _user_id(two_admins, "second@example.com")
+    demoted = await two_admins.patch(f"/api/users/{second_id}", json={"role": "user"})
+    assert demoted.status_code == 200
+    assert demoted.json()["role"] == "user"
+    assert demoted.json()["is_active"] is True
+
+
+async def test_admin_cannot_demote_themselves(two_admins):
+    """Two admins exist, so this is the self-guard and not the last-admin guard."""
+    admin_id = await _user_id(two_admins, "admin@example.com")
+    response = await two_admins.patch(f"/api/users/{admin_id}", json={"role": "user"})
+    assert response.status_code == 409
+    assert response.json()["detail"] == "자신의 권한은 변경할 수 없습니다. 다른 관리자에게 요청해 주세요."
+    assert (await two_admins.get("/api/auth/me")).json()["role"] == "admin"
+
+
+async def test_admin_cannot_deactivate_themselves(two_admins):
+    admin_id = await _user_id(two_admins, "admin@example.com")
+    response = await two_admins.patch(f"/api/users/{admin_id}", json={"is_active": False})
+    assert response.status_code == 409
+    assert response.json()["detail"] == "자신의 계정은 비활성화할 수 없습니다."
+    assert (await two_admins.get("/api/auth/me")).status_code == 200
+
+
+@pytest.mark.parametrize("change", [{"role": "user"}, {"is_active": False}])
+async def test_the_last_active_admin_cannot_lose_admin(admin_client, change):
+    """Only one admin exists here. The check runs before the self-guard because
+    "promote someone else first" is the actionable cause."""
+    admin_id = await _user_id(admin_client, "admin@example.com")
+    response = await admin_client.patch(f"/api/users/{admin_id}", json=change)
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "마지막 관리자입니다. 다른 사용자를 관리자로 지정한 뒤에 변경해 주세요."
+    )
+    assert (await admin_client.get("/api/auth/me")).json()["role"] == "admin"
+
+
+async def test_a_deactivated_admin_does_not_count_towards_the_last_admin_check(two_admins):
+    """Two admin rows, one inactive, is still ONE admin - counting rows by role
+    alone would let the remaining one demote themselves."""
+    second_id = await _user_id(two_admins, "second@example.com")
+    deactivated = await two_admins.patch(f"/api/users/{second_id}", json={"is_active": False})
+    assert deactivated.status_code == 200
+
+    admin_id = await _user_id(two_admins, "admin@example.com")
+    response = await two_admins.patch(f"/api/users/{admin_id}", json={"role": "user"})
+    assert response.status_code == 409
+    assert response.json()["detail"].startswith("마지막 관리자입니다.")
+
+
+async def test_deactivating_a_user_kills_their_live_session(member_client, admin_client, fake_redis):
+    member_id = await _user_id(admin_client, "member@example.com")
+    session_id = member_client.cookies["mopan_session"]
+    assert await fake_redis.get(f"{SESSION_KEY_PREFIX}{session_id}") is not None
+    assert (await member_client.get("/api/auth/me")).status_code == 200
+
+    response = await admin_client.patch(f"/api/users/{member_id}", json={"is_active": False})
+    assert response.status_code == 200
+    assert response.json()["is_active"] is False
+
+    # The Redis key is gone, not merely shadowed by the is_active check in
+    # get_current_user: a 24-hour session that survives deactivation is the bug.
+    assert await fake_redis.get(f"{SESSION_KEY_PREFIX}{session_id}") is None
+    assert (await member_client.get("/api/auth/me")).status_code == 401
+
+
+async def test_a_session_that_predates_deactivation_is_rejected_by_get_current_user(
+    member_client, admin_client, fake_redis, db
+):
+    """The second half of the guard. Deactivate WITHOUT going through the router,
+    so the Redis session survives - exactly the state a session created before
+    migration 0002 ran is in."""
+    member_id = await _user_id(admin_client, "member@example.com")
+    session_id = member_client.cookies["mopan_session"]
+    member = await db.get(User, uuid.UUID(member_id))
+    member.is_active = False
+    await db.commit()
+
+    assert await fake_redis.get(f"{SESSION_KEY_PREFIX}{session_id}") is not None
+    response = await member_client.get("/api/auth/me")
+    assert response.status_code == 401
+    assert response.json()["detail"] == "비활성화된 계정입니다. 관리자에게 문의해 주세요."
+
+
+async def test_a_deactivated_user_cannot_log_in_and_the_message_hides_the_account(
+    member_client, admin_client
+):
+    member_id = await _user_id(admin_client, "member@example.com")
+    await admin_client.patch(f"/api/users/{member_id}", json={"is_active": False})
+
+    response = await member_client.post(
+        "/api/auth/login", json={"email": "member@example.com", "password": "pw123456"}
+    )
+    assert response.status_code == 401
+    # Byte-identical to the unknown-email response: a "deactivated account"
+    # message would confirm that this address is registered.
+    assert response.json() == {"detail": "이메일 또는 비밀번호가 올바르지 않습니다."}
+
+
+async def test_reactivating_a_user_lets_them_log_in_again(member_client, admin_client):
+    member_id = await _user_id(admin_client, "member@example.com")
+    await admin_client.patch(f"/api/users/{member_id}", json={"is_active": False})
+    reactivated = await admin_client.patch(f"/api/users/{member_id}", json={"is_active": True})
+    assert reactivated.status_code == 200
+
+    login = await member_client.post(
+        "/api/auth/login", json={"email": "member@example.com", "password": "pw123456"}
+    )
+    assert login.status_code == 200

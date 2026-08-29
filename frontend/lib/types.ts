@@ -4,6 +4,16 @@ export interface User {
   role: "admin" | "user";
 }
 
+/** GET /api/users and PATCH /api/users/{id} - the backend's AdminUserResponse.
+ * Kept separate from User, which is what /api/auth/me returns to every logged-in
+ * user: is_active and created_at are for the management screen only. */
+export interface ManagedUser extends User {
+  is_active: boolean;
+  created_at: string;
+}
+
+/** CollectionResponse. It carries no document count - the management screen
+ * derives one from a single GET /api/documents rather than asking per row. */
 export interface Collection {
   id: string;
   name: string;

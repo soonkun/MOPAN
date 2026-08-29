@@ -66,4 +66,11 @@ async def authenticate_user(db: AsyncSession, email: str, password: str) -> User
         raise AuthError("invalid credentials")
     if not verify_password(password, user.password_hash):
         raise AuthError("invalid credentials")
+    if not user.is_active:
+        # Checked AFTER the password so the bcrypt cost is paid on this branch too,
+        # and raised as the same AuthError the router renders as "이메일 또는
+        # 비밀번호가 올바르지 않습니다.": a distinct "deactivated" message would
+        # confirm to anyone guessing that the address is registered here.
+        log_event(logger, "login_rejected_inactive", user_id=str(user.id))
+        raise AuthError("inactive account")
     return user

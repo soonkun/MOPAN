@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.authorization import get_readable_document
@@ -27,13 +28,18 @@ from app.models.chunk import Chunk
 from app.models.collection import Collection
 from app.models.document import Document
 from app.models.user import User
-from app.schemas.collection import CollectionCreate, CollectionResponse
+from app.schemas.collection import CollectionCreate, CollectionResponse, CollectionUpdate
 from app.schemas.document import BlockResponse, ChunkResponse, DocumentResponse
 
 logger = logging.getLogger("mopan.documents")
 router = APIRouter(prefix="/api", tags=["documents"])
 
 ENQUEUE_FAILED_MESSAGE = "처리 작업을 큐에 등록하지 못했습니다. 잠시 후 다시 시도해 주세요."
+# 분류, not 컬렉션: 분류 is the word the documents screen already puts in front of
+# the user - the table column header, the upload label and the filter all say it.
+# The management screen shows the same rows, so it has to say the same word.
+COLLECTION_NOT_FOUND_MESSAGE = "분류를 찾을 수 없습니다."
+DUPLICATE_COLLECTION_MESSAGE = "같은 이름의 분류가 이미 있습니다. 다른 이름을 입력해 주세요."
 
 
 def _document_list_query():
@@ -76,7 +82,14 @@ async def create_collection(
 ):
     collection = Collection(name=payload.name, description=payload.description, created_by=admin.id)
     db.add(collection)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        # uq_collections_name. Caught rather than pre-checked with a SELECT: the
+        # check-then-insert version still loses to a concurrent insert and turns
+        # into the same 500, just less often.
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=DUPLICATE_COLLECTION_MESSAGE) from exc
     await db.refresh(collection)
     return collection
 
@@ -90,6 +103,65 @@ async def list_collections(
     return list(result)
 
 
+@router.patch("/collections/{collection_id}", response_model=CollectionResponse)
+async def update_collection(
+    collection_id: uuid.UUID,
+    payload: CollectionUpdate,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db_session),
+):
+    collection = await db.get(Collection, collection_id)
+    if collection is None:
+        raise HTTPException(status_code=404, detail=COLLECTION_NOT_FOUND_MESSAGE)
+
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(collection, field, value)
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=DUPLICATE_COLLECTION_MESSAGE) from exc
+    await db.refresh(collection)
+    return collection
+
+
+@router.delete("/collections/{collection_id}", status_code=204)
+async def delete_collection(
+    collection_id: uuid.UUID,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Refuses while the collection still holds documents. The last remaining
+    collection IS deletable: an admin left with none simply creates one, which is
+    the same click the empty state already offers, whereas a floor of one would
+    make a single mis-named collection permanent."""
+    # FOR UPDATE, not a bare get: inserting a document takes FOR KEY SHARE on the
+    # collections row it references, which conflicts with this lock. Without it a
+    # concurrent upload commits between the count below and the DELETE, and
+    # documents.collection_id is ON DELETE CASCADE with chunks cascading from
+    # documents - so the row, its chunks and the admin's just-uploaded file (left
+    # orphaned under upload_dir) all disappear with no error anywhere.
+    collection = await db.get(Collection, collection_id, with_for_update=True)
+    if collection is None:
+        raise HTTPException(status_code=404, detail=COLLECTION_NOT_FOUND_MESSAGE)
+
+    document_count = await db.scalar(
+        select(func.count(Document.id)).where(Document.collection_id == collection_id)
+    )
+    if document_count:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"문서 {document_count}개가 들어 있는 분류는 삭제할 수 없습니다. "
+                "먼저 문서를 삭제해 주세요."
+            ),
+        )
+
+    await db.delete(collection)
+    await db.commit()
+    log_event(logger, "collection_deleted", collection_id=str(collection_id))
+
+
 @router.post("/documents", response_model=DocumentResponse, status_code=202)
 async def upload_document(
     collection_id: uuid.UUID = Form(...),
@@ -101,7 +173,7 @@ async def upload_document(
 ):
     collection = await db.get(Collection, collection_id)
     if collection is None:
-        raise HTTPException(status_code=404, detail="컬렉션을 찾을 수 없습니다.")
+        raise HTTPException(status_code=404, detail=COLLECTION_NOT_FOUND_MESSAGE)
 
     filename = (file.filename or "").strip()
     try:

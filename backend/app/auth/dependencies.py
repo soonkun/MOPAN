@@ -35,6 +35,14 @@ async def get_current_user(
     user = await db.get(User, parsed_user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="사용자를 찾을 수 없습니다.")
+    if not user.is_active:
+        # Belt as well as the braces in update_user, which revokes this user's
+        # Redis sessions on deactivation. A session created before 0002 ran, or
+        # one written by a process that has not been redeployed yet, would
+        # otherwise stay valid for its full TTL. 401 rather than 403 on purpose:
+        # frontend/lib/api.ts redirects to /login on 401 only, and there is
+        # nothing this session can usefully do while it stays where it is.
+        raise HTTPException(status_code=401, detail="비활성화된 계정입니다. 관리자에게 문의해 주세요.")
     return user
 
 

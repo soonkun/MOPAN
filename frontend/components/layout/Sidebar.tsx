@@ -150,6 +150,34 @@ export default function Sidebar() {
     { href: "/documents", label: "문서" },
   ];
 
+  // Rendered only for an admin. Both screens are admin-only on the server too -
+  // every endpoint behind them answers 403 관리자 권한이 필요합니다. - so this is
+  // about not offering a link that leads to a refusal, not about access.
+  const adminLinks = [
+    { href: "/collections", label: "분류 관리" },
+    { href: "/users", label: "사용자 관리" },
+  ];
+
+  // Same markup for both groups: the active styling and aria-current below are
+  // the one thing a second copy would eventually get wrong.
+  const navLink = (link: { href: string; label: string }) => {
+    const active = pathname === link.href;
+    return (
+      <Link
+        key={link.href}
+        href={link.href}
+        onClick={() => setOpen(false)}
+        // The background alone said "you are here" to sighted users only.
+        aria-current={active ? "page" : undefined}
+        className={`rounded px-3 py-2 text-sm hover:bg-gray-200 ${
+          active ? "bg-gray-200 font-medium" : ""
+        }`}
+      >
+        {link.label}
+      </Link>
+    );
+  };
+
   const content = (
     // aria-label because the MOPAN line above is a <div>, so the landmark had
     // no accessible name and announced as a bare "navigation". 대화 기록 stays
@@ -160,23 +188,18 @@ export default function Sidebar() {
       className="flex h-full w-64 flex-col border-r border-gray-200 bg-gray-50 p-3"
     >
       <div className="mb-4 px-3 text-sm font-semibold text-gray-500">MOPAN</div>
-      {navLinks.map((link) => {
-        const active = pathname === link.href;
-        return (
-          <Link
-            key={link.href}
-            href={link.href}
-            onClick={() => setOpen(false)}
-            // The background alone said "you are here" to sighted users only.
-            aria-current={active ? "page" : undefined}
-            className={`rounded px-3 py-2 text-sm hover:bg-gray-200 ${
-              active ? "bg-gray-200 font-medium" : ""
-            }`}
-          >
-            {link.label}
-          </Link>
-        );
-      })}
+      {navLinks.map(navLink)}
+
+      {/* `user` is null until /api/auth/me lands, so a non-admin never sees this
+          appear and then vanish. flex-col on the wrapper because the links are
+          <a> elements: as direct children of this flex column they stack on
+          their own, but inside a plain div they would run side by side. */}
+      {user?.role === "admin" && (
+        <div className="mt-4">
+          <div className="mb-1 px-3 text-xs tracking-wide text-gray-400">관리</div>
+          <div className="flex flex-col">{adminLinks.map(navLink)}</div>
+        </div>
+      )}
 
       <div className="mt-4 flex-1 overflow-y-auto">
         <div className="mb-1 px-3 text-xs tracking-wide text-gray-400">대화 기록</div>

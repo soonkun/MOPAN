@@ -254,3 +254,106 @@ async def test_document_structure_returns_parsed_blocks(admin_client, collection
     blocks = response.json()
     assert blocks[0]["block_type"] == "heading"
     assert blocks[0]["text"] == "Title"
+
+
+# --- collection CRUD ----------------------------------------------------------
+
+
+async def test_rename_collection_and_clear_its_description(admin_client, collection_id):
+    renamed = await admin_client.patch(
+        f"/api/collections/{collection_id}", json={"name": "사규", "description": "인사 규정"}
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "사규"
+    assert renamed.json()["description"] == "인사 규정"
+
+    # An OMITTED field must not be touched; an explicit null must clear it. A
+    # plain model_dump() cannot tell those apart and would wipe the name here.
+    cleared = await admin_client.patch(
+        f"/api/collections/{collection_id}", json={"description": None}
+    )
+    assert cleared.status_code == 200
+    assert cleared.json() == {**renamed.json(), "description": None}
+
+
+async def test_collection_name_is_stripped_and_a_blank_name_is_rejected(admin_client, collection_id):
+    stripped = await admin_client.patch(f"/api/collections/{collection_id}", json={"name": "  사규  "})
+    assert stripped.json()["name"] == "사규"
+    blank = await admin_client.patch(f"/api/collections/{collection_id}", json={"name": "   "})
+    assert blank.status_code == 422
+    # collections.name is NOT NULL, so an explicit null is a 422 and not a 409
+    # blaming a duplicate name that does not exist.
+    null = await admin_client.patch(f"/api/collections/{collection_id}", json={"name": None})
+    assert null.status_code == 422
+
+
+async def test_duplicate_collection_name_is_refused_on_create_and_rename(admin_client, collection_id):
+    duplicate = await admin_client.post("/api/collections", json={"name": "General"})
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == "같은 이름의 분류가 이미 있습니다. 다른 이름을 입력해 주세요."
+
+    other = await admin_client.post("/api/collections", json={"name": "Other"})
+    assert other.status_code == 200
+    renamed = await admin_client.patch(f"/api/collections/{other.json()['id']}", json={"name": "General"})
+    assert renamed.status_code == 409
+    assert renamed.json()["detail"] == "같은 이름의 분류가 이미 있습니다. 다른 이름을 입력해 주세요."
+
+
+async def test_delete_empty_collection(admin_client, collection_id):
+    assert (await admin_client.delete(f"/api/collections/{collection_id}")).status_code == 204
+    remaining = (await admin_client.get("/api/collections")).json()
+    # Only 일반 is left - the one register_user seeds for the bootstrap admin.
+    assert [c["name"] for c in remaining] == ["일반"]
+
+
+async def test_the_last_collection_is_deletable(admin_client, collection_id):
+    """Deliberate: an admin left with none creates one, which is the same click
+    the upload form's empty state already offers. A floor of one would instead
+    make a single mis-named collection permanent, and renaming is a PATCH away."""
+    for collection in (await admin_client.get("/api/collections")).json():
+        assert (await admin_client.delete(f"/api/collections/{collection['id']}")).status_code == 204
+    assert (await admin_client.get("/api/collections")).json() == []
+    assert (await admin_client.post("/api/collections", json={"name": "다시"})).status_code == 200
+
+
+async def test_delete_refuses_while_the_collection_holds_documents(admin_client, app, collection_id):
+    for name in ("a.txt", "b.txt"):
+        await admin_client.post(
+            "/api/documents",
+            data={"collection_id": collection_id},
+            files={"file": (name, b"hello", "text/plain")},
+        )
+
+    response = await admin_client.delete(f"/api/collections/{collection_id}")
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "문서 2개가 들어 있는 분류는 삭제할 수 없습니다. 먼저 문서를 삭제해 주세요."
+    )
+    # documents.collection_id is ON DELETE CASCADE and chunks cascade from
+    # documents, so without the guard this call destroys both rows silently and
+    # orphans their files under upload_dir.
+    assert len((await admin_client.get("/api/documents")).json()) == 2
+    names = [c["name"] for c in (await admin_client.get("/api/collections")).json()]
+    assert "General" in names
+
+    for document in (await admin_client.get("/api/documents")).json():
+        await admin_client.delete(f"/api/documents/{document['id']}")
+    assert (await admin_client.delete(f"/api/collections/{collection_id}")).status_code == 204
+
+
+async def test_collection_writes_are_admin_only(member_client, admin_client, collection_id):
+    renamed = await member_client.patch(f"/api/collections/{collection_id}", json={"name": "X"})
+    assert renamed.status_code == 403
+    assert (await member_client.delete(f"/api/collections/{collection_id}")).status_code == 403
+    # The refusal must be real, not cosmetic: the row is unchanged and still there.
+    survivors = (await admin_client.get("/api/collections")).json()
+    assert [c["name"] for c in survivors if c["id"] == collection_id] == ["General"]
+
+
+async def test_unknown_collection_id_is_404(admin_client):
+    patched = await admin_client.patch(f"/api/collections/{MISSING_ID}", json={"name": "X"})
+    assert patched.status_code == 404
+    assert patched.json()["detail"] == "분류를 찾을 수 없습니다."
+    deleted = await admin_client.delete(f"/api/collections/{MISSING_ID}")
+    assert deleted.status_code == 404
+    assert deleted.json()["detail"] == "분류를 찾을 수 없습니다."

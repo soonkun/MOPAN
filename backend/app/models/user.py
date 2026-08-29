@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, String, func, text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, String, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -25,6 +25,12 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(
         String(20), nullable=False, default="user", server_default=text("'user'")
+    )
+    # Deactivation is the only way to take an account away: rows are never deleted
+    # because documents.uploaded_by and collections.created_by are ON DELETE
+    # RESTRICT, so a DELETE would either fail or take the shared corpus with it.
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
