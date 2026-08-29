@@ -12031,6 +12031,40 @@ git commit -m "feat: frontend scaffold, same-origin api proxy, login/register"
 - Consumes: `apiFetch` (Task 20), `/api/conversations`, `/api/auth/me`, `/api/auth/logout`.
 - Produces: `<Sidebar />` — nav links, conversation history, current user, and a **logout button** (backend logout existed in revision 1 and nothing ever called it); `(app)` route group layout wrapping every authenticated page.
 
+**`h-screen`, not `min-h-screen`, on the `(app)` container — measured.** The
+Sidebar is a full-height column: a `flex-1 overflow-y-auto` history region with
+the user line and the logout button pinned under it. That only works if
+something bounds the column's height, and `main`'s `overflow-y-auto` likewise
+only scrolls if its height is bounded. Measured in a real browser at 1280×800
+with a 4000px-tall child inside `main`: under `h-screen` the nav is 800px, `main`
+scrolls internally by 500px, the document does not scroll at all, and the logout
+button sits at `top: 750` — on screen. Under `min-h-screen` the same DOM gives a
+**4024px** nav, `main` scrolls by **0** (its `overflow-y-auto` is dead), the
+document scrolls instead, and the logout button lands at `top: 3974` — 3174px
+below the fold. Task 23's documents table is exactly the tall page that hits this.
+
+**`conversations` starts as `null`, not `[]`.** `[]` is indistinguishable from
+"the fetch came back empty", so every page load paints "아직 대화가 없습니다."
+until the request lands — for users who *do* have conversations. Measured by
+polling the live DOM every 25ms across a page load: with `[]` the empty-state
+string appeared in **9 of 120** samples (~225ms); with `null`, **0 of 120**,
+while the real conversation title was present in 112 and 111 samples respectively.
+
+**Nothing user-visible is in English.** The history heading is `대화 기록`; the
+plan's earlier `History` was the only English string in an otherwise Korean
+sidebar. The error line reuses `ErrorBanner` (Task 20) rather than a bare `<p>`,
+which is what gives the failure a `role="alert"` — an error that appears
+asynchronously with no live region is silent to a screen reader. Verified by
+forcing `/api/conversations` to 500 with a Korean `detail`: the sidebar kept
+rendering, the empty state stayed suppressed, no uncaught exception, and
+`nav [role=alert]` held the backend's message.
+
+**The drawer close control is a `<button>`, not a `<div>`.** It is the only way
+to dismiss the drawer, so as a div it is unreachable without a pointer. The
+toggle also carries `aria-expanded`. Verified in a 390px viewport:
+`aria-expanded` went `false → true → false` across open and close, and the
+`메뉴 닫기` control took focus.
+
 - [ ] **Step 1: Write `frontend/components/layout/Sidebar.tsx`**
 
 ```tsx
@@ -12040,6 +12074,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
+import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { Conversation, User } from "@/lib/types";
 
 export default function Sidebar() {
@@ -12047,7 +12082,10 @@ export default function Sidebar() {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [user, setUser] = useState<User | null>(null);
-  const [conversations, setConversations] = useState<Conversation[]>([]);
+  // null means "not loaded yet", which is not the same as an empty list. With
+  // [] as the initial value every page load flashes "아직 대화가 없습니다."
+  // for the length of the fetch, including for users who do have conversations.
+  const [conversations, setConversations] = useState<Conversation[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -12064,6 +12102,9 @@ export default function Sidebar() {
     }
   }, []);
 
+  // pathname is a dependency on purpose: the chat page creates a conversation
+  // and then navigates to /chat/{id}. Refetching on that navigation is what
+  // puts the new title into the history list.
   useEffect(() => {
     void load();
   }, [load, pathname]);
@@ -12073,6 +12114,8 @@ export default function Sidebar() {
       await apiFetch("/api/auth/logout", { method: "POST" });
     } finally {
       router.push("/login");
+      // The App Router caches rendered segments client-side. Without this the
+      // authenticated pages stay in that cache after the cookie is gone.
       router.refresh();
     }
   }
@@ -12099,12 +12142,12 @@ export default function Sidebar() {
       ))}
 
       <div className="mt-4 flex-1 overflow-y-auto">
-        <div className="mb-1 px-3 text-xs uppercase tracking-wide text-gray-400">History</div>
-        {error && <p className="px-3 py-2 text-xs text-red-600">{error}</p>}
-        {!error && conversations.length === 0 && (
+        <div className="mb-1 px-3 text-xs tracking-wide text-gray-400">대화 기록</div>
+        {error && <ErrorBanner message={error} />}
+        {!error && conversations?.length === 0 && (
           <p className="px-3 py-2 text-xs text-gray-400">아직 대화가 없습니다.</p>
         )}
-        {conversations.map((c) => (
+        {conversations?.map((c) => (
           <Link
             key={c.id}
             href={`/chat/${c.id}`}
@@ -12118,7 +12161,7 @@ export default function Sidebar() {
 
       <div className="mt-3 border-t border-gray-200 pt-3">
         <div className="truncate px-3 text-xs text-gray-500">
-          {user ? `${user.email}${user.role === "admin" ? " · 관리자" : ""}` : " "}
+          {user ? `${user.email}${user.role === "admin" ? " · 관리자" : ""}` : " "}
         </div>
         <button
           onClick={handleLogout}
@@ -12134,6 +12177,7 @@ export default function Sidebar() {
     <>
       <button
         aria-label="메뉴 열기"
+        aria-expanded={open}
         className="fixed left-2 top-2 z-20 rounded border border-gray-300 bg-white px-2 py-1 text-sm md:hidden"
         onClick={() => setOpen(true)}
       >
@@ -12143,7 +12187,13 @@ export default function Sidebar() {
       {open && (
         <div className="fixed inset-0 z-30 flex md:hidden">
           <div className="relative">{content}</div>
-          <div className="flex-1 bg-black/30" onClick={() => setOpen(false)} />
+          {/* A button, not a div: this overlay is the only way to close the
+              drawer, and as a div it is unreachable without a pointer. */}
+          <button
+            aria-label="메뉴 닫기"
+            className="flex-1 bg-black/30"
+            onClick={() => setOpen(false)}
+          />
         </div>
       )}
     </>
@@ -12156,9 +12206,16 @@ export default function Sidebar() {
 ```tsx
 import Sidebar from "@/components/layout/Sidebar";
 
+// h-screen, not min-h-screen. The sidebar is a full-height column with a
+// scrolling history region and a footer pinned under it, and `main`'s
+// overflow-y-auto only scrolls when something bounds its height. Under
+// min-h-screen the container grows with the page instead, so main never
+// overflows and never scrolls, the sidebar stretches to the full document
+// height, and on any page taller than the viewport - the documents table -
+// the logout button ends up below the fold.
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex min-h-screen">
+    <div className="flex h-screen">
       <Sidebar />
       <main className="flex-1 overflow-y-auto">{children}</main>
     </div>
@@ -12169,7 +12226,13 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 - [ ] **Step 3: Verify types**
 
 Run (from `frontend/`): `npm run typecheck`
-Expected: no type errors. (`npm run build` waits until Task 22, when a page exists inside `app/(app)/`.)
+Expected: no type errors. Then run `npm run build`; expected: exit 0. An earlier
+revision of this step said the build had to wait for Task 22 "when a page exists
+inside `app/(app)/`". Measured, that is wrong: a route group holding only a
+`layout.tsx` and no `page.tsx` builds fine — Next simply emits no route for it,
+and the route table prints `/`, `/_not-found`, `/login`, `/register` with no
+`(app)` entry. `layout.tsx` and `Sidebar.tsx` are still type-checked and linted
+by the build, because both are inside the `tsconfig.json` include globs.
 
 - [ ] **Step 4: Commit**
 
