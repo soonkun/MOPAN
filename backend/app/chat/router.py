@@ -122,14 +122,38 @@ async def chat(
             yield _sse({"type": "error", "detail": "요청을 처리하지 못했습니다."})
 
     # no-transform is load-bearing, not decoration. Next.js ships `compress: true`
-    # by default, so its /api/* rewrite proxy gzips this response - and gzip
-    # buffers, which collapses the whole stream into one chunk delivered at the
-    # end. Measured through `next start`: with plain no-cache the searching and
-    # error frames arrived 234ms and 234ms apart from a backend that emitted them
-    # 491ms apart, so the user saw no status at all until the answer landed; with
-    # no-transform, 32ms and 575ms. X-Accel-Buffering is the nginx-specific hint
-    # for the same problem, and no-transform is the standard one every conforming
-    # proxy in the chain - Next, nginx, Cloudflare - is required to honour.
+    # by default, so its /api/* rewrite proxy gzips this response whenever the
+    # client asks for gzip - and gzip buffers, collapsing the whole stream into
+    # one chunk delivered at the end. Every browser asks; curl does not unless
+    # given --compressed, which is why an early probe of the rewrite (Task 20)
+    # reported the stream arriving intact and was wrong.
+    #
+    # Measured through `next start` against a stub origin emitting four frames at
+    # 0/500/2000/2000ms, timing raw socket reads:
+    #   origin direct, any Accept-Encoding             uncompressed  1/501/2001ms
+    #   via Next, no Accept-Encoding                   uncompressed  23/521/2021ms
+    #   via Next, Accept-Encoding: gzip                gzip          10ms, 2008ms
+    #   via Next, Accept-Encoding: gzip + this header  uncompressed  3/503/2003ms
+    # The gzip row is two reads: the headers, then the entire body at the end. So
+    # without this a real browser gets every status frame after the answer is
+    # already in hand and STATUS_LABEL never renders at all.
+    #
+    # `compress: false` in next.config.js would also fix it, and is worse twice
+    # over: Next-only, and it turns gzip off for the whole app's HTML, JS and CSS
+    # to fix one endpoint. It also would not survive deployment, since Cloudflare
+    # compresses at its own edge regardless of what Next did, and no-transform is
+    # the documented opt-out Cloudflare honours. A response header travels with
+    # the resource to every proxy in the chain; a build flag stops at the first.
+    #
+    # X-Accel-Buffering: no beside it is nginx's vendor hint for a different
+    # failure - nginx's proxy buffering, not its gzip. nginx is the one hop no
+    # header covers here: its gzip module has no no-transform handling at all, so
+    # `gzip_proxied any` would compress this stream anyway and would have to be
+    # configured not to. Nothing in this deployment terminates through nginx.
+    #
+    # Residual risk, for Task 24: cloudflared has its own reported SSE buffering
+    # behaviour, unrelated to compression, that no-transform does not address.
+    # Re-measure the status labels once the tunnel is actually up.
     return StreamingResponse(
         stream(),
         media_type="text/event-stream",

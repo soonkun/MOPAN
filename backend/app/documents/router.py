@@ -101,7 +101,7 @@ async def upload_document(
 ):
     collection = await db.get(Collection, collection_id)
     if collection is None:
-        raise HTTPException(status_code=404, detail="collection not found")
+        raise HTTPException(status_code=404, detail="컬렉션을 찾을 수 없습니다.")
 
     filename = (file.filename or "").strip()
     try:
@@ -198,7 +198,7 @@ async def get_document(
 ):
     row = (await db.execute(_document_list_query().where(Document.id == document_id))).first()
     if row is None:
-        raise HTTPException(status_code=404, detail="document not found")
+        raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
     return _to_response(*row)
 
 
@@ -233,7 +233,7 @@ async def get_document_structure(
     try:
         parsed = await to_thread.run_sync(parser.parse, document.storage_path)
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="source file is no longer available") from exc
+        raise HTTPException(status_code=404, detail="원본 파일을 더 이상 찾을 수 없습니다.") from exc
     return [
         BlockResponse(text=b.text, block_type=b.block_type, page=b.page, section=b.section)
         for b in parsed.blocks
@@ -246,11 +246,11 @@ async def get_chunk(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Backs citation click-through: the modal shows the full chunk, not a
-    200-character snippet."""
+    """Backs citation click-through: the modal shows the full chunk, not the
+    300-character snippet."""
     chunk = await db.get(Chunk, chunk_id)
     if chunk is None:
-        raise HTTPException(status_code=404, detail="chunk not found")
+        raise HTTPException(status_code=404, detail="청크를 찾을 수 없습니다.")
     return chunk
 
 

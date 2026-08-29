@@ -37,7 +37,7 @@ async def login(
     try:
         user = await authenticate_user(db, payload.email, payload.password)
     except AuthError as exc:
-        raise HTTPException(status_code=401, detail="invalid credentials") from exc
+        raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 올바르지 않습니다.") from exc
 
     session_id = await create_session(redis, str(user.id), settings.session_ttl_seconds)
     response.set_cookie(

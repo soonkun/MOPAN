@@ -30,13 +30,13 @@ async def register_user(db: AsyncSession, settings: Settings, email: str, passwo
     # whoever POSTs first - so there the admin must come from scripts/create_admin.py.
     is_first_user = user_count == 0 and settings.environment != "production"
     if not is_first_user and not settings.allow_self_registration:
-        raise AuthError("registration is disabled")
+        raise AuthError("회원가입이 비활성화되어 있습니다.")
 
     existing = await db.scalar(select(User).where(User.email == email))
     if existing is not None:
         # Same generic message as any other failure: no account enumeration.
         log_event(logger, "register_duplicate_email")
-        raise AuthError("registration could not be completed")
+        raise AuthError("회원가입을 완료하지 못했습니다.")
 
     user = User(
         email=email,

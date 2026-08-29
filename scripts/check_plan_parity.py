@@ -72,14 +72,22 @@ LANG_SUFFIXES = {
 
 ROOT_FILE_SUFFIXES = {".md", ".yml", ".yaml", ".txt", ".ini", ".toml", ".json", ".example"}
 
+# A bare filename is a path claim too. A step header that reads "Write
+# `a/b/ChunkViewer.tsx` and `StructureViewer.tsx`" yielded ONE path for TWO
+# blocks, and pair()'s single-path fallback then aimed both blocks at the first
+# file - so the second was never compared and the first was compared against the
+# wrong block. Requiring a directory separator was the whole of that bug.
+CODE_FILE_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".mjs", ".css", ".sql", ".sh", ".mako"}
+
 
 def looks_like_path(token: str) -> bool:
-    """`backend/app/main.py` and `.gitignore` are paths; `app.rag.parsers` is not."""
+    """`backend/app/main.py`, `.gitignore` and `StructureViewer.tsx` are paths;
+    `app.rag.parsers` is not."""
     if not token or any(c.isspace() for c in token) or token.endswith("/"):
         return False
     if "/" in token:
         return True
-    return token.startswith(".") or Path(token).suffix in ROOT_FILE_SUFFIXES
+    return token.startswith(".") or Path(token).suffix in ROOT_FILE_SUFFIXES | CODE_FILE_SUFFIXES
 
 
 def paths_in(text: str) -> list[str]:

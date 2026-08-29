@@ -88,8 +88,12 @@ export function safeNextPath(raw: string | null, fallback = "/chat"): string {
   return raw;
 }
 
-/** Only an ApiError carries a message worth showing: it came from the backend
- *  and is already Korean. A generic Error does not - a failed fetch throws a
+/** Only an ApiError carries a message worth showing, and only because every
+ *  `detail=` in the backend is written in Korean so that it can be handed
+ *  straight to the user. That is a standing constraint on the backend, not an
+ *  observation about it: an English `detail=` renders verbatim on screen, which
+ *  is how "conversation not found" once appeared under the Korean empty state.
+ *  A generic Error carries nothing usable at all - a failed fetch throws a
  *  TypeError whose message is the browser's own English string ("Failed to
  *  fetch", "NetworkError when attempting to fetch resource.", "Load failed"),
  *  and returning that verbatim puts English in front of the user. */

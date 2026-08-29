@@ -103,7 +103,7 @@ def create_app() -> FastAPI:
             deployed_dim = await db.scalar(text(EMBEDDING_DIM_SQL))
         except Exception as exc:
             logger.exception("readiness check failed")
-            raise HTTPException(status_code=503, detail="dependencies unavailable") from exc
+            raise HTTPException(status_code=503, detail="의존 서비스에 연결할 수 없습니다.") from exc
 
         # app.state, not get_settings(): the lifespan owns the live Settings and
         # tests swap it there. Reading the module-global ignores both.

@@ -41,7 +41,7 @@ async def save_upload_stream(
                 break
             total += len(piece)
             if total > max_bytes:
-                raise UploadTooLarge(f"upload exceeds {max_bytes} bytes")
+                raise UploadTooLarge(f"업로드가 최대 {max_bytes}바이트를 초과했습니다.")
             await to_thread.run_sync(handle.write, piece)
     except BaseException:
         await to_thread.run_sync(handle.close)

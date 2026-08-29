@@ -78,7 +78,7 @@ async def test_duplicate_registration_does_not_confirm_the_account_exists(client
         "/api/auth/register", json={"email": "c@example.com", "password": "pw123456"}
     )
     assert duplicate.status_code == 400
-    assert "already" not in duplicate.json()["detail"].lower()
+    assert duplicate.json()["detail"] == "회원가입을 완료하지 못했습니다."
 
 
 async def test_short_password_is_rejected(client):
@@ -144,7 +144,7 @@ async def test_login_unknown_email_matches_the_wrong_password_response(client):
     # case, so the response reveals nothing about which emails exist.
     response = await client.post("/api/auth/login", json={"email": "nobody@example.com", "password": "nope"})
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid credentials"}
+    assert response.json() == {"detail": "이메일 또는 비밀번호가 올바르지 않습니다."}
 
 
 async def test_self_registration_can_be_disabled(app, client):

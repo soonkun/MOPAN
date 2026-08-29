@@ -13,7 +13,7 @@ async def get_owned_conversation(db: AsyncSession, conversation_id: uuid.UUID, u
     that somebody else's conversation id exists."""
     conversation = await db.get(Conversation, conversation_id)
     if conversation is None or conversation.user_id != user.id:
-        raise HTTPException(status_code=404, detail="conversation not found")
+        raise HTTPException(status_code=404, detail="대화를 찾을 수 없습니다.")
     return conversation
 
 
@@ -23,5 +23,5 @@ async def get_readable_document(db: AsyncSession, document_id: uuid.UUID) -> Doc
     (see require_admin)."""
     document = await db.get(Document, document_id)
     if document is None:
-        raise HTTPException(status_code=404, detail="document not found")
+        raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
     return document

@@ -19,20 +19,22 @@ async def get_current_user(
 ) -> User:
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
     if not session_id:
-        raise HTTPException(status_code=401, detail="not authenticated")
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
 
     user_id = await get_session_user_id(redis, session_id)
     if not user_id:
-        raise HTTPException(status_code=401, detail="session expired")
+        raise HTTPException(status_code=401, detail="세션이 만료되었습니다. 다시 로그인해 주세요.")
 
     try:
         parsed_user_id = uuid.UUID(user_id)
     except ValueError as exc:
-        raise HTTPException(status_code=401, detail="invalid session") from exc
+        raise HTTPException(
+            status_code=401, detail="세션이 올바르지 않습니다. 다시 로그인해 주세요."
+        ) from exc
 
     user = await db.get(User, parsed_user_id)
     if user is None:
-        raise HTTPException(status_code=401, detail="user not found")
+        raise HTTPException(status_code=401, detail="사용자를 찾을 수 없습니다.")
     return user
 
 
@@ -40,5 +42,5 @@ async def require_admin(user: User = Depends(get_current_user)) -> User:
     """Gate for every write to the shared RAG corpus and for Slice 4/5 admin
     surfaces. Anyone who can upload can poison every other user's answers."""
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="admin role required")
+        raise HTTPException(status_code=403, detail="관리자 권한이 필요합니다.")
     return user

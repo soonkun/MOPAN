@@ -1046,7 +1046,7 @@ def create_app() -> FastAPI:
             deployed_dim = await db.scalar(text(EMBEDDING_DIM_SQL))
         except Exception as exc:
             logger.exception("readiness check failed")
-            raise HTTPException(status_code=503, detail="dependencies unavailable") from exc
+            raise HTTPException(status_code=503, detail="의존 서비스에 연결할 수 없습니다.") from exc
 
         # app.state, not get_settings(): the lifespan owns the live Settings and
         # tests swap it there. Reading the module-global ignores both.
@@ -2531,13 +2531,13 @@ async def register_user(db: AsyncSession, settings: Settings, email: str, passwo
     # whoever POSTs first - so there the admin must come from scripts/create_admin.py.
     is_first_user = user_count == 0 and settings.environment != "production"
     if not is_first_user and not settings.allow_self_registration:
-        raise AuthError("registration is disabled")
+        raise AuthError("회원가입이 비활성화되어 있습니다.")
 
     existing = await db.scalar(select(User).where(User.email == email))
     if existing is not None:
         # Same generic message as any other failure: no account enumeration.
         log_event(logger, "register_duplicate_email")
-        raise AuthError("registration could not be completed")
+        raise AuthError("회원가입을 완료하지 못했습니다.")
 
     user = User(
         email=email,
@@ -2591,20 +2591,22 @@ async def get_current_user(
 ) -> User:
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
     if not session_id:
-        raise HTTPException(status_code=401, detail="not authenticated")
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
 
     user_id = await get_session_user_id(redis, session_id)
     if not user_id:
-        raise HTTPException(status_code=401, detail="session expired")
+        raise HTTPException(status_code=401, detail="세션이 만료되었습니다. 다시 로그인해 주세요.")
 
     try:
         parsed_user_id = uuid.UUID(user_id)
     except ValueError as exc:
-        raise HTTPException(status_code=401, detail="invalid session") from exc
+        raise HTTPException(
+            status_code=401, detail="세션이 올바르지 않습니다. 다시 로그인해 주세요."
+        ) from exc
 
     user = await db.get(User, parsed_user_id)
     if user is None:
-        raise HTTPException(status_code=401, detail="user not found")
+        raise HTTPException(status_code=401, detail="사용자를 찾을 수 없습니다.")
     return user
 
 
@@ -2612,7 +2614,7 @@ async def require_admin(user: User = Depends(get_current_user)) -> User:
     """Gate for every write to the shared RAG corpus and for Slice 4/5 admin
     surfaces. Anyone who can upload can poison every other user's answers."""
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="admin role required")
+        raise HTTPException(status_code=403, detail="관리자 권한이 필요합니다.")
     return user
 ```
 
@@ -2634,7 +2636,7 @@ async def get_owned_conversation(db: AsyncSession, conversation_id: uuid.UUID, u
     that somebody else's conversation id exists."""
     conversation = await db.get(Conversation, conversation_id)
     if conversation is None or conversation.user_id != user.id:
-        raise HTTPException(status_code=404, detail="conversation not found")
+        raise HTTPException(status_code=404, detail="대화를 찾을 수 없습니다.")
     return conversation
 
 
@@ -2644,7 +2646,7 @@ async def get_readable_document(db: AsyncSession, document_id: uuid.UUID) -> Doc
     (see require_admin)."""
     document = await db.get(Document, document_id)
     if document is None:
-        raise HTTPException(status_code=404, detail="document not found")
+        raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
     return document
 ```
 
@@ -2690,7 +2692,7 @@ async def login(
     try:
         user = await authenticate_user(db, payload.email, payload.password)
     except AuthError as exc:
-        raise HTTPException(status_code=401, detail="invalid credentials") from exc
+        raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 올바르지 않습니다.") from exc
 
     session_id = await create_session(redis, str(user.id), settings.session_ttl_seconds)
     response.set_cookie(
@@ -2912,7 +2914,7 @@ async def test_duplicate_registration_does_not_confirm_the_account_exists(client
         "/api/auth/register", json={"email": "c@example.com", "password": "pw123456"}
     )
     assert duplicate.status_code == 400
-    assert "already" not in duplicate.json()["detail"].lower()
+    assert duplicate.json()["detail"] == "회원가입을 완료하지 못했습니다."
 
 
 async def test_short_password_is_rejected(client):
@@ -2978,7 +2980,7 @@ async def test_login_unknown_email_matches_the_wrong_password_response(client):
     # case, so the response reveals nothing about which emails exist.
     response = await client.post("/api/auth/login", json={"email": "nobody@example.com", "password": "nope"})
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid credentials"}
+    assert response.json() == {"detail": "이메일 또는 비밀번호가 올바르지 않습니다."}
 
 
 async def test_self_registration_can_be_disabled(app, client):
@@ -3214,7 +3216,7 @@ def test_validate_magic_bytes_rejects_signature_less_binary_in_a_text_upload():
     """The MZ case above trips the `guess is not None` branch and never reaches
     the NUL-byte check. Only a payload `filetype` cannot identify - a UTF-16 file,
     an arbitrary blob - exercises it, and it is the last line of defence there."""
-    with pytest.raises(UploadValidationError, match="binary content"):
+    with pytest.raises(UploadValidationError, match="바이너리 내용"):
         validate_magic_bytes("txt", b"hello\x00world")
 ```
 
@@ -3273,14 +3275,14 @@ def extension_of(filename: str) -> str:
 def validate_upload_metadata(filename: str, content_type: str, declared_size: int, max_size_mb: int) -> str:
     extension = extension_of(filename)
     if extension not in ALLOWED_EXTENSIONS:
-        raise UploadValidationError(f"unsupported file extension: .{extension}")
+        raise UploadValidationError(f"지원하지 않는 파일 형식입니다: .{extension}")
 
     normalised = (content_type or "").split(";", 1)[0].strip().lower()
     if normalised and normalised not in ALLOWED_CONTENT_TYPES[extension]:
-        raise UploadValidationError(f"content type {normalised} does not match a .{extension} file")
+        raise UploadValidationError(f"Content-Type {normalised}은(는) .{extension} 파일과 맞지 않습니다.")
 
     if declared_size > max_size_mb * 1024 * 1024:
-        raise UploadTooLarge(f"file exceeds max size of {max_size_mb}MB")
+        raise UploadTooLarge(f"파일이 최대 크기 {max_size_mb}MB를 초과했습니다.")
 
     return extension
 
@@ -3293,15 +3295,15 @@ def validate_magic_bytes(extension: str, head: bytes) -> None:
 
     if extension in TEXT_EXTENSIONS:
         if guess is not None:
-            raise UploadValidationError(f"binary content ({guess.mime}) in a .{extension} upload")
+            raise UploadValidationError(f".{extension} 업로드에 바이너리 내용({guess.mime})이 들어 있습니다.")
         if b"\x00" in head:
-            raise UploadValidationError(f"binary content in a .{extension} upload")
+            raise UploadValidationError(f".{extension} 업로드에 바이너리 내용이 들어 있습니다.")
         return
 
     expected = EXPECTED_MAGIC_MIME[extension]
     if guess is None or guess.mime not in expected:
         actual = guess.mime if guess else "unknown"
-        raise UploadValidationError(f"file content ({actual}) does not match the .{extension} extension")
+        raise UploadValidationError(f"파일 내용({actual})이 .{extension} 확장자와 맞지 않습니다.")
 ```
 
 - [ ] **Step 4: Write `backend/app/documents/storage.py`**
@@ -3350,7 +3352,7 @@ async def save_upload_stream(
                 break
             total += len(piece)
             if total > max_bytes:
-                raise UploadTooLarge(f"upload exceeds {max_bytes} bytes")
+                raise UploadTooLarge(f"업로드가 최대 {max_bytes}바이트를 초과했습니다.")
             await to_thread.run_sync(handle.write, piece)
     except BaseException:
         await to_thread.run_sync(handle.close)
@@ -3622,7 +3624,7 @@ async def upload_document(
 ):
     collection = await db.get(Collection, collection_id)
     if collection is None:
-        raise HTTPException(status_code=404, detail="collection not found")
+        raise HTTPException(status_code=404, detail="컬렉션을 찾을 수 없습니다.")
 
     filename = (file.filename or "").strip()
     try:
@@ -3719,7 +3721,7 @@ async def get_document(
 ):
     row = (await db.execute(_document_list_query().where(Document.id == document_id))).first()
     if row is None:
-        raise HTTPException(status_code=404, detail="document not found")
+        raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
     return _to_response(*row)
 
 
@@ -3754,7 +3756,7 @@ async def get_document_structure(
     try:
         parsed = await to_thread.run_sync(parser.parse, document.storage_path)
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="source file is no longer available") from exc
+        raise HTTPException(status_code=404, detail="원본 파일을 더 이상 찾을 수 없습니다.") from exc
     return [
         BlockResponse(text=b.text, block_type=b.block_type, page=b.page, section=b.section)
         for b in parsed.blocks
@@ -3767,11 +3769,11 @@ async def get_chunk(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Backs citation click-through: the modal shows the full chunk, not a
-    200-character snippet."""
+    """Backs citation click-through: the modal shows the full chunk, not the
+    300-character snippet."""
     chunk = await db.get(Chunk, chunk_id)
     if chunk is None:
-        raise HTTPException(status_code=404, detail="chunk not found")
+        raise HTTPException(status_code=404, detail="청크를 찾을 수 없습니다.")
     return chunk
 
 
@@ -10306,14 +10308,38 @@ async def chat(
             yield _sse({"type": "error", "detail": "요청을 처리하지 못했습니다."})
 
     # no-transform is load-bearing, not decoration. Next.js ships `compress: true`
-    # by default, so its /api/* rewrite proxy gzips this response - and gzip
-    # buffers, which collapses the whole stream into one chunk delivered at the
-    # end. Measured through `next start`: with plain no-cache the searching and
-    # error frames arrived 234ms and 234ms apart from a backend that emitted them
-    # 491ms apart, so the user saw no status at all until the answer landed; with
-    # no-transform, 32ms and 575ms. X-Accel-Buffering is the nginx-specific hint
-    # for the same problem, and no-transform is the standard one every conforming
-    # proxy in the chain - Next, nginx, Cloudflare - is required to honour.
+    # by default, so its /api/* rewrite proxy gzips this response whenever the
+    # client asks for gzip - and gzip buffers, collapsing the whole stream into
+    # one chunk delivered at the end. Every browser asks; curl does not unless
+    # given --compressed, which is why an early probe of the rewrite (Task 20)
+    # reported the stream arriving intact and was wrong.
+    #
+    # Measured through `next start` against a stub origin emitting four frames at
+    # 0/500/2000/2000ms, timing raw socket reads:
+    #   origin direct, any Accept-Encoding             uncompressed  1/501/2001ms
+    #   via Next, no Accept-Encoding                   uncompressed  23/521/2021ms
+    #   via Next, Accept-Encoding: gzip                gzip          10ms, 2008ms
+    #   via Next, Accept-Encoding: gzip + this header  uncompressed  3/503/2003ms
+    # The gzip row is two reads: the headers, then the entire body at the end. So
+    # without this a real browser gets every status frame after the answer is
+    # already in hand and STATUS_LABEL never renders at all.
+    #
+    # `compress: false` in next.config.js would also fix it, and is worse twice
+    # over: Next-only, and it turns gzip off for the whole app's HTML, JS and CSS
+    # to fix one endpoint. It also would not survive deployment, since Cloudflare
+    # compresses at its own edge regardless of what Next did, and no-transform is
+    # the documented opt-out Cloudflare honours. A response header travels with
+    # the resource to every proxy in the chain; a build flag stops at the first.
+    #
+    # X-Accel-Buffering: no beside it is nginx's vendor hint for a different
+    # failure - nginx's proxy buffering, not its gzip. nginx is the one hop no
+    # header covers here: its gzip module has no no-transform handling at all, so
+    # `gzip_proxied any` would compress this stream anyway and would have to be
+    # configured not to. Nothing in this deployment terminates through nginx.
+    #
+    # Residual risk, for Task 24: cloudflared has its own reported SSE buffering
+    # behaviour, unrelated to compression, that no-transform does not address.
+    # Re-measure the status labels once the tunnel is actually up.
     return StreamingResponse(
         stream(),
         media_type="text/event-stream",
@@ -10463,6 +10489,10 @@ async def test_chat_streams_status_then_done(logged_in):
     response = await logged_in.post("/api/chat", json={"message": "What is MOPAN?"})
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
+    # Removing no-transform breaks nothing a test, a typecheck or a build can
+    # see: the UI still works, it just silently stops streaming. See the comment
+    # on the StreamingResponse in app/chat/router.py.
+    assert "no-transform" in response.headers["cache-control"]
 
     events = parse_sse(response.text)
     types = [e["type"] for e in events]
@@ -10812,6 +10842,10 @@ async def test_chat_streams_status_then_done(logged_in):
     response = await logged_in.post("/api/chat", json={"message": "What is MOPAN?"})
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
+    # Removing no-transform breaks nothing a test, a typecheck or a build can
+    # see: the UI still works, it just silently stops streaming. See the comment
+    # on the StreamingResponse in app/chat/router.py.
+    assert "no-transform" in response.headers["cache-control"]
 
     events = parse_sse(response.text)
     types = [e["type"] for e in events]
@@ -11364,7 +11398,16 @@ Two things `apiFetch` has to get right that are easy to leave out:
 
 **`API_INTERNAL_URL` is a BUILD-time value, and this was measured.** `next build` evaluates `rewrites()` once and writes the resolved destination into `.next/routes-manifest.json` as a literal string; `next start` serves from that manifest and never re-reads the variable. A server started with `API_INTERNAL_URL=http://127.0.0.1:8123` still proxied to `http://localhost:8000`. Compose originally supplied it under `environment:`, which therefore did nothing — the frontend container would have proxied `/api/*` to its own empty port 8000 and every request would have failed, which is the exact shape of the `NEXT_PUBLIC_API_BASE_URL` trap this design was written to remove, one layer further down. `frontend/Dockerfile` takes it as an `ARG` and `docker-compose.yml` passes it under `build.args`. Changing it needs a rebuild, not a restart.
 
-**SSE survives the rewrite.** Verified against a throwaway event-stream server behind the proxy: four frames emitted one second apart arrived one second apart through Next, `Transfer-Encoding: chunked`, identical timing to hitting the origin directly. Task 22's chat page does not need a bypass.
+**SSE survives the rewrite only if the response carries `Cache-Control: no-transform`.** An early probe here concluded it survives untouched — four frames a second apart arriving a second apart through Next — and that conclusion was false. It was run with a client that sent **no** `Accept-Encoding` header at all (curl's default), so Next never compressed and the timing was perfect. A browser always sends `Accept-Encoding: gzip`, and Next ships `compress: true`. Re-measured through `next start` against a stub origin emitting four frames at 0/500/2000/2000 ms, timing raw socket reads:
+
+| client | Content-Encoding | reads (ms) |
+|---|---|---|
+| origin direct, any `Accept-Encoding` | none | 1, 501, 2001 |
+| via Next, **no** `Accept-Encoding` | none | 23, 521, 2021 |
+| via Next, `Accept-Encoding: gzip` | **gzip** | 10, **2008** — headers, then the whole body |
+| via Next, `Accept-Encoding: gzip`, origin sends `no-transform` | none | 3, 503, 2003 |
+
+gzip buffers, so without the header a real browser receives every frame in one chunk after the answer is already finished. Task 22's chat page does not need a bypass, but it does need that header, and **Task 18 sets it** on the `/api/chat` `StreamingResponse` — the comment there records why `no-transform` and not `compress: false`.
 
 - [ ] **Step 1: Write `frontend/package.json`**
 
@@ -11678,8 +11721,12 @@ export function safeNextPath(raw: string | null, fallback = "/chat"): string {
   return raw;
 }
 
-/** Only an ApiError carries a message worth showing: it came from the backend
- *  and is already Korean. A generic Error does not - a failed fetch throws a
+/** Only an ApiError carries a message worth showing, and only because every
+ *  `detail=` in the backend is written in Korean so that it can be handed
+ *  straight to the user. That is a standing constraint on the backend, not an
+ *  observation about it: an English `detail=` renders verbatim on screen, which
+ *  is how "conversation not found" once appeared under the Korean empty state.
+ *  A generic Error carries nothing usable at all - a failed fetch throws a
  *  TypeError whose message is the browser's own English string ("Failed to
  *  fetch", "NetworkError when attempting to fetch resource.", "Load failed"),
  *  and returning that verbatim puts English in front of the user. */
@@ -12432,7 +12479,7 @@ git commit -m "feat: responsive sidebar with user info and logout"
 **Interfaces:**
 - Consumes: `streamChat`, `apiFetch`, `Message`/`Citation`/`ChatEvent` (Task 20), backend `/api/chat` (SSE) and `/api/conversations/{id}/messages`.
 - Produces: `<ChatWindow initialConversationId />` — shows each status frame as it arrives, renders `[n]` markers **inline** as clickable badges, and opens a modal that fetches the full chunk from `/api/chunks/{id}`.
-- The status only streams because `/api/chat` sends `Cache-Control: no-cache, no-transform` (Task 18). Without `no-transform`, Next's default `compress: true` gzips the rewrite proxy's copy of the stream, gzip buffers it, and every frame lands in one chunk after the answer is already finished — `STATUS_LABEL` then never renders at all and this component looks like it hangs for the whole retrieval-plus-model round trip. Measured, not assumed; see the comment on that `StreamingResponse`.
+- The status only streams because `/api/chat` sends `Cache-Control: no-cache, no-transform` (Task 18). Without `no-transform`, Next's default `compress: true` gzips the rewrite proxy's copy of the stream for any client that sends `Accept-Encoding: gzip` — which every browser does — gzip buffers it, and every frame lands in one chunk after the answer is already finished; `STATUS_LABEL` then never renders at all and this component looks like it hangs for the whole retrieval-plus-model round trip. Measured, not assumed, and note the condition: a probe that omits `Accept-Encoding` sees no compression and no problem, which is how Task 20 first got this wrong. See the comment on that `StreamingResponse`.
 - What streams here is the *status*, not the answer text. `POST /api/chat` emits `status:searching` → `status:answering` → `citations` → `done`, and the whole answer arrives at once inside `done`; `ChatEvent.token` is reserved for Slice 3 and Slice 1's `answer()` awaits one non-streaming `llm_provider.chat()` call. So `STATUS_LABEL` is the entire progress indication a user gets while the model runs, and `ChatWindow` has no token handler on purpose. Saying "streams the answer" here would set up Slice 3's work as a bug report against this task.
 
 - [ ] **Step 1: Write `frontend/components/chat/CitationBadge.tsx`**
@@ -12460,8 +12507,9 @@ export default function CitationBadge({ citation }: { citation: Citation }) {
 
   useEffect(() => {
     // chunk_id is null for the MCP citations Slice 2/3 adds - see lib/types.ts.
-    // Requesting /api/chunks/null is a 422, and its Korean validation fallback
-    // would replace the snippet this citation already carries with an error.
+    // Requesting /api/chunks/null is a 422, which would stack a red validation
+    // banner above the snippet this citation already carries - a snippet with
+    // nothing wrong with it.
     if (!open || chunk || !citation.chunk_id) return;
     // Fetch the FULL chunk, not the 300-char snippet already in the citation.
     apiFetch<Chunk>(`/api/chunks/${citation.chunk_id}`)
@@ -12595,7 +12643,6 @@ export default function MessageBubble({ message }: { message: Message }) {
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import { apiFetch, errorMessage, streamChat } from "@/lib/api";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import MessageBubble from "@/components/chat/MessageBubble";
@@ -12611,15 +12658,17 @@ export default function ChatWindow({
 }: {
   initialConversationId: string | null;
 }) {
-  const router = useRouter();
   const [conversationId, setConversationId] = useState<string | null>(initialConversationId);
   const [messages, setMessages] = useState<Message[]>([]);
-  // "no messages" and "not loaded yet" are different states - the same
-  // distinction the Sidebar draws for its conversation list. Without it, every
-  // arrival at /chat/{id} flashes 등록된 문서에 대해 무엇이든 물어보세요. before
-  // the transcript lands, including the router.replace() that follows an answer
-  // in a brand-new conversation: measured at 40ms over loopback, and it is a
-  // network round trip, so it is only ever longer in front of a real user.
+  // "no messages", "not loaded yet" and "the load failed" are three states, and
+  // the empty-state line below belongs to only the first - the same distinction
+  // the Sidebar draws for its conversation list, its `!error &&` included.
+  // Without `loaded`, every arrival at /chat/{id} flashes 등록된 문서에 대해
+  // 무엇이든 물어보세요. before the transcript lands: measured at 40ms over
+  // loopback, and it is a network round trip, so it is only ever longer in
+  // front of a real user. Without `!error`, a failed load shows that same
+  // invitation stacked on top of the error banner, because setLoaded runs in
+  // finally() and a rejected fetch is therefore loaded-and-empty.
   const [loaded, setLoaded] = useState(!initialConversationId);
   const [input, setInput] = useState("");
   const [status, setStatus] = useState<string | null>(null);
@@ -12660,6 +12709,10 @@ export default function ChatWindow({
 
     try {
       let newConversationId: string | null = null;
+      // Neither `token` nor `citations` gets a branch, both deliberately: Slice 1's
+      // answer() is a single non-streaming llm_provider.chat() call so `token` is
+      // never emitted at all (it is Slice 3's), and the `citations` frame carries
+      // the identical array that `done` carries one frame later.
       await streamChat({ conversation_id: conversationId, message: question }, (event) => {
         if (event.type === "status") {
           setStatus(STATUS_LABEL[event.status] ?? null);
@@ -12682,7 +12735,22 @@ export default function ChatWindow({
 
       if (!conversationId && newConversationId) {
         setConversationId(newConversationId);
-        router.replace(`/chat/${newConversationId}`);
+        // history.replaceState, not router.replace. router.replace crosses from
+        // /chat to /chat/[conversationId] - a different route segment - so it
+        // unmounts this component, `messages` resets to [], and the answer that
+        // just arrived vanishes until the refetch lands. Measured on an
+        // equivalent route pair by requestAnimationFrame sampling: mount count
+        // 1 -> 2 and the transcript 2 items -> 0, restored 44ms later over
+        // loopback. replaceState keeps this component mounted (mount count
+        // stays 1, transcript stays 2) and Next 15 still syncs its router
+        // state, so usePathname() updates in the same frame - measured, and it
+        // has to be, because the Sidebar refetches its conversation list on
+        // exactly that change and the new title would otherwise never appear.
+        // End to end on this page with a real answer: zero frames with an empty
+        // transcript, the answer bubble and the new URL landing on the same
+        // frame, /api/conversations refetched 2ms later, the new link in the
+        // sidebar 31ms after that.
+        window.history.replaceState(null, "", `/chat/${newConversationId}`);
       }
     } catch (err) {
       setError(errorMessage(err));
@@ -12693,13 +12761,14 @@ export default function ChatWindow({
   }
 
   // h-full, not h-screen: this fills `main`, which the (app) layout already
-  // bounds at h-screen. h-screen only happened to match because main stretches
-  // to 100vh - a coincidence, not a contract, and it double-counts the moment
-  // main gains a header or padding (it already has pt-12 below md).
+  // bounds at h-screen. h-screen here would be 100vh no matter what main
+  // actually offers a child, and below md main is a border-box h-screen with
+  // pt-12, so its content box is 100vh - 3rem and a h-screen child overflows
+  // it by exactly that padding.
   return (
     <div className="flex h-full flex-col">
       <div className="flex-1 space-y-3 overflow-y-auto p-4">
-        {loaded && messages.length === 0 && !sending && (
+        {loaded && !error && messages.length === 0 && !sending && (
           <p className="mt-16 text-center text-sm text-gray-400">
             등록된 문서에 대해 무엇이든 물어보세요.
           </p>
@@ -12781,14 +12850,17 @@ Expected: build completes with no TypeScript errors
 
 - [ ] **Step 6: Commit**
 
-`backend/app/chat/router.py` is in this commit and not in Task 18's: the
-`no-transform` on its SSE `Cache-Control` is a frontend-proxy fix that only
-this task's UI can show is needed, and shipping the two apart leaves a commit
-in which the status labels never render.
+backend/app/chat/router.py is deliberately not staged here. Task 18 writes that
+file, no-transform on its SSE Cache-Control included, and Task 18 Step 7 commits
+it; there is nothing left for this task to add. The path is also written bare
+rather than in backticks on purpose: check_plan_parity.py reads a backticked path
+out of a step's prose as "a later task amends this file", so backticking it here
+would move Task 18's whole-file block for it into the excusable list and stop it
+being compared against disk at all.
 
 ```bash
 git add frontend/components/chat frontend/app/\(app\)/chat
-git add backend/app/chat/router.py docs/superpowers/plans/2026-08-28-vertical-slice-1.md
+git add docs/superpowers/plans/2026-08-28-vertical-slice-1.md
 git commit -m "feat: streaming chat UI with inline clickable citations"
 ```
 
@@ -12973,7 +13045,7 @@ export default function DocumentTable({ documents }: { documents: DocumentItem[]
 }
 ```
 
-- [ ] **Step 3: Write `frontend/components/documents/ChunkViewer.tsx` and `StructureViewer.tsx`**
+- [ ] **Step 3: Write `frontend/components/documents/ChunkViewer.tsx` and `frontend/components/documents/StructureViewer.tsx`**
 
 ```tsx
 import type { Chunk } from "@/lib/types";

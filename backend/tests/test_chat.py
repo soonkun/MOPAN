@@ -89,6 +89,10 @@ async def test_chat_streams_status_then_done(logged_in):
     response = await logged_in.post("/api/chat", json={"message": "What is MOPAN?"})
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
+    # Removing no-transform breaks nothing a test, a typecheck or a build can
+    # see: the UI still works, it just silently stops streaming. See the comment
+    # on the StreamingResponse in app/chat/router.py.
+    assert "no-transform" in response.headers["cache-control"]
 
     events = parse_sse(response.text)
     types = [e["type"] for e in events]

@@ -20,8 +20,9 @@ export default function CitationBadge({ citation }: { citation: Citation }) {
 
   useEffect(() => {
     // chunk_id is null for the MCP citations Slice 2/3 adds - see lib/types.ts.
-    // Requesting /api/chunks/null is a 422, and its Korean validation fallback
-    // would replace the snippet this citation already carries with an error.
+    // Requesting /api/chunks/null is a 422, which would stack a red validation
+    // banner above the snippet this citation already carries - a snippet with
+    // nothing wrong with it.
     if (!open || chunk || !citation.chunk_id) return;
     // Fetch the FULL chunk, not the 300-char snippet already in the citation.
     apiFetch<Chunk>(`/api/chunks/${citation.chunk_id}`)
