@@ -20,7 +20,7 @@ from app.retrieval.vector_store import VectorStore
 
 logger = logging.getLogger("mopan.chat")
 
-CITATION_MARKER = re.compile(r"\[(\d{1,2})\]")
+CITATION_MARKER = re.compile(r"\[(\d{1,3})\]")
 SNIPPET_CHARS = 300
 
 
@@ -92,6 +92,12 @@ def _citations_from(answer_text: str, used: list[Evidence]) -> list[dict]:
         citations.append(
             {
                 "index": index,
+                # source_type and ref are the only two fields EVERY Evidence
+                # carries, so they are what identifies a citation. Without them a
+                # Slice 3 MCP citation arrives with all five RAG keys None and the
+                # client cannot tell it is a tool result or link back to it.
+                "source_type": item.source_type,
+                "ref": item.ref,
                 # .get, not []: an MCP Evidence from Slice 2/3 carries none of
                 # these keys and must still render as a source.
                 "chunk_id": metadata.get("chunk_id"),
@@ -157,12 +163,17 @@ async def answer(
     )
 
 
-async def load_history(db: AsyncSession, conversation_id: uuid.UUID, limit: int = 10) -> list[dict]:
-    """Ordered by created_at, which is clock_timestamp() - now() would give both
+async def load_history(db: AsyncSession, conversation: Conversation, limit: int = 10) -> list[dict]:
+    """Takes the Conversation, not a bare id, for the same reason retrieve() owns
+    its commit: the caller cannot skip the ownership check by forgetting. Only
+    get_owned_conversation hands one out, so reading another user's transcript is
+    unreachable rather than merely undone by convention.
+
+    Ordered by created_at, which is clock_timestamp() - now() would give both
     messages of a turn the same value and the order would flip at random."""
     result = await db.scalars(
         select(Message)
-        .where(Message.conversation_id == conversation_id)
+        .where(Message.conversation_id == conversation.id)
         .order_by(Message.created_at.desc())
         .limit(limit)
     )
@@ -179,8 +190,9 @@ async def persist_turn(
 ) -> None:
     # No flush between the two adds. SQLAlchemy does emit them as ONE executemany
     # INSERT, but asyncpg executes it as a Bind/Execute per parameter set and
-    # clock_timestamp() is re-evaluated per execution, so the rows land ~350us
-    # apart rather than sharing a timestamp the way a now() default would. That is
+    # clock_timestamp() is re-evaluated per execution, so the rows land ~1.7ms
+    # apart (measured over 300 turns, 0 ties, min delta 1.67ms) rather than
+    # sharing a timestamp the way a now() default would. That is
     # exactly the property Message.created_at was given clock_timestamp() for, and
     # test_the_two_messages_of_a_turn_never_share_a_timestamp guards it.
     db.add(Message(conversation_id=conversation.id, role="user", content=question, citations=[]))

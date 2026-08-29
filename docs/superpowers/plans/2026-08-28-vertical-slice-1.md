@@ -9159,7 +9159,7 @@ git commit -m "feat: prompt assembly with a nonce evidence fence and token budge
 - Consumes: `hybrid_search`/`Evidence` (Task 15), `build_prompt`/`get_prompt` (Task 16), `LLMProvider` (Task 11), `Conversation`/`Message` models (Task 3).
 - Produces: `async retrieve(db, vector_store, llm_provider, reranker, question, *, settings, collection_ids=None) -> list[Evidence]`.
 - Produces: `@dataclass ChatAnswer(content, citations, model, usage, latency_ms, prompt_name, prompt_version)`; `async answer(llm_provider, question, history, evidence, *, settings) -> ChatAnswer`.
-- Produces: `async load_history(db, conversation_id, limit) -> list[dict]`, `async persist_turn(db, conversation, question, answer, retrieval_ms) -> None`.
+- Produces: `async load_history(db, conversation, limit) -> list[dict]`, `async persist_turn(db, conversation, question, answer, retrieval_ms) -> None`. Both take the ownership-checked `Conversation`, never a bare id.
 
 **This split is the highest-value architectural change in the revision.** Revision 1's `answer_question` hardcoded create-conversation → load-history → `hybrid_search` → `build_prompt` → `llm.chat` → persist, with no notion of a plan, a step, or heterogeneous evidence. Slice 3 must insert an Execution Plan between question and retrieval and merge results of different kinds — which would have replaced the whole function. With `retrieve()` and `answer()` separate and `Evidence` as the currency, Slice 3's Orchestrator produces `list[Evidence]` from a plan and calls the **unchanged** `answer()`. A rewrite becomes an addition.
 
@@ -9188,7 +9188,7 @@ from app.retrieval.vector_store import VectorStore
 
 logger = logging.getLogger("mopan.chat")
 
-CITATION_MARKER = re.compile(r"\[(\d{1,2})\]")
+CITATION_MARKER = re.compile(r"\[(\d{1,3})\]")
 SNIPPET_CHARS = 300
 
 
@@ -9260,6 +9260,12 @@ def _citations_from(answer_text: str, used: list[Evidence]) -> list[dict]:
         citations.append(
             {
                 "index": index,
+                # source_type and ref are the only two fields EVERY Evidence
+                # carries, so they are what identifies a citation. Without them a
+                # Slice 3 MCP citation arrives with all five RAG keys None and the
+                # client cannot tell it is a tool result or link back to it.
+                "source_type": item.source_type,
+                "ref": item.ref,
                 # .get, not []: an MCP Evidence from Slice 2/3 carries none of
                 # these keys and must still render as a source.
                 "chunk_id": metadata.get("chunk_id"),
@@ -9325,12 +9331,17 @@ async def answer(
     )
 
 
-async def load_history(db: AsyncSession, conversation_id: uuid.UUID, limit: int = 10) -> list[dict]:
-    """Ordered by created_at, which is clock_timestamp() - now() would give both
+async def load_history(db: AsyncSession, conversation: Conversation, limit: int = 10) -> list[dict]:
+    """Takes the Conversation, not a bare id, for the same reason retrieve() owns
+    its commit: the caller cannot skip the ownership check by forgetting. Only
+    get_owned_conversation hands one out, so reading another user's transcript is
+    unreachable rather than merely undone by convention.
+
+    Ordered by created_at, which is clock_timestamp() - now() would give both
     messages of a turn the same value and the order would flip at random."""
     result = await db.scalars(
         select(Message)
-        .where(Message.conversation_id == conversation_id)
+        .where(Message.conversation_id == conversation.id)
         .order_by(Message.created_at.desc())
         .limit(limit)
     )
@@ -9347,8 +9358,9 @@ async def persist_turn(
 ) -> None:
     # No flush between the two adds. SQLAlchemy does emit them as ONE executemany
     # INSERT, but asyncpg executes it as a Bind/Execute per parameter set and
-    # clock_timestamp() is re-evaluated per execution, so the rows land ~350us
-    # apart rather than sharing a timestamp the way a now() default would. That is
+    # clock_timestamp() is re-evaluated per execution, so the rows land ~1.7ms
+    # apart (measured over 300 turns, 0 ties, min delta 1.67ms) rather than
+    # sharing a timestamp the way a now() default would. That is
     # exactly the property Message.created_at was given clock_timestamp() for, and
     # test_the_two_messages_of_a_turn_never_share_a_timestamp guards it.
     db.add(Message(conversation_id=conversation.id, role="user", content=question, citations=[]))
@@ -9374,7 +9386,7 @@ async def persist_turn(
     await db.commit()
 ```
 
-Three properties this module owns that no downstream test reaches:
+Four properties this module owns that no downstream test reaches:
 
 - **`retrieve()` ends the session's transaction before it calls `hybrid_search`.**
   `hybrid_search` embeds before its first statement, so it opens nothing across
@@ -9383,16 +9395,33 @@ Three properties this module owns that no downstream test reaches:
   Without the `commit()` the connection sits idle-in-transaction for the whole
   embedding round trip. Putting it here rather than in the router is what makes
   the constraint hold for every caller, Slice 3's Orchestrator included.
+
+  **The corollary for Slice 3:** because `retrieve()` commits, an Orchestrator
+  must give each step its own short session — exactly as Task 18's router already
+  does, opening one session for conversation+history+retrieval, holding none
+  across `answer()`, and opening a fresh one to persist. A single session held as
+  a unit of work across a whole plan would have `retrieve()` make partial
+  plan/step rows durable mid-flight, past the point a later step's failure could
+  roll them back.
+- **`load_history` takes the `Conversation`, not a bare id.** Same reasoning as
+  the `commit()` above: only `get_owned_conversation` hands one out, so reading
+  another user's transcript is unreachable rather than merely undone by
+  convention. The 404-not-403 rule stops depending on caller discipline.
 - **Citation indices resolve only against `used`.** Not against the model's text,
   not against anything parsed out of a chunk. A chunk body containing
   `"[9] (evil.pdf, p.1)"` is legitimate at the prompt layer — folding whitespace
   in a document body would destroy real text — so an index the model echoes back
   with no entry in `used` has to name nothing here.
-- **The two rows of a turn get distinct `created_at` values.** SQLAlchemy batches
-  same-entity inserts into one multi-row statement and Postgres evaluates
-  `clock_timestamp()` once for it, so both rows tie and history order becomes a
-  coin flip. The `flush()` between the two `add()`s is what the column type was
-  chosen for.
+- **The two rows of a turn get distinct `created_at` values.** `Message.created_at`
+  carries `server_default=text("clock_timestamp()")`, and that alone is what
+  provides this — no `flush()` between the two `add()`s is needed or wanted.
+  SQLAlchemy does batch the two inserts into one executemany, but asyncpg drives
+  it as a Bind/Execute per parameter set and `clock_timestamp()` re-evaluates per
+  execution, so the rows land ~1.7ms apart (measured over 300 turns: 0 ties,
+  minimum delta 1.67ms — three orders of magnitude above the clock's resolution).
+  A `now()` default would tie them, because `now()` is transaction start time, and
+  `load_history`'s `ORDER BY created_at` would be a coin flip.
+  `test_the_two_messages_of_a_turn_never_share_a_timestamp` guards a swap back.
 
 - [ ] **Step 2: Write `backend/tests/test_chat_service.py`**
 
@@ -9507,6 +9536,9 @@ async def test_only_the_evidence_the_model_cited_becomes_a_citation(settings):
     assert [c["index"] for c in result.citations] == [2]
     assert result.citations[0]["filename"] == "doc2.pdf"
     assert result.citations[0]["snippet"] == "second"
+    # Identity, not just RAG metadata: the same two keys an MCP citation carries.
+    assert result.citations[0]["source_type"] == "rag"
+    assert result.citations[0]["ref"] == "chunk:2"
 
 
 async def test_an_answer_that_cites_nothing_lists_nothing(settings):
@@ -9520,11 +9552,22 @@ async def test_an_answer_that_cites_nothing_lists_nothing(settings):
 
 
 async def test_an_index_the_model_invents_is_dropped_not_fabricated(settings):
-    llm = FakeLLM(content="Per [1] and [7] and [0] and [99].")
+    llm = FakeLLM(content="Per [1] and [7] and [0] and [99] and [100].")
 
     result = await answer(llm, "q", [], [_evidence("a", 1)], settings=settings)
 
     assert [c["index"] for c in result.citations] == [1]
+
+
+async def test_a_three_digit_index_can_be_cited(settings):
+    """CITATION_MARKER caps how many evidence items are reachable at all. At
+    \\d{1,2} the 100th was unciteable no matter what the model wrote."""
+    evidence = [_evidence(f"body {i}", i) for i in range(1, 101)]
+    llm = FakeLLM(content="See [100].")
+
+    result = await answer(llm, "q", [], evidence, settings=settings)
+
+    assert [c["index"] for c in result.citations] == [100]
 
 
 async def test_evidence_dropped_by_the_token_budget_cannot_be_cited(settings):
@@ -9550,9 +9593,11 @@ def test_answer_takes_no_session_and_no_retrieval_collaborator():
     assert params == ["llm_provider", "question", "history", "evidence", "settings"]
 
 
-async def test_answer_accepts_mcp_evidence_with_no_rag_metadata(settings):
-    """A tool result has no chunk_id, document_id, page or filename. It must still
-    render, still be citable, and still not raise on the missing keys."""
+async def test_an_mcp_citation_is_identifiable_not_just_non_crashing(settings):
+    """A tool result has no chunk_id, document_id, page or filename, so those come
+    back None. source_type and ref are what make it identifiable anyway - without
+    them the client sees five nulls and cannot tell a tool result from a chunk or
+    link back to it."""
     tool_result = Evidence(
         source_type="mcp",
         ref="tool:weather/current",
@@ -9564,9 +9609,12 @@ async def test_answer_accepts_mcp_evidence_with_no_rag_metadata(settings):
 
     result = await answer(llm, "q", [], [tool_result], settings=settings)
 
+    citation = result.citations[0]
     assert [c["index"] for c in result.citations] == [1]
-    assert result.citations[0]["chunk_id"] is None
-    assert result.citations[0]["snippet"] == "Seoul: 24C, clear."
+    assert citation["source_type"] == "mcp"
+    assert citation["ref"] == "tool:weather/current"
+    assert citation["snippet"] == "Seoul: 24C, clear."
+    assert citation["chunk_id"] is None
 
 
 # --- Trace fields ------------------------------------------------------------
@@ -9605,7 +9653,7 @@ async def test_retrieve_holds_no_transaction_across_the_embedding_call(
     backend pid is looked up in pg_stat_activity from a second connection at the
     moment embed() is entered."""
     backend_pid = await db.scalar(text("SELECT pg_backend_pid()"))
-    await load_history(db, conversation.id)
+    await load_history(db, conversation)
     assert db.in_transaction()  # the read left one open, as SQLAlchemy autobegin does
 
     observed = {}
@@ -9642,14 +9690,14 @@ async def test_load_history_returns_the_most_recent_turns_oldest_first(db, conve
         await db.flush()
     await db.commit()
 
-    history = await load_history(db, conversation.id, limit=4)
+    history = await load_history(db, conversation, limit=4)
 
     assert [row["content"] for row in history] == ["m4", "m5", "m6", "m7"]
     assert {row["role"] for row in history} == {"user"}
 
 
 async def test_load_history_on_a_fresh_conversation_is_empty(db, conversation):
-    assert await load_history(db, conversation.id) == []
+    assert await load_history(db, conversation) == []
 
 
 async def test_persist_turn_writes_both_messages_with_their_trace_fields(db, conversation):
@@ -9705,7 +9753,7 @@ async def test_the_two_messages_of_a_turn_never_share_a_timestamp(db, conversati
 - [ ] **Step 3: Run the tests, expect PASS**
 
 Run: `pytest tests/test_chat_service.py -v` (Postgres running)
-Expected: all 15 tests PASS
+Expected: all 16 tests PASS
 
 - [ ] **Step 4: Commit**
 
@@ -9900,7 +9948,7 @@ async def chat(
                     conversation = await get_owned_conversation(db, payload.conversation_id, user)
 
                 conversation_id = conversation.id
-                history = await load_history(db, conversation_id)
+                history = await load_history(db, conversation)
                 evidence = await retrieve(
                     db,
                     PgVectorStore(db),

@@ -108,6 +108,9 @@ async def test_only_the_evidence_the_model_cited_becomes_a_citation(settings):
     assert [c["index"] for c in result.citations] == [2]
     assert result.citations[0]["filename"] == "doc2.pdf"
     assert result.citations[0]["snippet"] == "second"
+    # Identity, not just RAG metadata: the same two keys an MCP citation carries.
+    assert result.citations[0]["source_type"] == "rag"
+    assert result.citations[0]["ref"] == "chunk:2"
 
 
 async def test_an_answer_that_cites_nothing_lists_nothing(settings):
@@ -121,11 +124,22 @@ async def test_an_answer_that_cites_nothing_lists_nothing(settings):
 
 
 async def test_an_index_the_model_invents_is_dropped_not_fabricated(settings):
-    llm = FakeLLM(content="Per [1] and [7] and [0] and [99].")
+    llm = FakeLLM(content="Per [1] and [7] and [0] and [99] and [100].")
 
     result = await answer(llm, "q", [], [_evidence("a", 1)], settings=settings)
 
     assert [c["index"] for c in result.citations] == [1]
+
+
+async def test_a_three_digit_index_can_be_cited(settings):
+    """CITATION_MARKER caps how many evidence items are reachable at all. At
+    \\d{1,2} the 100th was unciteable no matter what the model wrote."""
+    evidence = [_evidence(f"body {i}", i) for i in range(1, 101)]
+    llm = FakeLLM(content="See [100].")
+
+    result = await answer(llm, "q", [], evidence, settings=settings)
+
+    assert [c["index"] for c in result.citations] == [100]
 
 
 async def test_evidence_dropped_by_the_token_budget_cannot_be_cited(settings):
@@ -151,9 +165,11 @@ def test_answer_takes_no_session_and_no_retrieval_collaborator():
     assert params == ["llm_provider", "question", "history", "evidence", "settings"]
 
 
-async def test_answer_accepts_mcp_evidence_with_no_rag_metadata(settings):
-    """A tool result has no chunk_id, document_id, page or filename. It must still
-    render, still be citable, and still not raise on the missing keys."""
+async def test_an_mcp_citation_is_identifiable_not_just_non_crashing(settings):
+    """A tool result has no chunk_id, document_id, page or filename, so those come
+    back None. source_type and ref are what make it identifiable anyway - without
+    them the client sees five nulls and cannot tell a tool result from a chunk or
+    link back to it."""
     tool_result = Evidence(
         source_type="mcp",
         ref="tool:weather/current",
@@ -165,9 +181,12 @@ async def test_answer_accepts_mcp_evidence_with_no_rag_metadata(settings):
 
     result = await answer(llm, "q", [], [tool_result], settings=settings)
 
+    citation = result.citations[0]
     assert [c["index"] for c in result.citations] == [1]
-    assert result.citations[0]["chunk_id"] is None
-    assert result.citations[0]["snippet"] == "Seoul: 24C, clear."
+    assert citation["source_type"] == "mcp"
+    assert citation["ref"] == "tool:weather/current"
+    assert citation["snippet"] == "Seoul: 24C, clear."
+    assert citation["chunk_id"] is None
 
 
 # --- Trace fields ------------------------------------------------------------
@@ -206,7 +225,7 @@ async def test_retrieve_holds_no_transaction_across_the_embedding_call(
     backend pid is looked up in pg_stat_activity from a second connection at the
     moment embed() is entered."""
     backend_pid = await db.scalar(text("SELECT pg_backend_pid()"))
-    await load_history(db, conversation.id)
+    await load_history(db, conversation)
     assert db.in_transaction()  # the read left one open, as SQLAlchemy autobegin does
 
     observed = {}
@@ -243,14 +262,14 @@ async def test_load_history_returns_the_most_recent_turns_oldest_first(db, conve
         await db.flush()
     await db.commit()
 
-    history = await load_history(db, conversation.id, limit=4)
+    history = await load_history(db, conversation, limit=4)
 
     assert [row["content"] for row in history] == ["m4", "m5", "m6", "m7"]
     assert {row["role"] for row in history} == {"user"}
 
 
 async def test_load_history_on_a_fresh_conversation_is_empty(db, conversation):
-    assert await load_history(db, conversation.id) == []
+    assert await load_history(db, conversation) == []
 
 
 async def test_persist_turn_writes_both_messages_with_their_trace_fields(db, conversation):
