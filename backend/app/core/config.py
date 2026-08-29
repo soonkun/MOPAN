@@ -32,8 +32,11 @@ class Settings(BaseSettings):
     # "production". Fail at startup instead.
     environment: Literal["development", "production"] = "development"
 
-    database_url: str = "postgresql+asyncpg://mopan:mopan@localhost:5432/mopan"
-    redis_url: str = "redis://localhost:6379/0"
+    # 127.0.0.1, not localhost: on Windows localhost resolves to ::1 first and
+    # every connect pays a failed IPv6 attempt first (2076ms vs 31ms). See the
+    # note in .env.example.
+    database_url: str = "postgresql+asyncpg://mopan:mopan@127.0.0.1:5432/mopan"
+    redis_url: str = "redis://127.0.0.1:6379/0"
     db_pool_size: int = 10
     db_max_overflow: int = 10
 

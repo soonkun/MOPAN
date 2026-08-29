@@ -364,10 +364,17 @@ venv
 ```dotenv
 # Copy to .env:  cp .env.example .env
 #
-# IMPORTANT: the localhost URLs below are for running the backend/worker/tests
+# IMPORTANT: the 127.0.0.1 URLs below are for running the backend/worker/tests
 # DIRECTLY ON YOUR MACHINE. docker-compose.yml overrides DATABASE_URL and
 # REDIS_URL per service with the container hostnames (postgres / redis), so you
-# do NOT need to edit them for `docker compose up`.
+# do NOT need to edit them for `docker compose up` - Docker is unaffected by
+# what these two say.
+#
+# 127.0.0.1, not localhost, deliberately: compose publishes both ports on
+# 127.0.0.1 (IPv4 only), while on Windows `localhost` resolves to ::1 first. Every
+# connect then pays a failed IPv6 attempt before falling back - measured at 2076ms
+# against 31ms. The test suite opens a fresh connection per checkout (NullPool),
+# so that fallback alone took a 52-second suite to 13 minutes.
 
 ENVIRONMENT=development
 
@@ -376,8 +383,8 @@ POSTGRES_PASSWORD=mopan
 POSTGRES_DB=mopan
 REDIS_PASSWORD=mopan
 
-DATABASE_URL=postgresql+asyncpg://mopan:mopan@localhost:5432/mopan
-REDIS_URL=redis://:mopan@localhost:6379/0
+DATABASE_URL=postgresql+asyncpg://mopan:mopan@127.0.0.1:5432/mopan
+REDIS_URL=redis://:mopan@127.0.0.1:6379/0
 
 DB_POOL_SIZE=10
 DB_MAX_OVERFLOW=10
@@ -560,7 +567,9 @@ services:
     env_file:
       - path: .env
         required: false
-    # These win over env_file. .env keeps localhost URLs for host-side tooling.
+    # These win over env_file, so Docker is unaffected by .env's host-side URLs -
+    # which are 127.0.0.1 rather than localhost on purpose (see .env.example: on
+    # Windows localhost costs a failed ::1 attempt on every connect).
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mopan}:${POSTGRES_PASSWORD:-mopan}@postgres:5432/${POSTGRES_DB:-mopan}
       REDIS_URL: redis://:${REDIS_PASSWORD:-mopan}@redis:6379/0
@@ -696,8 +705,11 @@ class Settings(BaseSettings):
     # "production". Fail at startup instead.
     environment: Literal["development", "production"] = "development"
 
-    database_url: str = "postgresql+asyncpg://mopan:mopan@localhost:5432/mopan"
-    redis_url: str = "redis://localhost:6379/0"
+    # 127.0.0.1, not localhost: on Windows localhost resolves to ::1 first and
+    # every connect pays a failed IPv6 attempt first (2076ms vs 31ms). See the
+    # note in .env.example.
+    database_url: str = "postgresql+asyncpg://mopan:mopan@127.0.0.1:5432/mopan"
+    redis_url: str = "redis://127.0.0.1:6379/0"
     db_pool_size: int = 10
     db_max_overflow: int = 10
 
@@ -9153,13 +9165,11 @@ git commit -m "feat: prompt assembly with a nonce evidence fence and token budge
 
 **Files:**
 - Create: `backend/app/chat/service.py`
-- Test: `backend/tests/test_chat_service.py` (Task 18's router tests and Task 19's end-to-end test cover the wiring; these cover the two properties neither can reach through a mock — that a citation index resolves only against `used`, and that the session holds no transaction across the embedding call)
+- Test: `backend/tests/test_chat_service.py` (Task 18's router tests and Task 19's end-to-end test cover the wiring; these cover the module properties neither can reach through a mock — a citation index resolving only against `used`, and the session holding no transaction across the embedding call. The full list is enumerated after Step 1.)
 
 **Interfaces:**
 - Consumes: `hybrid_search`/`Evidence` (Task 15), `build_prompt`/`get_prompt` (Task 16), `LLMProvider` (Task 11), `Conversation`/`Message` models (Task 3).
-- Produces: `async retrieve(db, vector_store, llm_provider, reranker, question, *, settings, collection_ids=None) -> list[Evidence]`.
-- Produces: `@dataclass ChatAnswer(content, citations, model, usage, latency_ms, prompt_name, prompt_version)`; `async answer(llm_provider, question, history, evidence, *, settings) -> ChatAnswer`.
-- Produces: `async load_history(db, conversation, limit) -> list[dict]`, `async persist_turn(db, conversation, question, answer, retrieval_ms) -> None`. Both take the ownership-checked `Conversation`, never a bare id.
+- Produces: `retrieve`, `answer`, `ChatAnswer`, `load_history`, `persist_turn`. Signatures are in Step 1's block below and are deliberately NOT restated here: a restatement is a second copy the parity checker does not compare, and three of the six prose/code contradictions found in this plan came from exactly that. `load_history` and `persist_turn` take the ownership-checked `Conversation`, never a bare id.
 
 **This split is the highest-value architectural change in the revision.** Revision 1's `answer_question` hardcoded create-conversation → load-history → `hybrid_search` → `build_prompt` → `llm.chat` → persist, with no notion of a plan, a step, or heterogeneous evidence. Slice 3 must insert an Execution Plan between question and retrieval and merge results of different kinds — which would have replaced the whole function. With `retrieve()` and `answer()` separate and `Evidence` as the currency, Slice 3's Orchestrator produces `list[Evidence]` from a plan and calls the **unchanged** `answer()`. A rewrite becomes an addition.
 
@@ -9188,7 +9198,10 @@ from app.retrieval.vector_store import VectorStore
 
 logger = logging.getLogger("mopan.chat")
 
-CITATION_MARKER = re.compile(r"\[(\d{1,3})\]")
+# No digit bound. Containment is `index not in cited` against `used`, so an index
+# the model invented names nothing whatever its width; a bound would only decide
+# which evidence item is unciteable.
+CITATION_MARKER = re.compile(r"\[(\d+)\]")
 SNIPPET_CHARS = 300
 
 
@@ -9333,9 +9346,10 @@ async def answer(
 
 async def load_history(db: AsyncSession, conversation: Conversation, limit: int = 10) -> list[dict]:
     """Takes the Conversation, not a bare id, for the same reason retrieve() owns
-    its commit: the caller cannot skip the ownership check by forgetting. Only
-    get_owned_conversation hands one out, so reading another user's transcript is
-    unreachable rather than merely undone by convention.
+    its commit: the caller cannot skip the ownership check by forgetting. It does
+    not make another user's transcript unreachable - db.get(Conversation, id) still
+    returns one with no check - it raises the cost of skipping, because a caller
+    now has to go out of its way to produce an unchecked Conversation.
 
     Ordered by created_at, which is clock_timestamp() - now() would give both
     messages of a turn the same value and the order would flip at random."""
@@ -9404,9 +9418,10 @@ Four properties this module owns that no downstream test reaches:
   plan/step rows durable mid-flight, past the point a later step's failure could
   roll them back.
 - **`load_history` takes the `Conversation`, not a bare id.** Same reasoning as
-  the `commit()` above: only `get_owned_conversation` hands one out, so reading
-  another user's transcript is unreachable rather than merely undone by
-  convention. The 404-not-403 rule stops depending on caller discipline.
+  the `commit()` above. It does not make another user's transcript unreachable —
+  `db.get(Conversation, id)` still returns one with no check, and a router that
+  wanted to could call it — it raises the cost of skipping the check, so the
+  404-not-403 rule leans less on caller discipline.
 - **Citation indices resolve only against `used`.** Not against the model's text,
   not against anything parsed out of a chunk. A chunk body containing
   `"[9] (evil.pdf, p.1)"` is legitimate at the prompt layer — folding whitespace
@@ -9559,15 +9574,17 @@ async def test_an_index_the_model_invents_is_dropped_not_fabricated(settings):
     assert [c["index"] for c in result.citations] == [1]
 
 
-async def test_a_three_digit_index_can_be_cited(settings):
-    """CITATION_MARKER caps how many evidence items are reachable at all. At
-    \\d{1,2} the 100th was unciteable no matter what the model wrote."""
-    evidence = [_evidence(f"body {i}", i) for i in range(1, 101)]
-    llm = FakeLLM(content="See [100].")
+async def test_an_index_past_any_digit_bound_can_be_cited(settings):
+    """A digit bound on CITATION_MARKER caps how many evidence items are reachable
+    at all - at \\d{1,3} the 1000th was unciteable no matter what the model wrote -
+    and buys nothing, because containment against `used` is the real bound."""
+    roomy = settings.model_copy(update={"answer_context_token_budget": 60000})
+    evidence = [_evidence(f"body {i}", i) for i in range(1, 1001)]
+    llm = FakeLLM(content="See [1000].")
 
-    result = await answer(llm, "q", [], evidence, settings=settings)
+    result = await answer(llm, "q", [], evidence, settings=roomy)
 
-    assert [c["index"] for c in result.citations] == [100]
+    assert [c["index"] for c in result.citations] == [1000]
 
 
 async def test_evidence_dropped_by_the_token_budget_cannot_be_cited(settings):
@@ -10050,10 +10067,12 @@ async def list_messages(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ):
-    await get_owned_conversation(db, conversation_id, user)
+    # The returned object, not the bare id: discarding it and re-querying by id is
+    # the caller-discipline pattern load_history/persist_turn exist to remove.
+    conversation = await get_owned_conversation(db, conversation_id, user)
     result = await db.scalars(
         select(Message)
-        .where(Message.conversation_id == conversation_id)
+        .where(Message.conversation_id == conversation.id)
         .order_by(Message.created_at)
     )
     return list(result)

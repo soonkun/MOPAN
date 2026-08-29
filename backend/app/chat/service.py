@@ -20,7 +20,10 @@ from app.retrieval.vector_store import VectorStore
 
 logger = logging.getLogger("mopan.chat")
 
-CITATION_MARKER = re.compile(r"\[(\d{1,3})\]")
+# No digit bound. Containment is `index not in cited` against `used`, so an index
+# the model invented names nothing whatever its width; a bound would only decide
+# which evidence item is unciteable.
+CITATION_MARKER = re.compile(r"\[(\d+)\]")
 SNIPPET_CHARS = 300
 
 
@@ -165,9 +168,10 @@ async def answer(
 
 async def load_history(db: AsyncSession, conversation: Conversation, limit: int = 10) -> list[dict]:
     """Takes the Conversation, not a bare id, for the same reason retrieve() owns
-    its commit: the caller cannot skip the ownership check by forgetting. Only
-    get_owned_conversation hands one out, so reading another user's transcript is
-    unreachable rather than merely undone by convention.
+    its commit: the caller cannot skip the ownership check by forgetting. It does
+    not make another user's transcript unreachable - db.get(Conversation, id) still
+    returns one with no check - it raises the cost of skipping, because a caller
+    now has to go out of its way to produce an unchecked Conversation.
 
     Ordered by created_at, which is clock_timestamp() - now() would give both
     messages of a turn the same value and the order would flip at random."""

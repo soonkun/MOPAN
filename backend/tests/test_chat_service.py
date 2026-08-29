@@ -131,15 +131,17 @@ async def test_an_index_the_model_invents_is_dropped_not_fabricated(settings):
     assert [c["index"] for c in result.citations] == [1]
 
 
-async def test_a_three_digit_index_can_be_cited(settings):
-    """CITATION_MARKER caps how many evidence items are reachable at all. At
-    \\d{1,2} the 100th was unciteable no matter what the model wrote."""
-    evidence = [_evidence(f"body {i}", i) for i in range(1, 101)]
-    llm = FakeLLM(content="See [100].")
+async def test_an_index_past_any_digit_bound_can_be_cited(settings):
+    """A digit bound on CITATION_MARKER caps how many evidence items are reachable
+    at all - at \\d{1,3} the 1000th was unciteable no matter what the model wrote -
+    and buys nothing, because containment against `used` is the real bound."""
+    roomy = settings.model_copy(update={"answer_context_token_budget": 60000})
+    evidence = [_evidence(f"body {i}", i) for i in range(1, 1001)]
+    llm = FakeLLM(content="See [1000].")
 
-    result = await answer(llm, "q", [], evidence, settings=settings)
+    result = await answer(llm, "q", [], evidence, settings=roomy)
 
-    assert [c["index"] for c in result.citations] == [100]
+    assert [c["index"] for c in result.citations] == [1000]
 
 
 async def test_evidence_dropped_by_the_token_budget_cannot_be_cited(settings):

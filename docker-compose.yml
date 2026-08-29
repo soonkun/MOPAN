@@ -57,7 +57,9 @@ services:
     env_file:
       - path: .env
         required: false
-    # These win over env_file. .env keeps localhost URLs for host-side tooling.
+    # These win over env_file, so Docker is unaffected by .env's host-side URLs -
+    # which are 127.0.0.1 rather than localhost on purpose (see .env.example: on
+    # Windows localhost costs a failed ::1 attempt on every connect).
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mopan}:${POSTGRES_PASSWORD:-mopan}@postgres:5432/${POSTGRES_DB:-mopan}
       REDIS_URL: redis://:${REDIS_PASSWORD:-mopan}@redis:6379/0
