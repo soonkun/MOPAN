@@ -145,6 +145,8 @@ backend/
     test_retrieval.py
     test_prompt.py
     test_chat.py
+    test_chat_service.py
+    test_db.py
     test_end_to_end.py
 
 worker/
@@ -1641,7 +1643,9 @@ class Chunk(Base):
     )
 ```
 
-Note on the `'simple'` text search configuration: it applies no stemming and strips no stopwords. That is deliberate — the primary corpus language is Korean, where English stemming would be actively wrong. **Task 15's keyword query must use `plainto_tsquery('simple', ...)`;** a different regconfig on the query side silently bypasses the GIN index.
+Note on the `'simple'` text search configuration: it applies no stemming and strips no stopwords. That is deliberate — the primary corpus language is Korean, where English stemming would be actively wrong. **Task 15's keyword query must be built from `'simple'` lexemes on the query side too;** a different regconfig on the query side does not bypass the GIN index, it silently answers wrong — the column stores what `'simple'` produced (`'tomatoes'`, `'blighted'`) and an `'english'` query asks for stems (`'tomato'`, `'blight'`) that row never stored. Measured on a seeded corpus, `'english'` against this column hit 0 of 13 questions.
+
+The other half of that constraint is the *combining* operator, and it is the one that was got wrong. `plainto_tsquery` ANDs every surviving term, and `'simple'` drops no stop words, so `"How does tomato blight spread?"` asked for `'how' & 'does' & 'tomato' & 'blight' & 'spread'` and matched nothing — 1 of 13 questions retrieved anything at all, and the dense half silently covered for a dead sparse retriever. Task 15 therefore OR-joins the `'simple'` lexemes, dropping the ones the `english` dictionary treats as stop words — `'english'` as a stopword *oracle* only, never as the query config, so both sides still say `'simple'`. Without that filter recall is the same but ranking is not: `ts_rank` has no IDF, so a chunk repeating "How does this work?" outranks the real answer on `'how' | 'does'` alone. Measured: 12 of 13, correct chunk at rank 1 in 12, and 7 of 7 in Korean.
 
 The vector side has the symmetric trap. `ix_chunks_embedding` is built with `vector_cosine_ops`, so **only the `<=>` (cosine distance) operator can use it** — SQLAlchemy's `Chunk.embedding.cosine_distance(...)`. Writing `<->` (L2) or `<#>` (inner product), or the matching `l2_distance` / `max_inner_product` helpers, silently falls back to a sequential scan over every chunk. Neither trap raises an error; both just make retrieval quietly slow and, once the corpus is large enough, quietly wrong.
 
@@ -7902,11 +7906,59 @@ def chunk_to_evidence(chunk: RetrievedChunk) -> Evidence:
 ```python
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chunk import Chunk
 from app.models.document import Document
+
+# 'simple' MUST match the regconfig in the generated content_tsv column (see
+# app/models/chunk.py). The failure mode is worse than a slow query and was
+# measured, not assumed: the index still gets used, it just answers wrong.
+# content_tsv stores what 'simple' produced ('tomatoes', 'blighted'), while
+# plainto_tsquery('english', ...) asks for the stems ('tomato', 'blight'),
+# which that row never stored - a silent false negative on every inflected
+# word, with a healthy-looking Bitmap Index Scan in the plan. Measured on a
+# seeded corpus, 'english' against this column hit 0 of 13 questions.
+#
+# So the query is built out of the SAME 'simple' lexemes the column holds, then
+# OR-joined. plainto_tsquery (and websearch_to_tsquery, which was measured
+# identically) ANDs every term, so "How does tomato blight spread?" asked for
+# 'how' & 'does' & 'tomato' & 'blight' & 'spread' and matched nothing at all -
+# 1 of 13 questions retrieved anything, and the dense half silently covered.
+#
+# 'english' appears here only as a STOPWORD ORACLE, never as the query config:
+# a lexeme the english dictionary throws away ('how', 'does', 'is') is dropped
+# from the OR. Without that filter recall is the same but ranking is not -
+# ts_rank has no IDF, so a chunk repeating "How does this work?" outranks the
+# real answer on 'how' | 'does' alone. Korean lexemes are unknown to the english
+# dictionary, so they are kept, which is the wanted behaviour.
+#
+# The coalesce covers an all-stopword query ("how does it?"): the filtered
+# aggregate is NULL, so the unfiltered lexemes are used instead. When there are
+# no lexemes at all (punctuation, whitespace) both aggregates are NULL,
+# to_tsquery(NULL) is NULL and `content_tsv @@ NULL` is NULL - no rows, no error.
+#
+# quote_literal is what keeps user text out of tsquery syntax: '|', '&', '!',
+# ':*', '(' and a bare quote all arrive as ordinary characters inside a quoted
+# lexeme. The lexemes themselves come from to_tsvector, never from the raw
+# string, and query_text is a bound parameter, so nothing user-supplied is ever
+# concatenated into SQL.
+#
+# ponytail: 'simple' is a whitespace tokenizer for Korean, so josa still defeats
+# it - a question asking about '역병이' does not match a document that wrote
+# '역병은', they are two unrelated tokens. Measured: 7 of 7 natural Korean
+# questions hit, because a question tends to reuse the document's own inflected
+# word - but the bare-noun probe '역병 토양' hit nothing against a document
+# reading '역병은 ... 토양과'. The dense half covers that case today; the fix is a
+# Korean analyzer (pg_bigm or mecab-ko) on a column of its own, which is a
+# migration and a slice of its own.
+_TS_QUERY = text("""to_tsquery('simple', coalesce(
+    (SELECT string_agg(quote_literal(lexeme), ' | ')
+       FROM unnest(to_tsvector('simple', :query_text))
+      WHERE to_tsvector('english', lexeme) <> ''::tsvector),
+    (SELECT string_agg(quote_literal(lexeme), ' | ')
+       FROM unnest(to_tsvector('simple', :query_text)))))""")
 
 
 async def keyword_search(
@@ -7920,14 +7972,7 @@ async def keyword_search(
     Returns ids, not rows, so it is symmetric with `VectorStore.search` and
     nothing ORM-shaped or Postgres-shaped reaches the fusion stage.
     """
-    # 'simple' MUST match the regconfig in the generated content_tsv column (see
-    # app/models/chunk.py). The failure mode is worse than a slow query and was
-    # measured, not assumed: the index still gets used, it just answers wrong.
-    # content_tsv stores what 'simple' produced ('tomatoes', 'blighted'), while
-    # plainto_tsquery('english', ...) asks for the stems ('tomato', 'blight'),
-    # which that row never stored - a silent false negative on every inflected
-    # word, with a healthy-looking Bitmap Index Scan in the plan.
-    ts_query = func.plainto_tsquery("simple", query_text)
+    ts_query = _TS_QUERY.bindparams(query_text=query_text)
     # is_comparison=True types the result as boolean; without it the expression
     # inherits TSVECTOR and only happens to render correctly in a WHERE clause.
     query = select(Chunk.id).where(Chunk.content_tsv.op("@@", is_comparison=True)(ts_query))
@@ -8122,6 +8167,7 @@ import uuid
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import func, select
 
 from app.models.chunk import EMBEDDING_DIM, Chunk
 from app.models.collection import Collection
@@ -8248,6 +8294,34 @@ async def corpus(db):
             chunk_metadata={},
             embedding=None,
         ),
+        # Korean, because 'simple' is the only config this column has and Korean is
+        # what the platform's documents are actually written in.
+        Chunk(
+            document_id=doc_a.id,
+            chunk_index=3,
+            content="토마토 역병은 감염된 토양과 튀는 물을 통해 퍼집니다",
+            token_count=8,
+            char_count=29,
+            page=33,
+            section=None,
+            chunk_metadata={},
+            embedding=None,
+        ),
+        # Stop words and nothing else. ts_rank has no IDF, so on a corpus this small
+        # a chunk repeating "how does" outranks the real answer to "How does tomato
+        # blight spread?" unless the query drops those lexemes. It shares no lexeme
+        # with "tomato blight" or "durian ripeness", so no other test can see it.
+        Chunk(
+            document_id=doc_a.id,
+            chunk_index=4,
+            content="How does this work? How does that work? How does it spread?",
+            token_count=12,
+            char_count=59,
+            page=99,
+            section=None,
+            chunk_metadata={},
+            embedding=None,
+        ),
     ]
     db.add_all(chunks)
     await db.commit()
@@ -8367,14 +8441,39 @@ async def test_empty_corpus_returns_no_evidence(db):
     assert evidence == []
 
 
-@pytest.mark.parametrize("query", ["", "   ", "!!! ??? ---", "\n\t"])
+NO_LEXEMES = ["", "   ", "!!! ??? ---", "\n\t", "'''", ") ( ) ((( ", "\\", "'|'&'!'(:*)\\"]
+
+
+@pytest.mark.parametrize("query", NO_LEXEMES)
 async def test_keyword_search_survives_a_query_with_no_lexemes(db, corpus, query):
-    """plainto_tsquery reduces these to an empty tsquery, which matches nothing.
-    A crash here would 500 on a user pasting punctuation into the search box."""
+    """to_tsvector reduces these to nothing, both aggregates come back NULL,
+    to_tsquery(NULL) is NULL and `content_tsv @@ NULL` is NULL - no rows. The last
+    four are pure tsquery syntax and matter twice: a crash here would 500 on a user
+    pasting punctuation into the search box, and a malformed-tsquery error would be
+    the tell that the operators reached the parser as operators."""
     assert await keyword_search(db, query, 20) == []
 
 
-@pytest.mark.parametrize("query", ["", "   ", "!!! ??? ---", "\n\t"])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "tomato'; DROP TABLE chunks; --",
+        "tomato' | 'zzznomatch",
+        "tomato:* & !blight",
+        "tomato \\ ( ) :* ! & |",
+    ],
+)
+async def test_keyword_search_treats_tsquery_syntax_as_ordinary_text(db, corpus, query):
+    """query_text is user input that reaches to_tsquery. Its lexemes come from
+    to_tsvector and are quote_literal'd, and query_text itself is a bound parameter,
+    so an operator, a bare quote, a backslash or an unbalanced paren can never
+    become syntax - in the tsquery or in the SQL. Each of these is the word 'tomato'
+    plus noise: it matches, it does not raise, and the table is still there."""
+    assert str(corpus["chunks"][0].id) in await keyword_search(db, query, 20)
+    assert await db.scalar(select(func.count()).select_from(Chunk)) == len(corpus["chunks"])
+
+
+@pytest.mark.parametrize("query", NO_LEXEMES)
 async def test_hybrid_search_survives_a_query_with_no_lexemes(db, corpus, query):
     """End to end, not just the sparse half. The sparse side contributes nothing
     for any of these, so fusion runs on a single ranking and the answer path still
@@ -8401,6 +8500,29 @@ async def test_hybrid_search_logs_its_stage_counts(db, corpus, caplog):
 async def test_keyword_search_scopes_to_the_named_collections(db, corpus):
     scoped = await keyword_search(db, "tomato blight", 20, collection_ids=[corpus["b"].id])
     assert scoped == [str(corpus["chunks"][2].id)]
+
+
+async def test_keyword_search_answers_a_natural_language_question(db, corpus):
+    """The whole point of the sparse half. `plainto_tsquery` ANDed every term, so
+    this question asked for 'how' & 'does' & 'tomato' & 'blight' & 'spread' and
+    matched nothing - the sparse retriever was dead for every real question and
+    RRF was fusing one ranking. Ranked FIRST, not merely present: the OR alone
+    puts the stop-word chunk on top, because ts_rank has no IDF.
+
+    Scoped to collection A because the chunk in B carries the same two lexemes at
+    the same positions, so ts_rank scores the two identically and the id tie-break
+    picks a random uuid4 winner."""
+    ids = await keyword_search(db, "How does tomato blight spread?", 20, [corpus["a"].id])
+    assert ids[0] == str(corpus["chunks"][0].id)
+
+
+async def test_keyword_search_answers_a_korean_question(db, corpus):
+    """Korean is what the corpus is written in, and 'simple' is a whitespace
+    tokenizer for it. This works because '역병은' appears verbatim in both; a
+    question written '역병이' would still miss, which is why a real Korean
+    analyzer is a later slice."""
+    ids = await keyword_search(db, "역병은 어떻게 퍼집니까?", 20)
+    assert ids[0] == str(corpus["chunks"][4].id)
 
 
 async def test_keyword_search_respects_its_limit(db, corpus):
@@ -8445,7 +8567,7 @@ def test_evidence_keeps_every_stage_score_in_metadata():
 - [ ] **Step 6: Run tests, expect PASS**
 
 Run: `pytest tests/test_retrieval.py -v` (Postgres running)
-Expected: all 24 tests PASS
+Expected: all 38 tests PASS
 
 - [ ] **Step 7: Commit**
 
@@ -10114,6 +10236,328 @@ async def delete_conversation(
 ```python
 import json
 import uuid
+from unittest.mock import AsyncMock
+
+import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select, text
+
+from app.core.config import Settings
+from app.llm.base import ChatResult, LLMError
+from app.models.chunk import EMBEDDING_DIM
+from app.models.message import Message
+from app.models.user import User
+
+IDLE_IN_TRANSACTION = text(
+    "SELECT count(*) FROM pg_stat_activity "
+    "WHERE datname = current_database() AND state = 'idle in transaction'"
+)
+
+
+def vec(*leading: float) -> list[float]:
+    return list(leading) + [0.0] * (EMBEDDING_DIM - len(leading))
+
+
+def make_fake_llm() -> AsyncMock:
+    provider = AsyncMock()
+    provider.embed = AsyncMock(return_value=[vec(1.0)])
+    provider.chat = AsyncMock(
+        return_value=ChatResult(content="Here is the answer.", usage={"total_tokens": 42}, model="gpt-4o")
+    )
+    return provider
+
+
+def parse_sse(text_body: str) -> list[dict]:
+    return [json.loads(line[len("data: ") :]) for line in text_body.splitlines() if line.startswith("data: ")]
+
+
+@pytest.fixture
+def fake_llm(app):
+    provider = make_fake_llm()
+    app.state.llm_provider = provider
+    return provider
+
+
+@pytest_asyncio.fixture
+async def logged_in(client, fake_llm):
+    await client.post("/api/auth/register", json={"email": "chat@example.com", "password": "pw123456"})
+    await client.post("/api/auth/login", json={"email": "chat@example.com", "password": "pw123456"})
+    return client
+
+
+async def start_conversation(client, message: str = "hello") -> str:
+    response = await client.post("/api/chat", json={"message": message})
+    return parse_sse(response.text)[-1]["conversation_id"]
+
+
+# --- The SSE contract --------------------------------------------------------
+
+
+async def test_chat_streams_status_then_done(logged_in):
+    response = await logged_in.post("/api/chat", json={"message": "What is MOPAN?"})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+
+    events = parse_sse(response.text)
+    types = [e["type"] for e in events]
+    assert types[0] == "status" and events[0]["status"] == "searching"
+    assert "answering" in [e.get("status") for e in events]
+    assert types[-1] == "done"
+    assert events[-1]["content"] == "Here is the answer."
+    assert uuid.UUID(events[-1]["conversation_id"])
+
+
+async def test_the_stream_carries_nothing_the_client_did_not_ask_for(logged_in):
+    """Status and sources are visible; the prompt, the evidence fence and any
+    reasoning the model was told not to produce are not."""
+    response = await logged_in.post("/api/chat", json={"message": "What is MOPAN?"})
+
+    events = parse_sse(response.text)
+    assert {e["type"] for e in events} <= {"status", "token", "citations", "done", "error"}
+    assert "<<EVIDENCE" not in response.text
+    assert "You are MOPAN's assistant" not in response.text
+
+
+async def test_chat_persists_the_turn_with_trace_fields(logged_in, db):
+    conversation_id = await start_conversation(logged_in)
+
+    rows = (
+        await db.scalars(
+            select(Message)
+            .where(Message.conversation_id == uuid.UUID(conversation_id))
+            .order_by(Message.created_at)
+        )
+    ).all()
+    assert [m.role for m in rows] == ["user", "assistant"]
+    assistant = rows[1]
+    assert assistant.model == "gpt-4o"
+    assert assistant.usage == {"total_tokens": 42}
+    assert assistant.latency_ms is not None
+    assert assistant.retrieval_ms is not None
+    assert assistant.prompt_name == "answer_agent"
+
+
+async def test_message_order_is_stable_across_turns(logged_in):
+    conversation_id = await start_conversation(logged_in, "first question")
+    await logged_in.post("/api/chat", json={"conversation_id": conversation_id, "message": "second question"})
+
+    messages = (await logged_in.get(f"/api/conversations/{conversation_id}/messages")).json()
+    assert [m["role"] for m in messages] == ["user", "assistant", "user", "assistant"]
+    assert messages[0]["content"] == "first question"
+
+
+async def test_conversations_list_is_ordered_by_recent_use(logged_in):
+    first = await start_conversation(logged_in, "old")
+    second = await start_conversation(logged_in, "new")
+    await logged_in.post("/api/chat", json={"conversation_id": first, "message": "revived"})
+
+    conversations = (await logged_in.get("/api/conversations")).json()
+    assert conversations[0]["id"] == first
+    assert conversations[1]["id"] == second
+
+
+# --- Authentication and authorization ----------------------------------------
+
+
+async def test_chat_requires_auth(client):
+    assert (await client.post("/api/chat", json={"message": "hi"})).status_code == 401
+
+
+async def test_search_requires_auth(client):
+    assert (await client.post("/api/search", json={"query": "x"})).status_code == 401
+
+
+async def test_every_conversation_route_requires_auth(client):
+    conversation_id = uuid.uuid4()
+    assert (await client.get("/api/conversations")).status_code == 401
+    assert (await client.get(f"/api/conversations/{conversation_id}/messages")).status_code == 401
+    assert (await client.delete(f"/api/conversations/{conversation_id}")).status_code == 401
+
+
+async def test_another_users_conversation_is_404_on_every_route(logged_in, app, fake_llm):
+    """404, not 403: a 403 would confirm the conversation id exists."""
+    conversation_id = await start_conversation(logged_in, "private")
+
+    await logged_in.post("/api/auth/register", json={"email": "other@example.com", "password": "pw123456"})
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as other:
+        await other.post("/api/auth/login", json={"email": "other@example.com", "password": "pw123456"})
+        assert (await other.get(f"/api/conversations/{conversation_id}/messages")).status_code == 404
+        assert (await other.delete(f"/api/conversations/{conversation_id}")).status_code == 404
+        # 404 rather than a 200 carrying an error frame: the ownership check runs
+        # before the response starts, so the status code is still ours to set.
+        posted = await other.post("/api/chat", json={"conversation_id": conversation_id, "message": "hijack"})
+        assert posted.status_code == 404
+        assert (await other.get("/api/conversations")).json() == []
+
+
+async def test_chat_with_an_unknown_conversation_id_is_404(logged_in):
+    """Indistinguishable from someone else's id, which is the point."""
+    response = await logged_in.post("/api/chat", json={"conversation_id": str(uuid.uuid4()), "message": "hi"})
+    assert response.status_code == 404
+
+
+async def test_deleting_a_conversation_takes_its_messages_with_it(logged_in, db):
+    conversation_id = await start_conversation(logged_in)
+
+    assert (await logged_in.delete(f"/api/conversations/{conversation_id}")).status_code == 204
+
+    assert (await logged_in.get("/api/conversations")).json() == []
+    assert (await logged_in.get(f"/api/conversations/{conversation_id}/messages")).status_code == 404
+    rows = (
+        await db.scalars(select(Message).where(Message.conversation_id == uuid.UUID(conversation_id)))
+    ).all()
+    assert rows == []
+
+
+# --- Failure and disconnection -----------------------------------------------
+
+
+async def test_llm_failure_is_reported_as_an_error_event(logged_in, fake_llm, db):
+    fake_llm.chat = AsyncMock(side_effect=LLMError("boom"))
+    response = await logged_in.post("/api/chat", json={"message": "hi"})
+
+    last = parse_sse(response.text)[-1]
+    assert last["type"] == "error"
+    assert "boom" not in last["detail"]  # internals never reach the client
+    assert "Traceback" not in response.text
+    # The conversation exists and is empty rather than half-written.
+    conversation_id = (await logged_in.get("/api/conversations")).json()[0]["id"]
+    assert (await logged_in.get(f"/api/conversations/{conversation_id}/messages")).json() == []
+
+
+async def test_no_connection_is_idle_in_transaction_across_the_llm_call(logged_in, fake_llm, test_engine):
+    """Nothing may sit idle-in-transaction across the LLM round trip: not a
+    session the generator opens (each is its own `async with`), and not the
+    request's own auth session, whose SELECT in get_current_user autobegan one.
+    Instrumented at the server rather than reasoned about - pg_stat_activity read
+    from a second connection at the moment chat() is entered - because what saves
+    the auth session is a FastAPI lifecycle detail (since 0.106 a yield-dependency
+    exits before the response body is sent), and a version bump could move it."""
+    observed = {}
+
+    async def spy_chat(messages, **kwargs):
+        async with test_engine.connect() as probe:
+            observed["idle_in_transaction"] = await probe.scalar(IDLE_IN_TRANSACTION)
+        return ChatResult(content="ok", usage={"total_tokens": 1}, model="gpt-4o")
+
+    fake_llm.chat = spy_chat
+    response = await logged_in.post("/api/chat", json={"message": "hi"})
+
+    assert parse_sse(response.text)[-1]["type"] == "done"
+    assert observed["idle_in_transaction"] == 0
+
+
+async def test_a_client_disconnect_mid_stream_leaves_no_connection_and_no_half_turn(
+    db, test_sessionmaker, test_engine
+):
+    """Closing the generator is exactly what Starlette does to it when the client
+    goes away. Every session lives inside an `async with`, so the connection goes
+    back whatever happens, and nothing is persisted before the LLM call."""
+    from app.chat.router import chat
+    from app.schemas.chat import ChatRequest
+
+    user = User(email="disconnect@example.com", password_hash="x", role="user")
+    db.add(user)
+    await db.commit()
+
+    response = await chat(
+        payload=ChatRequest(message="hi"),
+        user=user,
+        db=db,
+        llm_provider=make_fake_llm(),
+        sessionmaker=test_sessionmaker,
+        settings=Settings(),
+    )
+    events = response.body_iterator
+    assert "searching" in await events.__anext__()
+    assert "answering" in await events.__anext__()
+    await events.aclose()
+
+    await db.close()
+    async with test_engine.connect() as probe:
+        assert await probe.scalar(IDLE_IN_TRANSACTION) == 0
+    assert (await db.scalars(select(Message))).all() == []
+
+
+# --- Search ------------------------------------------------------------------
+
+
+async def test_search_endpoint_returns_evidence(logged_in):
+    response = await logged_in.post("/api/search", json={"query": "tomato"})
+    assert response.status_code == 200
+    assert response.json()["query"] == "tomato"
+    assert isinstance(response.json()["results"], list)
+
+
+async def test_search_top_n_is_bounded(logged_in):
+    assert (await logged_in.post("/api/search", json={"query": "x", "top_n": 0})).status_code == 422
+    assert (await logged_in.post("/api/search", json={"query": "x", "top_n": 51})).status_code == 422
+
+
+async def test_search_passes_its_collection_scope_to_retrieval(logged_in, monkeypatch):
+    """Collection scoping is not decoration: without it /api/search answers from
+    the whole corpus while /api/chat answers from the requested collections."""
+    seen = {}
+
+    async def spy_retrieve(db, vector_store, llm_provider, reranker, question, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr("app.chat.router.retrieve", spy_retrieve)
+    collection_id = str(uuid.uuid4())
+    response = await logged_in.post(
+        "/api/search", json={"query": "x", "collection_ids": [collection_id], "top_n": 3}
+    )
+
+    assert response.status_code == 200
+    assert [str(c) for c in seen["collection_ids"]] == [collection_id]
+    assert seen["settings"].retrieval_top_n == 3
+```
+
+- [ ] **Step 6: Run tests, expect PASS**
+
+Run: `pytest tests/test_chat.py -v` (Postgres running)
+Expected: all 17 tests PASS (Task 19 Step 1 adds the 18th)
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add backend/app/schemas/chat.py backend/app/schemas/search.py backend/app/chat/router.py backend/app/main.py backend/tests/test_chat.py
+git commit -m "feat: SSE chat endpoint, search endpoint, and owner-scoped conversations"
+```
+
+---
+
+### Task 19: End-to-end integration test
+
+**Files:**
+- Test: `backend/tests/test_end_to_end.py`
+- Rewrite: `backend/tests/test_chat.py` — the three items carried out of the Task 18 review (Step 1 below). Step 1 carries the whole amended file; the block under Task 18 Step 5 is the file *as Task 18 left it*. Deliberate: with the amended file living only under a header a later task also names, `scripts/check_plan_parity.py` classifies it RULE-3 EXCUSABLE and a mutation in it exits 0.
+- Also amended: the sparse retriever and its tests, which Step 2's `keyword_rank` assertion is what forced. Their blocks stay under **Task 15**, which is where they are compared from — naming those paths in a Task 19 step would push Task 15's blocks into RULE-3 EXCUSABLE and stop them being checked at all. Step 5 commits them.
+
+**Interfaces:** None new. This task proves the slice actually works.
+
+Revision 1 had no test that an ingested document is retrievable or that a citation is ever produced: the chat tests ran against an empty chunks table with the provider fully mocked, so `evidence` was always `[]`. The only end-to-end verification was a manual browser click-through. This is that missing test.
+
+Three things the obvious version of this test cannot do, and they shape the one below:
+
+- **The fixture has to be a PDF.** `TextParser` never sets `Block.page`, so a `.md` upload can only ever produce a citation whose `page` is `None` — and the worked example this slice is measured against is `[연구보고서 A, p.32]`. A markdown fixture proves the filename half of provenance and silently skips the page half. `_write_pdf` from `tests/test_parsers.py` writes it, so the bytes pypdf reads are real ones. The filename stays non-ASCII: it has to survive multipart, the database, retrieval metadata and the SSE frame.
+- **The chunking strategy is pinned, not read from the operator's `.env`.** Under `CHUNKING_STRATEGY=fixed` this small document is a single chunk, and a corpus holding one topic cannot show that retrieval picked the right one — every relevance assertion would be passing on a corpus with no wrong answer in it. Same reason `chunk_count` is asserted to be exactly 2.
+- **Each half of hybrid retrieval is pinned on its own.** `vector_rank` and `keyword_rank` ride along in the evidence metadata; asserting only that the right chunk came back lets either retriever be dead while the other covers for it. This is the assertion that caught the sparse half being dead: under the original `plainto_tsquery('simple', ...)` the natural-language `QUESTION` scored `(1, None)`, because `plainto` ANDs and `'how'`, `'does'` and the unstemmed `'spread'` appear in no chunk. `QUESTION` is therefore a real question and not a bag of keywords — a keyword-shaped query passes this assertion with a broken retriever underneath it.
+
+- [ ] **Step 1: Write `backend/tests/test_chat.py`**
+
+The whole file again, not a diff, and it says `Write` on purpose: `scripts/check_plan_parity.py` compares a whole-file block strictly only when no *later* task names the path, so the amended file has to live under the last task that touches it. Under Task 18's header with Task 19 naming the path in prose, the amended file was RULE-3 EXCUSABLE and a mutation in it exited 0. Task 18 Step 5 keeps the file as Task 18 left it and now reads SUPERSEDED-by-Task-19, which is what it is. Three items carried out of the Task 18 review:
+
+- `test_search_endpoint_returns_evidence` asserted `isinstance(results, list)` against an empty corpus, so it could not fail however `/api/search` behaved. It asserts the whole response body is `{"query": ..., "results": []}` now; the real-hit case is Step 2's job.
+- The disconnect test `aclose()`s the generator itself, which proves the generator is safe when closed but not that Starlette ever closes it. A second test drives the app as raw ASGI — httpx's `ASGITransport` runs the app to completion before it returns a response, so it cannot express a mid-stream disconnect — with a `receive()` that reports `http.disconnect` once the `answering` frame is on the wire, while the LLM call is parked and will never return. That the call terminates at all is the assertion. `answering` and not the first frame on purpose: retrieval is finished by then, so the cancellation lands in the LLM call rather than in an asyncpg query, and tearing a query down mid-flight logs an unretrievable `connection_lost()` future exception.
+- Both idle-in-transaction probes counted database-wide, which is exact only while nothing else holds a connection to `mopan_test` — a property of how the suite is run, not of the code. They are narrowed to the backend pids the block actually opened, the narrowing `test_retrieve_holds_no_transaction_across_the_embedding_call` already used. `pid = ANY('{}')` matches nothing, so the helper refuses an empty pid list rather than passing vacuously.
+
+```python
+import json
+import uuid
 from contextlib import contextmanager
 from unittest.mock import AsyncMock
 
@@ -10496,42 +10940,6 @@ async def test_search_passes_its_collection_scope_to_retrieval(logged_in, monkey
     assert seen["settings"].retrieval_top_n == 3
 ```
 
-- [ ] **Step 6: Run tests, expect PASS**
-
-Run: `pytest tests/test_chat.py -v` (Postgres running)
-Expected: all 18 tests PASS
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add backend/app/schemas/chat.py backend/app/schemas/search.py backend/app/chat/router.py backend/app/main.py backend/tests/test_chat.py
-git commit -m "feat: SSE chat endpoint, search endpoint, and owner-scoped conversations"
-```
-
----
-
-### Task 19: End-to-end integration test
-
-**Files:**
-- Test: `backend/tests/test_end_to_end.py`
-- Modify: `backend/tests/test_chat.py` — the three items carried out of the Task 18 review (Step 1 below). The block under Task 18 Step 5 is the current file.
-
-**Interfaces:** None new. This task proves the slice actually works.
-
-Revision 1 had no test that an ingested document is retrievable or that a citation is ever produced: the chat tests ran against an empty chunks table with the provider fully mocked, so `evidence` was always `[]`. The only end-to-end verification was a manual browser click-through. This is that missing test.
-
-Three things the obvious version of this test cannot do, and they shape the one below:
-
-- **The fixture has to be a PDF.** `TextParser` never sets `Block.page`, so a `.md` upload can only ever produce a citation whose `page` is `None` — and the worked example this slice is measured against is `[연구보고서 A, p.32]`. A markdown fixture proves the filename half of provenance and silently skips the page half. `_write_pdf` from `tests/test_parsers.py` writes it, so the bytes pypdf reads are real ones. The filename stays non-ASCII: it has to survive multipart, the database, retrieval metadata and the SSE frame.
-- **The chunking strategy is pinned, not read from the operator's `.env`.** Under `CHUNKING_STRATEGY=fixed` this small document is a single chunk, and a corpus holding one topic cannot show that retrieval picked the right one — every relevance assertion would be passing on a corpus with no wrong answer in it. Same reason `chunk_count` is asserted to be exactly 2.
-- **Each half of hybrid retrieval is pinned on its own.** `vector_rank` and `keyword_rank` ride along in the evidence metadata; asserting only that the right chunk came back lets either retriever be dead while the other covers for it. That assertion also constrains the query: `content_tsv` and `plainto_tsquery` both use the `simple` config, which neither stems nor drops stop words, and `plainto_tsquery` ANDs whatever survives — so a natural-language "How does tomato blight spread?" matches nothing at all on the sparse side, and only the dense half would have been under test.
-
-- [ ] **Step 1: Land the three items carried out of the Task 18 review in `backend/tests/test_chat.py`**
-
-- `test_search_endpoint_returns_evidence` asserted `isinstance(results, list)` against an empty corpus, so it could not fail however `/api/search` behaved. It asserts the whole response body is `{"query": ..., "results": []}` now; the real-hit case is Step 2's job.
-- The disconnect test `aclose()`s the generator itself, which proves the generator is safe when closed but not that Starlette ever closes it. A second test drives the app as raw ASGI — httpx's `ASGITransport` runs the app to completion before it returns a response, so it cannot express a mid-stream disconnect — with a `receive()` that reports `http.disconnect` once the `answering` frame is on the wire, while the LLM call is parked and will never return. That the call terminates at all is the assertion. `answering` and not the first frame on purpose: retrieval is finished by then, so the cancellation lands in the LLM call rather than in an asyncpg query, and tearing a query down mid-flight logs an unretrievable `connection_lost()` future exception.
-- Both idle-in-transaction probes counted database-wide, which is exact only while nothing else holds a connection to `mopan_test` — a property of how the suite is run, not of the code. They are narrowed to the backend pids the block actually opened, the narrowing `test_retrieve_holds_no_transaction_across_the_embedding_call` already used. `pid = ANY('{}')` matches nothing, so the helper refuses an empty pid list rather than passing vacuously.
-
 - [ ] **Step 2: Write `backend/tests/test_end_to_end.py`**
 
 ```python
@@ -10573,13 +10981,12 @@ PAGES = [
         "Growers should rotate crops and remove crop debris.",
     ],
 ]
-# Every token of the query has to appear in the chunk verbatim for the sparse half
-# to fire at all: content_tsv and plainto_tsquery both use the 'simple' config, which
-# neither stems nor drops stop words, and plainto_tsquery ANDs what is left. "How
-# does tomato blight spread?" retrieves nothing from the sparse retriever - 'how',
-# 'does' and the unstemmed 'spread' are absent - and the dense half silently covers
-# for it. The keyword_rank assertion below is what exposed that.
-QUESTION = "tomato blight spreads"
+# A real question, not a bag of keywords. Under plainto_tsquery this retrieved
+# nothing at all from the sparse half - 'how' & 'does' & 'spread' are absent from
+# every chunk and plainto ANDs them - so the dense half silently covered and the
+# keyword_rank assertion below is what exposed it. It is the acceptance criterion
+# for keyword_search's OR-over-simple-lexemes construction.
+QUESTION = "How does tomato blight spread?"
 ANSWER = "역병은 감염된 토양과 튀는 물로 퍼집니다 [1]."
 
 
@@ -10639,7 +11046,12 @@ async def corpus(client, app, db, provider, tmp_path):
     # upload actually stored. The strategy is pinned rather than read from the
     # operator's .env: under "fixed" this small document is one chunk, and a corpus
     # with only one topic in it cannot show that retrieval picked the right one.
-    settings = app.state.settings.model_copy(update={"chunking_strategy": "semantic"})
+    # retrieval_top_n is pinned for the same reason as the strategy: the
+    # uncited-evidence assertion in the last test needs the financial chunk to have
+    # been retrieved and shown to the model, which an operator's .env setting it to
+    # 1 would quietly stop being true.
+    settings = app.state.settings.model_copy(update={"chunking_strategy": "semantic", "retrieval_top_n": 6})
+    app.state.settings = settings
     await process_document(db, PgVectorStore(db), provider, get_chunking_strategy(settings), document_id)
 
     collections = (await client.get("/api/collections")).json()
@@ -10723,8 +11135,13 @@ async def test_collection_scoping_filters_against_a_real_corpus(client, provider
 async def test_the_answer_stream_carries_no_prompt_and_no_uncited_evidence(client, corpus):
     response = await client.post("/api/chat", json={"message": QUESTION})
 
-    assert {event["type"] for event in parse_sse(response.text)} <= {"status", "citations", "done"}
-    assert "<<EVIDENCE" not in response.text
+    types = {event["type"] for event in parse_sse(response.text)}
+    # `<=` alone would pass on a stream that emitted nothing at all, or that never
+    # reached `done` - the frame carrying the answer.
+    assert types <= {"status", "citations", "done"} and "done" in types
+    # Not "<<EVIDENCE": the closing marker is "<<END EVIDENCE {nonce}>>", which does
+    # not contain that substring, so half the fence could leak past it.
+    assert "EVIDENCE" not in response.text
     assert "You are MOPAN's assistant" not in response.text
     # The financial chunk was retrieved and shown to the model as [2], but the
     # answer never cited it, so it is not the client's to see.
@@ -10751,6 +11168,11 @@ git commit -m "test: land the three carried Task 18 review items"
 
 git add backend/tests/test_end_to_end.py
 git commit -m "test: end-to-end ingest -> retrieve -> cited answer"
+
+# The end-to-end keyword_rank assertion, run against a real question rather than a
+# keyword-shaped one, is what exposed the sparse retriever returning nothing.
+git add backend/app/retrieval/keyword_search.py backend/tests/test_retrieval.py backend/tests/test_end_to_end.py
+git commit -m "fix: OR-join simple lexemes so the sparse retriever answers real questions"
 ```
 
 ---

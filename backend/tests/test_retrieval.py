@@ -3,6 +3,7 @@ import uuid
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import func, select
 
 from app.models.chunk import EMBEDDING_DIM, Chunk
 from app.models.collection import Collection
@@ -129,6 +130,34 @@ async def corpus(db):
             chunk_metadata={},
             embedding=None,
         ),
+        # Korean, because 'simple' is the only config this column has and Korean is
+        # what the platform's documents are actually written in.
+        Chunk(
+            document_id=doc_a.id,
+            chunk_index=3,
+            content="토마토 역병은 감염된 토양과 튀는 물을 통해 퍼집니다",
+            token_count=8,
+            char_count=29,
+            page=33,
+            section=None,
+            chunk_metadata={},
+            embedding=None,
+        ),
+        # Stop words and nothing else. ts_rank has no IDF, so on a corpus this small
+        # a chunk repeating "how does" outranks the real answer to "How does tomato
+        # blight spread?" unless the query drops those lexemes. It shares no lexeme
+        # with "tomato blight" or "durian ripeness", so no other test can see it.
+        Chunk(
+            document_id=doc_a.id,
+            chunk_index=4,
+            content="How does this work? How does that work? How does it spread?",
+            token_count=12,
+            char_count=59,
+            page=99,
+            section=None,
+            chunk_metadata={},
+            embedding=None,
+        ),
     ]
     db.add_all(chunks)
     await db.commit()
@@ -248,14 +277,39 @@ async def test_empty_corpus_returns_no_evidence(db):
     assert evidence == []
 
 
-@pytest.mark.parametrize("query", ["", "   ", "!!! ??? ---", "\n\t"])
+NO_LEXEMES = ["", "   ", "!!! ??? ---", "\n\t", "'''", ") ( ) ((( ", "\\", "'|'&'!'(:*)\\"]
+
+
+@pytest.mark.parametrize("query", NO_LEXEMES)
 async def test_keyword_search_survives_a_query_with_no_lexemes(db, corpus, query):
-    """plainto_tsquery reduces these to an empty tsquery, which matches nothing.
-    A crash here would 500 on a user pasting punctuation into the search box."""
+    """to_tsvector reduces these to nothing, both aggregates come back NULL,
+    to_tsquery(NULL) is NULL and `content_tsv @@ NULL` is NULL - no rows. The last
+    four are pure tsquery syntax and matter twice: a crash here would 500 on a user
+    pasting punctuation into the search box, and a malformed-tsquery error would be
+    the tell that the operators reached the parser as operators."""
     assert await keyword_search(db, query, 20) == []
 
 
-@pytest.mark.parametrize("query", ["", "   ", "!!! ??? ---", "\n\t"])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "tomato'; DROP TABLE chunks; --",
+        "tomato' | 'zzznomatch",
+        "tomato:* & !blight",
+        "tomato \\ ( ) :* ! & |",
+    ],
+)
+async def test_keyword_search_treats_tsquery_syntax_as_ordinary_text(db, corpus, query):
+    """query_text is user input that reaches to_tsquery. Its lexemes come from
+    to_tsvector and are quote_literal'd, and query_text itself is a bound parameter,
+    so an operator, a bare quote, a backslash or an unbalanced paren can never
+    become syntax - in the tsquery or in the SQL. Each of these is the word 'tomato'
+    plus noise: it matches, it does not raise, and the table is still there."""
+    assert str(corpus["chunks"][0].id) in await keyword_search(db, query, 20)
+    assert await db.scalar(select(func.count()).select_from(Chunk)) == len(corpus["chunks"])
+
+
+@pytest.mark.parametrize("query", NO_LEXEMES)
 async def test_hybrid_search_survives_a_query_with_no_lexemes(db, corpus, query):
     """End to end, not just the sparse half. The sparse side contributes nothing
     for any of these, so fusion runs on a single ranking and the answer path still
@@ -282,6 +336,29 @@ async def test_hybrid_search_logs_its_stage_counts(db, corpus, caplog):
 async def test_keyword_search_scopes_to_the_named_collections(db, corpus):
     scoped = await keyword_search(db, "tomato blight", 20, collection_ids=[corpus["b"].id])
     assert scoped == [str(corpus["chunks"][2].id)]
+
+
+async def test_keyword_search_answers_a_natural_language_question(db, corpus):
+    """The whole point of the sparse half. `plainto_tsquery` ANDed every term, so
+    this question asked for 'how' & 'does' & 'tomato' & 'blight' & 'spread' and
+    matched nothing - the sparse retriever was dead for every real question and
+    RRF was fusing one ranking. Ranked FIRST, not merely present: the OR alone
+    puts the stop-word chunk on top, because ts_rank has no IDF.
+
+    Scoped to collection A because the chunk in B carries the same two lexemes at
+    the same positions, so ts_rank scores the two identically and the id tie-break
+    picks a random uuid4 winner."""
+    ids = await keyword_search(db, "How does tomato blight spread?", 20, [corpus["a"].id])
+    assert ids[0] == str(corpus["chunks"][0].id)
+
+
+async def test_keyword_search_answers_a_korean_question(db, corpus):
+    """Korean is what the corpus is written in, and 'simple' is a whitespace
+    tokenizer for it. This works because '역병은' appears verbatim in both; a
+    question written '역병이' would still miss, which is why a real Korean
+    analyzer is a later slice."""
+    ids = await keyword_search(db, "역병은 어떻게 퍼집니까?", 20)
+    assert ids[0] == str(corpus["chunks"][4].id)
 
 
 async def test_keyword_search_respects_its_limit(db, corpus):

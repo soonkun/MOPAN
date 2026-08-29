@@ -36,13 +36,12 @@ PAGES = [
         "Growers should rotate crops and remove crop debris.",
     ],
 ]
-# Every token of the query has to appear in the chunk verbatim for the sparse half
-# to fire at all: content_tsv and plainto_tsquery both use the 'simple' config, which
-# neither stems nor drops stop words, and plainto_tsquery ANDs what is left. "How
-# does tomato blight spread?" retrieves nothing from the sparse retriever - 'how',
-# 'does' and the unstemmed 'spread' are absent - and the dense half silently covers
-# for it. The keyword_rank assertion below is what exposed that.
-QUESTION = "tomato blight spreads"
+# A real question, not a bag of keywords. Under plainto_tsquery this retrieved
+# nothing at all from the sparse half - 'how' & 'does' & 'spread' are absent from
+# every chunk and plainto ANDs them - so the dense half silently covered and the
+# keyword_rank assertion below is what exposed it. It is the acceptance criterion
+# for keyword_search's OR-over-simple-lexemes construction.
+QUESTION = "How does tomato blight spread?"
 ANSWER = "역병은 감염된 토양과 튀는 물로 퍼집니다 [1]."
 
 
@@ -102,7 +101,12 @@ async def corpus(client, app, db, provider, tmp_path):
     # upload actually stored. The strategy is pinned rather than read from the
     # operator's .env: under "fixed" this small document is one chunk, and a corpus
     # with only one topic in it cannot show that retrieval picked the right one.
-    settings = app.state.settings.model_copy(update={"chunking_strategy": "semantic"})
+    # retrieval_top_n is pinned for the same reason as the strategy: the
+    # uncited-evidence assertion in the last test needs the financial chunk to have
+    # been retrieved and shown to the model, which an operator's .env setting it to
+    # 1 would quietly stop being true.
+    settings = app.state.settings.model_copy(update={"chunking_strategy": "semantic", "retrieval_top_n": 6})
+    app.state.settings = settings
     await process_document(db, PgVectorStore(db), provider, get_chunking_strategy(settings), document_id)
 
     collections = (await client.get("/api/collections")).json()
@@ -186,8 +190,13 @@ async def test_collection_scoping_filters_against_a_real_corpus(client, provider
 async def test_the_answer_stream_carries_no_prompt_and_no_uncited_evidence(client, corpus):
     response = await client.post("/api/chat", json={"message": QUESTION})
 
-    assert {event["type"] for event in parse_sse(response.text)} <= {"status", "citations", "done"}
-    assert "<<EVIDENCE" not in response.text
+    types = {event["type"] for event in parse_sse(response.text)}
+    # `<=` alone would pass on a stream that emitted nothing at all, or that never
+    # reached `done` - the frame carrying the answer.
+    assert types <= {"status", "citations", "done"} and "done" in types
+    # Not "<<EVIDENCE": the closing marker is "<<END EVIDENCE {nonce}>>", which does
+    # not contain that substring, so half the fence could leak past it.
+    assert "EVIDENCE" not in response.text
     assert "You are MOPAN's assistant" not in response.text
     # The financial chunk was retrieved and shown to the model as [2], but the
     # answer never cited it, so it is not the client's to see.
