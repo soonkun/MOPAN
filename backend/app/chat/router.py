@@ -121,10 +121,19 @@ async def chat(
             logger.exception("chat failed")
             yield _sse({"type": "error", "detail": "요청을 처리하지 못했습니다."})
 
+    # no-transform is load-bearing, not decoration. Next.js ships `compress: true`
+    # by default, so its /api/* rewrite proxy gzips this response - and gzip
+    # buffers, which collapses the whole stream into one chunk delivered at the
+    # end. Measured through `next start`: with plain no-cache the searching and
+    # error frames arrived 234ms and 234ms apart from a backend that emitted them
+    # 491ms apart, so the user saw no status at all until the answer landed; with
+    # no-transform, 32ms and 575ms. X-Accel-Buffering is the nginx-specific hint
+    # for the same problem, and no-transform is the standard one every conforming
+    # proxy in the chain - Next, nginx, Cloudflare - is required to honour.
     return StreamingResponse(
         stream(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
     )
 
 

@@ -10305,10 +10305,19 @@ async def chat(
             logger.exception("chat failed")
             yield _sse({"type": "error", "detail": "요청을 처리하지 못했습니다."})
 
+    # no-transform is load-bearing, not decoration. Next.js ships `compress: true`
+    # by default, so its /api/* rewrite proxy gzips this response - and gzip
+    # buffers, which collapses the whole stream into one chunk delivered at the
+    # end. Measured through `next start`: with plain no-cache the searching and
+    # error frames arrived 234ms and 234ms apart from a backend that emitted them
+    # 491ms apart, so the user saw no status at all until the answer landed; with
+    # no-transform, 32ms and 575ms. X-Accel-Buffering is the nginx-specific hint
+    # for the same problem, and no-transform is the standard one every conforming
+    # proxy in the chain - Next, nginx, Cloudflare - is required to honour.
     return StreamingResponse(
         stream(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
     )
 
 
@@ -12422,15 +12431,18 @@ git commit -m "feat: responsive sidebar with user info and logout"
 
 **Interfaces:**
 - Consumes: `streamChat`, `apiFetch`, `Message`/`Citation`/`ChatEvent` (Task 20), backend `/api/chat` (SSE) and `/api/conversations/{id}/messages`.
-- Produces: `<ChatWindow initialConversationId />` — streams the answer, shows the current status, renders `[n]` markers **inline** as clickable badges, and opens a modal that fetches the full chunk from `/api/chunks/{id}`.
+- Produces: `<ChatWindow initialConversationId />` — shows each status frame as it arrives, renders `[n]` markers **inline** as clickable badges, and opens a modal that fetches the full chunk from `/api/chunks/{id}`.
+- The status only streams because `/api/chat` sends `Cache-Control: no-cache, no-transform` (Task 18). Without `no-transform`, Next's default `compress: true` gzips the rewrite proxy's copy of the stream, gzip buffers it, and every frame lands in one chunk after the answer is already finished — `STATUS_LABEL` then never renders at all and this component looks like it hangs for the whole retrieval-plus-model round trip. Measured, not assumed; see the comment on that `StreamingResponse`.
+- What streams here is the *status*, not the answer text. `POST /api/chat` emits `status:searching` → `status:answering` → `citations` → `done`, and the whole answer arrives at once inside `done`; `ChatEvent.token` is reserved for Slice 3 and Slice 1's `answer()` awaits one non-streaming `llm_provider.chat()` call. So `STATUS_LABEL` is the entire progress indication a user gets while the model runs, and `ChatWindow` has no token handler on purpose. Saying "streams the answer" here would set up Slice 3's work as a bug report against this task.
 
 - [ ] **Step 1: Write `frontend/components/chat/CitationBadge.tsx`**
 
 ```tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
+import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { Chunk, Citation } from "@/lib/types";
 
 function label(citation: Citation): string {
@@ -12444,9 +12456,13 @@ export default function CitationBadge({ citation }: { citation: Citation }) {
   const [open, setOpen] = useState(false);
   const [chunk, setChunk] = useState<Chunk | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
-    if (!open || chunk) return;
+    // chunk_id is null for the MCP citations Slice 2/3 adds - see lib/types.ts.
+    // Requesting /api/chunks/null is a 422, and its Korean validation fallback
+    // would replace the snippet this citation already carries with an error.
+    if (!open || chunk || !citation.chunk_id) return;
     // Fetch the FULL chunk, not the 300-char snippet already in the citation.
     apiFetch<Chunk>(`/api/chunks/${citation.chunk_id}`)
       .then(setChunk)
@@ -12456,32 +12472,57 @@ export default function CitationBadge({ citation }: { citation: Citation }) {
   return (
     <>
       <button
-        onClick={() => setOpen(true)}
+        type="button"
+        onClick={() => {
+          setOpen(true);
+          dialogRef.current?.showModal();
+        }}
         title={label(citation)}
+        // Without this the accessible name is the literal "[1]", announced as
+        // punctuation. The badge is the only route to the source, so it has to
+        // say which source it is.
+        aria-label={`출처 ${citation.index}: ${label(citation)}`}
         className="mx-0.5 rounded bg-gray-200 px-1.5 py-0.5 align-baseline text-xs text-gray-700 hover:bg-gray-300"
       >
         [{citation.index}]
       </button>
-      {open && (
-        <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4"
-          onClick={() => setOpen(false)}
-        >
-          <div
-            className="max-h-[80vh] w-full max-w-2xl overflow-y-auto rounded border border-gray-200 bg-white p-4"
-            onClick={(e) => e.stopPropagation()}
-          >
+      {/* A native <dialog> opened with showModal(), not a fixed overlay div:
+          the focus trap, Escape-to-close, the inert background and top-layer
+          stacking all come with it. Hand-rolled, this modal had no close
+          button and no Escape handler, so a keyboard user who opened a
+          citation had no way back out of it. onClose - not just the button -
+          is what keeps React state in step when Escape closes it natively. */}
+      <dialog
+        ref={dialogRef}
+        aria-label={`출처 ${citation.index}`}
+        onClose={() => setOpen(false)}
+        // The dialog box itself is the click target only for a click on the
+        // backdrop, because the padding lives on the inner div.
+        onClick={(e) => {
+          if (e.target === dialogRef.current) dialogRef.current?.close();
+        }}
+        className="max-h-[80vh] w-full max-w-2xl overflow-y-auto rounded border border-gray-200 bg-white p-0 text-gray-900 backdrop:bg-black/30"
+      >
+        <div className="p-4">
+          <div className="mb-2 flex items-start justify-between gap-4">
             {/* No `uppercase`: this line is a filename plus Korean labels. */}
-            <p className="mb-2 text-xs tracking-wide text-gray-400">
+            <p className="text-xs tracking-wide text-gray-400">
               [{citation.index}] {label(citation)}
             </p>
-            {error && <p className="text-sm text-red-600">{error}</p>}
-            <p className="whitespace-pre-wrap text-sm text-gray-800">
-              {chunk ? chunk.content : citation.snippet}
-            </p>
+            <button
+              type="button"
+              onClick={() => dialogRef.current?.close()}
+              className="shrink-0 rounded border border-gray-300 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-100"
+            >
+              닫기
+            </button>
           </div>
+          <ErrorBanner message={error} />
+          <p className="mt-2 whitespace-pre-wrap text-sm text-gray-800">
+            {chunk ? chunk.content : citation.snippet}
+          </p>
         </div>
-      )}
+      </dialog>
     </>
   );
 }
@@ -12530,7 +12571,11 @@ export default function MessageBubble({ message }: { message: Message }) {
         {!isUser && message.citations.length > 0 && (
           <div className="mt-2 border-t border-gray-200 pt-2 text-xs text-gray-500">
             {message.citations.map((c) => (
-              <div key={c.chunk_id} className="truncate">
+              // index, not chunk_id: chunk_id is null for an MCP citation, and
+              // two of them on one message would collide on a null key. index
+              // is unique per message by construction - the backend assigns it
+              // with enumerate(used, start=1).
+              <div key={c.index} className="truncate">
                 [{c.index}] {c.filename ?? "출처"}
                 {c.page !== null ? `, ${c.page}쪽` : ""}
                 {c.section ? `, ${c.section}` : ""}
@@ -12569,6 +12614,13 @@ export default function ChatWindow({
   const router = useRouter();
   const [conversationId, setConversationId] = useState<string | null>(initialConversationId);
   const [messages, setMessages] = useState<Message[]>([]);
+  // "no messages" and "not loaded yet" are different states - the same
+  // distinction the Sidebar draws for its conversation list. Without it, every
+  // arrival at /chat/{id} flashes 등록된 문서에 대해 무엇이든 물어보세요. before
+  // the transcript lands, including the router.replace() that follows an answer
+  // in a brand-new conversation: measured at 40ms over loopback, and it is a
+  // network round trip, so it is only ever longer in front of a real user.
+  const [loaded, setLoaded] = useState(!initialConversationId);
   const [input, setInput] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -12579,7 +12631,8 @@ export default function ChatWindow({
     if (!initialConversationId) return;
     apiFetch<Message[]>(`/api/conversations/${initialConversationId}/messages`)
       .then(setMessages)
-      .catch((err) => setError(errorMessage(err)));
+      .catch((err) => setError(errorMessage(err)))
+      .finally(() => setLoaded(true));
   }, [initialConversationId]);
 
   useEffect(() => {
@@ -12646,7 +12699,7 @@ export default function ChatWindow({
   return (
     <div className="flex h-full flex-col">
       <div className="flex-1 space-y-3 overflow-y-auto p-4">
-        {messages.length === 0 && !sending && (
+        {loaded && messages.length === 0 && !sending && (
           <p className="mt-16 text-center text-sm text-gray-400">
             등록된 문서에 대해 무엇이든 물어보세요.
           </p>
@@ -12654,7 +12707,11 @@ export default function ChatWindow({
         {messages.map((m) => (
           <MessageBubble key={m.id} message={m} />
         ))}
-        {status && <p className="text-sm text-gray-400">{status}</p>}
+        {/* aria-live, because this line is the only feedback between pressing
+            전송 and the answer landing, and it is never focused. */}
+        <p aria-live="polite" className="text-sm text-gray-400">
+          {status}
+        </p>
         <div ref={bottomRef} />
       </div>
       <div className="border-t border-gray-200 p-3">
@@ -12664,6 +12721,9 @@ export default function ChatWindow({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="질문을 입력하세요"
+            // A placeholder is not an accessible name: it is dropped the moment
+            // the field has text, and some screen readers never announce it.
+            aria-label="질문"
             className="flex-1 rounded border border-gray-300 px-3 py-2 text-sm"
           />
           <button
@@ -12680,7 +12740,11 @@ export default function ChatWindow({
 }
 ```
 
-- [ ] **Step 4: Write the two chat pages**
+- [ ] **Step 4: Write `frontend/app/(app)/chat/page.tsx` and `frontend/app/(app)/chat/[conversationId]/page.tsx`**
+
+Both paths belong in the step header, in block order. `check_plan_parity.py`
+reads a step's file claims out of its header alone, so a header that only said
+"the two chat pages" left both of these blocks silently unchecked against disk.
 
 `frontend/app/(app)/chat/page.tsx`:
 
@@ -12717,8 +12781,14 @@ Expected: build completes with no TypeScript errors
 
 - [ ] **Step 6: Commit**
 
+`backend/app/chat/router.py` is in this commit and not in Task 18's: the
+`no-transform` on its SSE `Cache-Control` is a frontend-proxy fix that only
+this task's UI can show is needed, and shipping the two apart leaves a commit
+in which the status labels never render.
+
 ```bash
 git add frontend/components/chat frontend/app/\(app\)/chat
+git add backend/app/chat/router.py docs/superpowers/plans/2026-08-28-vertical-slice-1.md
 git commit -m "feat: streaming chat UI with inline clickable citations"
 ```
 
