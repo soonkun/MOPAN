@@ -42,8 +42,16 @@ async def startup(ctx: dict) -> None:
 async def shutdown(ctx: dict) -> None:
     # arq owns and closes its own Redis pool (ctx["redis"]); the worker adds no
     # session/cache client because nothing in the pipeline needs one.
-    await ctx["llm_provider"].aclose()
-    await ctx["engine"].dispose()
+    # .get(): arq's run() calls on_shutdown from a finally even when on_startup
+    # raised, so indexing here would bury the real error under a KeyError.
+    provider = ctx.get("llm_provider")
+    engine = ctx.get("engine")
+    try:
+        if provider is not None:
+            await provider.aclose()
+    finally:
+        if engine is not None:
+            await engine.dispose()
 
 
 async def mark_failed(ctx: dict, document_id: str) -> None:
@@ -80,8 +88,14 @@ async def process_document(ctx: dict, document_id: str) -> None:
         # configured and never run. job_timeout cancels this task, and
         # CancelledError is not an Exception, so the pipeline's own handler never
         # sees it and the document would sit at `parsing` forever.
+        #
+        # Only on the last try: arq cancels in-flight jobs on SIGTERM too, so an
+        # unconditional mark would tell every user mid-deploy that their file was
+        # bad. retry_jobs defaults to True, so a non-final try is re-queued and
+        # the document is only briefly stale.
         # Shielded: the cleanup must survive the cancellation that caused it.
-        await asyncio.shield(mark_failed(ctx, document_id))
+        if ctx.get("job_try", 1) >= WorkerSettings.max_tries:
+            await asyncio.shield(mark_failed(ctx, document_id))
         raise
 
 
@@ -95,3 +109,6 @@ class WorkerSettings:
     job_timeout = 900
     max_tries = 2
     keep_result = 3600
+    # ponytail: a SIGKILL/OOM leaves the document at `parsing` with no try left
+    # to reap it. A sweeper for non-terminal documents older than job_timeout
+    # belongs in the observability slice, not here.

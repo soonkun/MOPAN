@@ -7047,8 +7047,16 @@ async def startup(ctx: dict) -> None:
 async def shutdown(ctx: dict) -> None:
     # arq owns and closes its own Redis pool (ctx["redis"]); the worker adds no
     # session/cache client because nothing in the pipeline needs one.
-    await ctx["llm_provider"].aclose()
-    await ctx["engine"].dispose()
+    # .get(): arq's run() calls on_shutdown from a finally even when on_startup
+    # raised, so indexing here would bury the real error under a KeyError.
+    provider = ctx.get("llm_provider")
+    engine = ctx.get("engine")
+    try:
+        if provider is not None:
+            await provider.aclose()
+    finally:
+        if engine is not None:
+            await engine.dispose()
 
 
 async def mark_failed(ctx: dict, document_id: str) -> None:
@@ -7085,8 +7093,14 @@ async def process_document(ctx: dict, document_id: str) -> None:
         # configured and never run. job_timeout cancels this task, and
         # CancelledError is not an Exception, so the pipeline's own handler never
         # sees it and the document would sit at `parsing` forever.
+        #
+        # Only on the last try: arq cancels in-flight jobs on SIGTERM too, so an
+        # unconditional mark would tell every user mid-deploy that their file was
+        # bad. retry_jobs defaults to True, so a non-final try is re-queued and
+        # the document is only briefly stale.
         # Shielded: the cleanup must survive the cancellation that caused it.
-        await asyncio.shield(mark_failed(ctx, document_id))
+        if ctx.get("job_try", 1) >= WorkerSettings.max_tries:
+            await asyncio.shield(mark_failed(ctx, document_id))
         raise
 
 
@@ -7100,6 +7114,9 @@ class WorkerSettings:
     job_timeout = 900
     max_tries = 2
     keep_result = 3600
+    # ponytail: a SIGKILL/OOM leaves the document at `parsing` with no try left
+    # to reap it. A sweeper for non-terminal documents older than job_timeout
+    # belongs in the observability slice, not here.
 ```
 
 - [ ] **Step 3: Write `backend/tests/test_pipeline.py`**
@@ -7335,9 +7352,9 @@ async def test_error_message_never_contains_a_traceback(db, document):
         await process_document(db, PgVectorStore(db), FakeLLMProvider(), FixedChunking(), str(document.id))
     await db.refresh(document)
     # This column is rendered in the Documents UI; internals must not leak.
-    assert "Traceback" not in document.error_message
-    assert "/nonexistent" not in document.error_message
-    assert "sk-" not in document.error_message
+    # Equality, not absence: FileNotFoundError's str embeds the path, so a naive
+    # str(exc) fails this, and no substring list can enumerate what might leak.
+    assert document.error_message == USER_FACING_FAILURE
 
 
 def test_worker_settings_declares_only_real_arq_parameters():
@@ -7348,6 +7365,9 @@ def test_worker_settings_declares_only_real_arq_parameters():
     allowed = set(inspect.signature(Worker).parameters)
     declared = {name for name in vars(worker_module.WorkerSettings) if not name.startswith("_")}
     assert declared <= allowed, sorted(declared - allowed)
+    # arq registers by func.__name__; documents/service.py enqueues the literal.
+    # Renaming the function otherwise fails only at runtime, as a worker log line.
+    assert "process_document" in {f.__name__ for f in worker_module.WorkerSettings.functions}
 
 
 def test_worker_bounds_job_timeout_and_retries():
@@ -7358,7 +7378,18 @@ def test_worker_bounds_job_timeout_and_retries():
     assert settings.max_tries == 2
 
 
-async def test_a_cancelled_job_marks_the_document_failed(db, document, test_sessionmaker, monkeypatch):
+def _cancelling_ctx(test_sessionmaker, job_try):
+    return {
+        "settings": get_settings(),
+        "sessionmaker": test_sessionmaker,
+        "llm_provider": FakeLLMProvider(),
+        "job_try": job_try,
+    }
+
+
+async def test_a_cancelled_job_marks_the_document_failed_on_the_last_try(
+    db, document, test_sessionmaker, monkeypatch
+):
     """job_timeout cancels the job's task, so the pipeline's own `except
     Exception` never runs. Without the worker-level handler the document sits at
     `parsing` until someone notices."""
@@ -7367,18 +7398,36 @@ async def test_a_cancelled_job_marks_the_document_failed(db, document, test_sess
         raise asyncio.CancelledError
 
     monkeypatch.setattr(worker_module, "run_pipeline", cancelled)
-    ctx = {
-        "settings": get_settings(),
-        "sessionmaker": test_sessionmaker,
-        "llm_provider": FakeLLMProvider(),
-    }
 
     with pytest.raises(asyncio.CancelledError):
-        await worker_module.process_document(ctx, str(document.id))
+        await worker_module.process_document(
+            _cancelling_ctx(test_sessionmaker, worker_module.WorkerSettings.max_tries), str(document.id)
+        )
 
     await db.refresh(document)
     assert document.status == "failed"
     assert document.error_message == USER_FACING_FAILURE
+
+
+async def test_a_cancelled_job_stays_recoverable_before_the_last_try(
+    db, document, test_sessionmaker, monkeypatch
+):
+    """arq cancels in-flight jobs on SIGTERM as well as on job_timeout, and
+    re-queues them (retry_jobs defaults to True). Marking `failed` on a
+    non-final try tells every user mid-deploy that their file was bad, and two
+    restarts inside one ingest exhaust max_tries so the lie becomes permanent."""
+
+    async def cancelled(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(worker_module, "run_pipeline", cancelled)
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker_module.process_document(_cancelling_ctx(test_sessionmaker, 1), str(document.id))
+
+    await db.refresh(document)
+    assert document.status != "failed"
+    assert document.error_message is None
 
 
 async def test_the_worker_failure_handler_leaves_a_terminal_document_alone(db, document, test_sessionmaker):
@@ -7415,7 +7464,7 @@ async def test_worker_shutdown_disposes_its_resources():
 - [ ] **Step 4: Run tests, expect PASS**
 
 Run: `pytest tests/test_pipeline.py -v` (Postgres running)
-Expected: all 13 tests PASS
+Expected: all 14 tests PASS
 
 - [ ] **Step 5: Commit**
 
