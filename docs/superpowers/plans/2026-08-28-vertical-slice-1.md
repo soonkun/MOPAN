@@ -7110,8 +7110,11 @@ async def process_document(ctx: dict, document_id: str) -> None:
         # is no retry left, so mark it. Default to max_tries so a missing
         # job_try fails safe rather than silently disabling the handler.
         # Shielded: the cleanup must survive the cancellation that caused it.
-        shutdown = isinstance(exc, asyncio.CancelledError)
-        if not shutdown or ctx.get("job_try", WorkerSettings.max_tries) >= WorkerSettings.max_tries:
+        # `is_shutdown`, not `shutdown`: this module registers the module-level
+        # `shutdown` coroutine as WorkerSettings.on_shutdown, and a local by that
+        # name reads like a rebinding of the hook.
+        is_shutdown = isinstance(exc, asyncio.CancelledError)
+        if not is_shutdown or ctx.get("job_try", WorkerSettings.max_tries) >= WorkerSettings.max_tries:
             await asyncio.shield(mark_failed(ctx, document_id))
         raise
 
@@ -7404,12 +7407,13 @@ def _cancelling_ctx(test_sessionmaker, job_try):
 async def test_a_timed_out_job_is_marked_failed_on_the_first_try(
     db, document, test_sessionmaker, monkeypatch
 ):
-    """A hung pipeline must not depend on job_try. asyncio.wait_for turns arq's
-    job_timeout cancellation into TimeoutError, which is NOT in arq's retry set
-    (Retry/RetryJob/CancelledError), so arq finishes the job at job_try == 1 and
-    it never reaches max_tries - a job_try-gated handler would leave the document
-    at `parsing` forever. PIPELINE_TIMEOUT fires first precisely so this arrives
-    as a TimeoutError we can tell apart from a shutdown."""
+    """A hung pipeline must not depend on job_try. process_document's own
+    `asyncio.timeout(PIPELINE_TIMEOUT)` - monkeypatched short here - raises
+    TimeoutError, which is NOT in arq's retry set (Retry/RetryJob/CancelledError),
+    so arq finishes the job at job_try == 1 and it never reaches max_tries: a
+    job_try-gated handler would leave the document at `parsing` forever.
+    PIPELINE_TIMEOUT is set below arq's job_timeout precisely so a hang arrives
+    as this TimeoutError, which we can tell apart from a shutdown."""
 
     async def hangs(*args, **kwargs):
         await asyncio.sleep(60)

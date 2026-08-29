@@ -266,12 +266,13 @@ def _cancelling_ctx(test_sessionmaker, job_try):
 async def test_a_timed_out_job_is_marked_failed_on_the_first_try(
     db, document, test_sessionmaker, monkeypatch
 ):
-    """A hung pipeline must not depend on job_try. asyncio.wait_for turns arq's
-    job_timeout cancellation into TimeoutError, which is NOT in arq's retry set
-    (Retry/RetryJob/CancelledError), so arq finishes the job at job_try == 1 and
-    it never reaches max_tries - a job_try-gated handler would leave the document
-    at `parsing` forever. PIPELINE_TIMEOUT fires first precisely so this arrives
-    as a TimeoutError we can tell apart from a shutdown."""
+    """A hung pipeline must not depend on job_try. process_document's own
+    `asyncio.timeout(PIPELINE_TIMEOUT)` - monkeypatched short here - raises
+    TimeoutError, which is NOT in arq's retry set (Retry/RetryJob/CancelledError),
+    so arq finishes the job at job_try == 1 and it never reaches max_tries: a
+    job_try-gated handler would leave the document at `parsing` forever.
+    PIPELINE_TIMEOUT is set below arq's job_timeout precisely so a hang arrives
+    as this TimeoutError, which we can tell apart from a shutdown."""
 
     async def hangs(*args, **kwargs):
         await asyncio.sleep(60)

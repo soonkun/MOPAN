@@ -105,8 +105,11 @@ async def process_document(ctx: dict, document_id: str) -> None:
         # is no retry left, so mark it. Default to max_tries so a missing
         # job_try fails safe rather than silently disabling the handler.
         # Shielded: the cleanup must survive the cancellation that caused it.
-        shutdown = isinstance(exc, asyncio.CancelledError)
-        if not shutdown or ctx.get("job_try", WorkerSettings.max_tries) >= WorkerSettings.max_tries:
+        # `is_shutdown`, not `shutdown`: this module registers the module-level
+        # `shutdown` coroutine as WorkerSettings.on_shutdown, and a local by that
+        # name reads like a rebinding of the hook.
+        is_shutdown = isinstance(exc, asyncio.CancelledError)
+        if not is_shutdown or ctx.get("job_try", WorkerSettings.max_tries) >= WorkerSettings.max_tries:
             await asyncio.shield(mark_failed(ctx, document_id))
         raise
 
