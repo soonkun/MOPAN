@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { apiFetch, errorMessage, streamChat } from "@/lib/api";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import MessageBubble from "@/components/chat/MessageBubble";
@@ -16,6 +17,7 @@ export default function ChatWindow({
 }: {
   initialConversationId: string | null;
 }) {
+  const router = useRouter();
   const [conversationId, setConversationId] = useState<string | null>(initialConversationId);
   const [messages, setMessages] = useState<Message[]>([]);
   // "no messages", "not loaded yet" and "the load failed" are three states, and
@@ -93,22 +95,32 @@ export default function ChatWindow({
 
       if (!conversationId && newConversationId) {
         setConversationId(newConversationId);
-        // history.replaceState, not router.replace. router.replace crosses from
-        // /chat to /chat/[conversationId] - a different route segment - so it
-        // unmounts this component, `messages` resets to [], and the answer that
-        // just arrived vanishes until the refetch lands. Measured on an
-        // equivalent route pair by requestAnimationFrame sampling: mount count
-        // 1 -> 2 and the transcript 2 items -> 0, restored 44ms later over
-        // loopback. replaceState keeps this component mounted (mount count
-        // stays 1, transcript stays 2) and Next 15 still syncs its router
-        // state, so usePathname() updates in the same frame - measured, and it
-        // has to be, because the Sidebar refetches its conversation list on
-        // exactly that change and the new title would otherwise never appear.
-        // End to end on this page with a real answer: zero frames with an empty
-        // transcript, the answer bubble and the new URL landing on the same
-        // frame, /api/conversations refetched 2ms later, the new link in the
-        // sidebar 31ms after that.
-        window.history.replaceState(null, "", `/chat/${newConversationId}`);
+        // router.replace, and NOT window.history.replaceState. Both were
+        // measured on `next start`, same clicks, only this line differing, with
+        // POST /api/chat answered by a stubbed SSE body naming an existing
+        // conversation.
+        //
+        // router.replace costs a full document load here (performance.timeOrigin
+        // changes; /api/auth/me and /api/conversations are requested again), so
+        // the answer that just rendered is off screen until the new page's
+        // transcript fetch lands: rAF frames of the new document at 31, 53 and
+        // 63ms hold no messages and the transcript is back at 80ms, ~76ms end to
+        // end over loopback. Everything downstream is then correct - Back
+        // re-requests /api/conversations/{id}/messages and restores the
+        // conversation, Forward returns to the one clicked in the sidebar, and
+        // reload matches both.
+        //
+        // window.history.replaceState removes that reload, and the Sidebar still
+        // refetches because usePathname() still changes. It also corrupts the
+        // history entry, which is worse. Next patches replaceState to re-run its
+        // router restore with the tree it already has, so the entry keeps the
+        // /chat (new-chat) tree while its URL becomes /chat/{id}. Measured: the
+        // next sidebar click degrades to a full page load, and Back then restores
+        // that entry making NO request at all - the transcript it showed was the
+        // two messages left in memory where the conversation has four, and
+        // nothing ever refetches it. 76ms of flicker is cosmetic; a history entry
+        // whose page disagrees with its URL is not.
+        router.replace(`/chat/${newConversationId}`);
       }
     } catch (err) {
       setError(errorMessage(err));
@@ -118,11 +130,11 @@ export default function ChatWindow({
     }
   }
 
-  // h-full, not h-screen: this fills `main`, which the (app) layout already
-  // bounds at h-screen. h-screen here would be 100vh no matter what main
-  // actually offers a child, and below md main is a border-box h-screen with
-  // pt-12, so its content box is 100vh - 3rem and a h-screen child overflows
-  // it by exactly that padding.
+  // h-full, not h-screen: this fills `main`, and the (app) layout's h-screen
+  // wrapper is what bounds it. h-screen here would be 100vh whatever main
+  // actually offers a child. Below md that is not the same number: main is a
+  // flex item stretched to the wrapper's 100vh with pt-12 on it, so its content
+  // box is 100vh - 3rem and a h-screen child overflows by exactly that padding.
   return (
     <div className="flex h-full flex-col">
       <div className="flex-1 space-y-3 overflow-y-auto p-4">

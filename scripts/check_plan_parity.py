@@ -19,7 +19,9 @@ Classification rules, in the order they are applied:
     mismatch is SUPERSEDED, not drift. This is why Task 2's whole-file
     `config.py` differing from disk is expected.
 
-Only an unsuperseded mismatch is drift, and only drift exits non-zero.
+Only an unsuperseded mismatch is drift. Two things exit non-zero: drift, and a
+step header whose backticked filename is bare and matches no file in the repo -
+that one names nothing to compare, and silently mutes its whole task under rule 2.
 
 Caveat worth stating out loud: rule 3 is triage, not proof. It says a mismatch
 has a plausible innocent cause, not that the cause is the one it names. It
@@ -72,11 +74,16 @@ LANG_SUFFIXES = {
 
 ROOT_FILE_SUFFIXES = {".md", ".yml", ".yaml", ".txt", ".ini", ".toml", ".json", ".example"}
 
-# A bare filename is a path claim too. A step header that reads "Write
-# `a/b/ChunkViewer.tsx` and `StructureViewer.tsx`" yielded ONE path for TWO
+# A bare filename is a path CLAIM, but not a usable path. A step header reading
+# "Write `a/b/ChunkViewer.tsx` and `StructureViewer.tsx`" yielded ONE path for TWO
 # blocks, and pair()'s single-path fallback then aimed both blocks at the first
 # file - so the second was never compared and the first was compared against the
-# wrong block. Requiring a directory separator was the whole of that bug.
+# wrong block. Rejecting the bare token is what made that silent; ACCEPTING it is
+# not a fix either, because `REPO / "StructureViewer.tsx"` does not exist, so rule
+# 2 reads the whole task as unrun and skips all of its blocks at exit 0. That is
+# worse: a tool whose only alarm is a non-zero exit went quiet for a whole task.
+# So accept it here, and report it as AMBIGUOUS below. The real fix in every case
+# is the plan header, which should name the path.
 CODE_FILE_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".mjs", ".css", ".sql", ".sh", ".mako"}
 
 
@@ -208,6 +215,7 @@ def main(argv: list[str]) -> int:
     superseded: list[str] = []
     skipped: list[str] = []
     ambiguous: list[str] = []
+    unresolvable: list[str] = []
     excusable: set[tuple[str, int]] = set()
     checked = 0
 
@@ -216,6 +224,20 @@ def main(argv: list[str]) -> int:
         if not (whole or step.verb in PARTIAL_VERBS) or not step.paths:
             continue
         where = f"Task {step.task} (plan:{step.line}) {step.header[:60]}"
+
+        # A bare `StructureViewer.tsx` in a header names no file the checker can
+        # open. Left to rule 2 it silently mutes the whole task, so say it out
+        # loud instead. Bare tokens that DO resolve (README.md, docker-compose.yml,
+        # .gitignore) are real repo-root paths and are not affected.
+        bare = [
+            p
+            for p in step.paths
+            if "/" not in p and Path(p).suffix in CODE_FILE_SUFFIXES and not (REPO / p).exists()
+        ]
+        if bare:
+            ambiguous.append(f"{where} - bare filename, not a repo path: {', '.join(bare)}")
+            unresolvable.append(f"{where} - {', '.join(bare)}")
+            continue
 
         if step.task in unrun:
             absent = missing.get(step.task) or ["no Write/Create step"]
@@ -278,6 +300,14 @@ def main(argv: list[str]) -> int:
     section("SKIPPED", skipped)
     section("DRIFT", drift)
     print()
+    if unresolvable:
+        # The one AMBIGUOUS case that is never innocent, so the one that gets the
+        # exit code. The rest of that bucket is "I could not tell which block goes
+        # with which path"; this is "this header names a file that does not exist
+        # anywhere in the repo", which is always a plan defect and would otherwise
+        # mute an entire task at exit 0.
+        print(f"FAIL: {len(unresolvable)} step header(s) name a bare filename with no repo path.")
+        return 1
     if drift:
         print(f"FAIL: {len(drift)} block(s) drifted from disk with no later task to explain it.")
         return 1

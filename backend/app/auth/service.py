@@ -34,7 +34,10 @@ async def register_user(db: AsyncSession, settings: Settings, email: str, passwo
 
     existing = await db.scalar(select(User).where(User.email == email))
     if existing is not None:
-        # Same generic message as any other failure: no account enumeration.
+        # Says nothing about the address: "already registered" hands an account
+        # enumeration oracle to anyone who can POST a guess. It is deliberately
+        # NOT the disabled-registration message above either - that one names a
+        # real, checkable cause, and reusing it here would name a false one.
         log_event(logger, "register_duplicate_email")
         raise AuthError("회원가입을 완료하지 못했습니다.")
 

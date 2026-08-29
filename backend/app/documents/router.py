@@ -169,7 +169,13 @@ async def upload_document(
         await db.refresh(document)
         return JSONResponse(
             status_code=503,
-            content=jsonable_encoder(_to_response(document, collection.name, admin.email, 0)),
+            # `detail` as well as the document body: the client reads `detail` for
+            # the banner text, and without it a 503 with a perfectly good Korean
+            # error_message rendered as the browser's own "Service Unavailable".
+            content={
+                **jsonable_encoder(_to_response(document, collection.name, admin.email, 0)),
+                "detail": ENQUEUE_FAILED_MESSAGE,
+            },
         )
 
     await db.refresh(document)

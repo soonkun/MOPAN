@@ -1054,9 +1054,15 @@ def create_app() -> FastAPI:
         if deployed_dim is not None and deployed_dim != configured:
             raise HTTPException(
                 status_code=503,
+                # Korean like every other `detail=`. The frontend never calls this
+                # endpoint and compose healthchecks /api/health, so nothing here
+                # reaches the UI - but "no English in a detail" is a constraint the
+                # API client leans on (frontend/lib/api.ts), and a constraint with a
+                # standing exception is not one. EMBEDDING_DIM and chunks.embedding
+                # stay as they are: they are the names the operator has to type.
                 detail=(
-                    f"EMBEDDING_DIM={configured} does not match the deployed "
-                    f"chunks.embedding width ({deployed_dim}). Run a migration and re-index."
+                    f"EMBEDDING_DIM={configured}이(가) 배포된 chunks.embedding 차원"
+                    f"({deployed_dim})과 다릅니다. 마이그레이션 후 다시 색인해 주세요."
                 ),
             )
         return {"status": "ready"}
@@ -1356,7 +1362,7 @@ async def test_ready_rejects_embedding_dim_mismatch(app, client, db):
     app.state.settings = app.state.settings.model_copy(update={"embedding_dim": deployed + 1})
     response = await client.get("/api/health/ready")
     assert response.status_code == 503
-    assert "does not match" in response.json()["detail"]
+    assert "다릅니다" in response.json()["detail"]
 ```
 
 - [ ] **Step 11: Write `backend/tests/test_db.py`**
@@ -2535,7 +2541,10 @@ async def register_user(db: AsyncSession, settings: Settings, email: str, passwo
 
     existing = await db.scalar(select(User).where(User.email == email))
     if existing is not None:
-        # Same generic message as any other failure: no account enumeration.
+        # Says nothing about the address: "already registered" hands an account
+        # enumeration oracle to anyone who can POST a guess. It is deliberately
+        # NOT the disabled-registration message above either - that one names a
+        # real, checkable cause, and reusing it here would name a false one.
         log_event(logger, "register_duplicate_email")
         raise AuthError("회원가입을 완료하지 못했습니다.")
 
@@ -3302,7 +3311,7 @@ def validate_magic_bytes(extension: str, head: bytes) -> None:
 
     expected = EXPECTED_MAGIC_MIME[extension]
     if guess is None or guess.mime not in expected:
-        actual = guess.mime if guess else "unknown"
+        actual = guess.mime if guess else "알 수 없음"
         raise UploadValidationError(f"파일 내용({actual})이 .{extension} 확장자와 맞지 않습니다.")
 ```
 
@@ -3692,7 +3701,13 @@ async def upload_document(
         await db.refresh(document)
         return JSONResponse(
             status_code=503,
-            content=jsonable_encoder(_to_response(document, collection.name, admin.email, 0)),
+            # `detail` as well as the document body: the client reads `detail` for
+            # the banner text, and without it a 503 with a perfectly good Korean
+            # error_message rendered as the browser's own "Service Unavailable".
+            content={
+                **jsonable_encoder(_to_response(document, collection.name, admin.email, 0)),
+                "detail": ENQUEUE_FAILED_MESSAGE,
+            },
         )
 
     await db.refresh(document)
@@ -10309,27 +10324,35 @@ async def chat(
 
     # no-transform is load-bearing, not decoration. Next.js ships `compress: true`
     # by default, so its /api/* rewrite proxy gzips this response whenever the
-    # client asks for gzip - and gzip buffers, collapsing the whole stream into
-    # one chunk delivered at the end. Every browser asks; curl does not unless
+    # client asks for gzip - and gzip buffers, so the frames stop reaching the
+    # client as they are emitted. Every browser asks; curl does not unless
     # given --compressed, which is why an early probe of the rewrite (Task 20)
     # reported the stream arriving intact and was wrong.
     #
-    # Measured through `next start` against a stub origin emitting four frames at
-    # 0/500/2000/2000ms, timing raw socket reads:
-    #   origin direct, any Accept-Encoding             uncompressed  1/501/2001ms
-    #   via Next, no Accept-Encoding                   uncompressed  23/521/2021ms
-    #   via Next, Accept-Encoding: gzip                gzip          10ms, 2008ms
-    #   via Next, Accept-Encoding: gzip + this header  uncompressed  3/503/2003ms
-    # The gzip row is two reads: the headers, then the entire body at the end. So
-    # without this a real browser gets every status frame after the answer is
-    # already in hand and STATUS_LABEL never renders at all.
+    # Measured through `next start` against a stub origin emitting four SSE frames
+    # at 0/500/2000/2000ms - so they leave the origin at 0, 500, 2500 and 4500ms -
+    # timing raw socket reads. The numbers below are CUMULATIVE ms since the
+    # request, and the first read of each row is the response headers:
+    #   origin direct, any Accept-Encoding    none  0, 0, 502, 2513, 4514, 4514
+    #   via Next, no Accept-Encoding          none  22, 522, 2530, 4536, 4536
+    #   via Next, Accept-Encoding: gzip       gzip  3, 4534, 4534
+    #   via Next, gzip + this header          none  3, 509, 2520, 4525, 4526
+    # Five reads collapse to three, and both body reads land at 4534ms - after the
+    # last frame was emitted. So without this header a browser gets the headers,
+    # then nothing until the answer is finished, and the status frames arrive in
+    # the same read as the answer they were supposed to precede.
+    #
+    # Where gzip flushes is a byte threshold, not end-of-stream: padding each frame
+    # to 8KB moves the first body read to 2533ms - still two frames late, just not
+    # all the way to the end. Real status frames here are ~45 bytes, the small end
+    # of that, which is the row above.
     #
     # `compress: false` in next.config.js would also fix it, and is worse twice
     # over: Next-only, and it turns gzip off for the whole app's HTML, JS and CSS
-    # to fix one endpoint. It also would not survive deployment, since Cloudflare
-    # compresses at its own edge regardless of what Next did, and no-transform is
-    # the documented opt-out Cloudflare honours. A response header travels with
-    # the resource to every proxy in the chain; a build flag stops at the first.
+    # to fix one endpoint. A response header travels with the resource to every
+    # proxy in the chain; a build flag stops at the first. Cloudflare's docs say
+    # it compresses at its own edge and honours no-transform - documented, not
+    # measured here, and worth re-checking against the deployment.
     #
     # X-Accel-Buffering: no beside it is nginx's vendor hint for a different
     # failure - nginx's proxy buffering, not its gzip. nginx is the one hop no
@@ -10842,9 +10865,11 @@ async def test_chat_streams_status_then_done(logged_in):
     response = await logged_in.post("/api/chat", json={"message": "What is MOPAN?"})
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
-    # Removing no-transform breaks nothing a test, a typecheck or a build can
-    # see: the UI still works, it just silently stops streaming. See the comment
-    # on the StreamingResponse in app/chat/router.py.
+    # This line is the whole guard. Removing no-transform from the header breaks
+    # nothing else a test, a typecheck or a build can see - the UI still works, it
+    # just silently stops showing progress - so without this assertion the header
+    # would look like decoration to the next person to tidy it. See the comment on
+    # the StreamingResponse in app/chat/router.py.
     assert "no-transform" in response.headers["cache-control"]
 
     events = parse_sse(response.text)
@@ -10968,7 +10993,12 @@ async def test_llm_failure_is_reported_as_an_error_event(logged_in, fake_llm, db
 
     last = parse_sse(response.text)[-1]
     assert last["type"] == "error"
-    assert "boom" not in last["detail"]  # internals never reach the client
+    # Equality, not `"boom" not in detail`: that assertion passes for every string
+    # that is not the provider's, the empty one and an English one included, so it
+    # never held anything in place. This `detail` is the one backend string the UI
+    # renders straight into its error banner without an HTTP status to interpret,
+    # so it is pinned exactly - text, language and all.
+    assert last["detail"] == "답변 생성에 실패했습니다. 잠시 후 다시 시도해 주세요."
     assert "Traceback" not in response.text
     # The conversation exists and is empty rather than half-written.
     conversation_id = (await logged_in.get("/api/conversations")).json()[0]["id"]
@@ -11398,16 +11428,16 @@ Two things `apiFetch` has to get right that are easy to leave out:
 
 **`API_INTERNAL_URL` is a BUILD-time value, and this was measured.** `next build` evaluates `rewrites()` once and writes the resolved destination into `.next/routes-manifest.json` as a literal string; `next start` serves from that manifest and never re-reads the variable. A server started with `API_INTERNAL_URL=http://127.0.0.1:8123` still proxied to `http://localhost:8000`. Compose originally supplied it under `environment:`, which therefore did nothing — the frontend container would have proxied `/api/*` to its own empty port 8000 and every request would have failed, which is the exact shape of the `NEXT_PUBLIC_API_BASE_URL` trap this design was written to remove, one layer further down. `frontend/Dockerfile` takes it as an `ARG` and `docker-compose.yml` passes it under `build.args`. Changing it needs a rebuild, not a restart.
 
-**SSE survives the rewrite only if the response carries `Cache-Control: no-transform`.** An early probe here concluded it survives untouched — four frames a second apart arriving a second apart through Next — and that conclusion was false. It was run with a client that sent **no** `Accept-Encoding` header at all (curl's default), so Next never compressed and the timing was perfect. A browser always sends `Accept-Encoding: gzip`, and Next ships `compress: true`. Re-measured through `next start` against a stub origin emitting four frames at 0/500/2000/2000 ms, timing raw socket reads:
+**SSE survives the rewrite only if the response carries `Cache-Control: no-transform`.** An early probe here concluded it survives untouched — four frames a second apart arriving a second apart through Next — and that conclusion was false. It was run with a client that sent **no** `Accept-Encoding` header at all (curl's default), so Next never compressed and the timing was perfect. A browser always sends `Accept-Encoding: gzip`, and Next ships `compress: true`. Re-measured through `next start` against a stub origin emitting four SSE frames at 0/500/2000/2000 ms — so they leave the origin at 0, 500, 2500 and 4500 ms — timing raw socket reads. The figures are **cumulative** ms since the request, and each row's first read is the response headers:
 
-| client | Content-Encoding | reads (ms) |
+| client | Content-Encoding | socket reads, cumulative ms |
 |---|---|---|
-| origin direct, any `Accept-Encoding` | none | 1, 501, 2001 |
-| via Next, **no** `Accept-Encoding` | none | 23, 521, 2021 |
-| via Next, `Accept-Encoding: gzip` | **gzip** | 10, **2008** — headers, then the whole body |
-| via Next, `Accept-Encoding: gzip`, origin sends `no-transform` | none | 3, 503, 2003 |
+| origin direct, any `Accept-Encoding` | none | 0, 0, 502, 2513, 4514, 4514 |
+| via Next, **no** `Accept-Encoding` | none | 22, 522, 2530, 4536, 4536 |
+| via Next, `Accept-Encoding: gzip` | **gzip** | 3, **4534**, 4534 |
+| via Next, `Accept-Encoding: gzip`, origin sends `no-transform` | none | 3, 509, 2520, 4525, 4526 |
 
-gzip buffers, so without the header a real browser receives every frame in one chunk after the answer is already finished. Task 22's chat page does not need a bypass, but it does need that header, and **Task 18 sets it** on the `/api/chat` `StreamingResponse` — the comment there records why `no-transform` and not `compress: false`.
+Five reads collapse to three, and with gzip both body reads land at 4534 ms — after the last frame was emitted. So a real browser gets the headers and then nothing until the answer is finished, with the status frames arriving in the same read as the answer they were meant to precede. Where gzip flushes is a byte threshold rather than end-of-stream: padding each frame to 8 KB moves the first body read to 2533 ms, still two frames late. Real status frames are ~45 bytes, which is the row above. Task 22's chat page does not need a bypass, but it does need that header, and **Task 18 sets it** on the `/api/chat` `StreamingResponse` — the comment there records why `no-transform` and not `compress: false`.
 
 - [ ] **Step 1: Write `frontend/package.json`**
 
@@ -11663,6 +11693,16 @@ function redirectIfSessionGone(status: number): void {
 }
 
 const VALIDATION_FALLBACK = "입력한 내용을 다시 확인해 주세요.";
+// The fallback for a body with no `detail` at all. It replaces response.statusText,
+// which is English and reaches the banner verbatim: an unhandled 500 rendered
+// "Internal Server Error", a 404 on a mistyped route renders FastAPI's own
+// {"detail":"Not Found"}, and /api/documents' enqueue-failure 503 returned a
+// document object with no detail key and rendered "Service Unavailable" while its
+// Korean message sat unread in error_message. Backend `detail=` strings are Korean
+// by standing constraint (see errorMessage below); this covers every response that
+// carries no detail for that constraint to apply to. The status stays in the text
+// so a bug report still carries the one fact worth having.
+const REQUEST_FAILED = "요청을 처리하지 못했습니다.";
 const HANGUL = /[가-힣]/;
 
 /** FastAPI's `detail` is a string for an HTTPException but a LIST for a 422 -
@@ -11672,10 +11712,14 @@ const HANGUL = /[가-힣]/;
  *
  * Pydantic's own `msg` is English ("Value error, password must be at most 72
  * bytes"), so a raw join swaps [object Object] for English jargon in a Korean
- * UI. Show a msg only when the backend wrote it in Korean; otherwise fall back. */
+ * UI. Show a msg only when the backend wrote it in Korean; otherwise fall back.
+ *
+ * The same Hangul test guards the string branch, and not only for symmetry:
+ * FastAPI answers an unrouted path with its own `{"detail":"Not Found"}`, which
+ * no backend constraint covers because no backend code wrote it. */
 function detailText(payload: unknown, fallback: string): string {
   const detail = (payload as { detail?: unknown } | null)?.detail;
-  if (typeof detail === "string") return detail;
+  if (typeof detail === "string") return HANGUL.test(detail) ? detail : fallback;
   if (Array.isArray(detail)) {
     const messages = detail
       .map((item) => (item as { msg?: unknown })?.msg)
@@ -11689,7 +11733,7 @@ function detailText(payload: unknown, fallback: string): string {
 async function failure(response: Response): Promise<ApiError> {
   redirectIfSessionGone(response.status);
   const payload = await response.json().catch(() => null);
-  return new ApiError(response.status, detailText(payload, response.statusText));
+  return new ApiError(response.status, detailText(payload, `${REQUEST_FAILED} (HTTP ${response.status})`));
 }
 
 export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -11724,8 +11768,11 @@ export function safeNextPath(raw: string | null, fallback = "/chat"): string {
 /** Only an ApiError carries a message worth showing, and only because every
  *  `detail=` in the backend is written in Korean so that it can be handed
  *  straight to the user. That is a standing constraint on the backend, not an
- *  observation about it: an English `detail=` renders verbatim on screen, which
- *  is how "conversation not found" once appeared under the Korean empty state.
+ *  observation about it: an English `detail=` used to render verbatim on
+ *  screen, which is how "conversation not found" once appeared under the Korean
+ *  empty state. detailText now drops a detail with no Hangul in it rather than
+ *  showing it, so breaking the constraint costs the user the message instead of
+ *  showing them English - still a bug, just a quieter one.
  *  A generic Error carries nothing usable at all - a failed fetch throws a
  *  TypeError whose message is the browser's own English string ("Failed to
  *  fetch", "NetworkError when attempting to fetch resource.", "Load failed"),
@@ -12262,8 +12309,11 @@ export default function Sidebar() {
   }, []);
 
   // pathname is a dependency on purpose: the chat page creates a conversation
-  // and then navigates to /chat/{id}. Refetching on that navigation is what
-  // puts the new title into the history list.
+  // and then router.replace()s to /chat/{id}, and the new title has to reach
+  // this list. Measured on `next start`, that particular navigation is a full
+  // document load, which remounts this component and reloads the list anyway;
+  // the dependency is what covers the soft navigations - every click between
+  // conversations - and what would still cover the replace if it became one.
   useEffect(() => {
     void load();
   }, [load, pathname]);
@@ -12479,7 +12529,9 @@ git commit -m "feat: responsive sidebar with user info and logout"
 **Interfaces:**
 - Consumes: `streamChat`, `apiFetch`, `Message`/`Citation`/`ChatEvent` (Task 20), backend `/api/chat` (SSE) and `/api/conversations/{id}/messages`.
 - Produces: `<ChatWindow initialConversationId />` — shows each status frame as it arrives, renders `[n]` markers **inline** as clickable badges, and opens a modal that fetches the full chunk from `/api/chunks/{id}`.
-- The status only streams because `/api/chat` sends `Cache-Control: no-cache, no-transform` (Task 18). Without `no-transform`, Next's default `compress: true` gzips the rewrite proxy's copy of the stream for any client that sends `Accept-Encoding: gzip` — which every browser does — gzip buffers it, and every frame lands in one chunk after the answer is already finished; `STATUS_LABEL` then never renders at all and this component looks like it hangs for the whole retrieval-plus-model round trip. Measured, not assumed, and note the condition: a probe that omits `Accept-Encoding` sees no compression and no problem, which is how Task 20 first got this wrong. See the comment on that `StreamingResponse`.
+- The status only streams because `/api/chat` sends `Cache-Control: no-cache, no-transform` (Task 18). Without `no-transform`, Next's default `compress: true` gzips the rewrite proxy's copy of the stream for any client that sends `Accept-Encoding: gzip` — which every browser does — gzip buffers it, and with frames this small (~45 bytes) nothing reaches the client until the answer is finished — measured at 4534 ms against an origin whose last frame left at 4500 ms. The status frames then arrive in the same read as the answer, so `STATUS_LABEL` has nothing left to announce and this component looks like it hangs for the whole retrieval-plus-model round trip. Measured through `next start`, cumulative socket-read times, and note the condition: a probe that omits `Accept-Encoding` sees no compression and no problem, which is how Task 20 first got this wrong. See the comment on that `StreamingResponse`.
+- **The URL change after the first answer uses `router.replace`, and `window.history.replaceState` was tried and rejected.** Measured on `next start`, same clicks, POST `/api/chat` answered by a stubbed SSE body: `router.replace` costs a full document load here (`performance.timeOrigin` changes, `/api/auth/me` and `/api/conversations` are requested again), so the answer is off screen for ~76 ms over loopback — rAF frames of the new document at 31, 53 and 63 ms hold no messages, the transcript is back at 80 ms. Back, Forward and reload are all correct after it: Back re-requests `/api/conversations/{id}/messages` and restores the conversation. `replaceState` removes that reload and the Sidebar still refetches, but Next patches `replaceState` to re-run its router restore with the tree it already has, so the history entry keeps the `/chat` new-chat tree under a `/chat/{id}` URL. Measured on that variant: the next sidebar click degrades to a full page load, and Back then restores that entry making **no request at all** — it showed the two messages left in memory for a conversation that has four, and nothing ever refetches. A 76 ms flicker is cosmetic; a history entry whose page disagrees with its URL is not.
+
 - What streams here is the *status*, not the answer text. `POST /api/chat` emits `status:searching` → `status:answering` → `citations` → `done`, and the whole answer arrives at once inside `done`; `ChatEvent.token` is reserved for Slice 3 and Slice 1's `answer()` awaits one non-streaming `llm_provider.chat()` call. So `STATUS_LABEL` is the entire progress indication a user gets while the model runs, and `ChatWindow` has no token handler on purpose. Saying "streams the answer" here would set up Slice 3's work as a bug report against this task.
 
 - [ ] **Step 1: Write `frontend/components/chat/CitationBadge.tsx`**
@@ -12643,6 +12695,7 @@ export default function MessageBubble({ message }: { message: Message }) {
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { apiFetch, errorMessage, streamChat } from "@/lib/api";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import MessageBubble from "@/components/chat/MessageBubble";
@@ -12658,6 +12711,7 @@ export default function ChatWindow({
 }: {
   initialConversationId: string | null;
 }) {
+  const router = useRouter();
   const [conversationId, setConversationId] = useState<string | null>(initialConversationId);
   const [messages, setMessages] = useState<Message[]>([]);
   // "no messages", "not loaded yet" and "the load failed" are three states, and
@@ -12735,22 +12789,32 @@ export default function ChatWindow({
 
       if (!conversationId && newConversationId) {
         setConversationId(newConversationId);
-        // history.replaceState, not router.replace. router.replace crosses from
-        // /chat to /chat/[conversationId] - a different route segment - so it
-        // unmounts this component, `messages` resets to [], and the answer that
-        // just arrived vanishes until the refetch lands. Measured on an
-        // equivalent route pair by requestAnimationFrame sampling: mount count
-        // 1 -> 2 and the transcript 2 items -> 0, restored 44ms later over
-        // loopback. replaceState keeps this component mounted (mount count
-        // stays 1, transcript stays 2) and Next 15 still syncs its router
-        // state, so usePathname() updates in the same frame - measured, and it
-        // has to be, because the Sidebar refetches its conversation list on
-        // exactly that change and the new title would otherwise never appear.
-        // End to end on this page with a real answer: zero frames with an empty
-        // transcript, the answer bubble and the new URL landing on the same
-        // frame, /api/conversations refetched 2ms later, the new link in the
-        // sidebar 31ms after that.
-        window.history.replaceState(null, "", `/chat/${newConversationId}`);
+        // router.replace, and NOT window.history.replaceState. Both were
+        // measured on `next start`, same clicks, only this line differing, with
+        // POST /api/chat answered by a stubbed SSE body naming an existing
+        // conversation.
+        //
+        // router.replace costs a full document load here (performance.timeOrigin
+        // changes; /api/auth/me and /api/conversations are requested again), so
+        // the answer that just rendered is off screen until the new page's
+        // transcript fetch lands: rAF frames of the new document at 31, 53 and
+        // 63ms hold no messages and the transcript is back at 80ms, ~76ms end to
+        // end over loopback. Everything downstream is then correct - Back
+        // re-requests /api/conversations/{id}/messages and restores the
+        // conversation, Forward returns to the one clicked in the sidebar, and
+        // reload matches both.
+        //
+        // window.history.replaceState removes that reload, and the Sidebar still
+        // refetches because usePathname() still changes. It also corrupts the
+        // history entry, which is worse. Next patches replaceState to re-run its
+        // router restore with the tree it already has, so the entry keeps the
+        // /chat (new-chat) tree while its URL becomes /chat/{id}. Measured: the
+        // next sidebar click degrades to a full page load, and Back then restores
+        // that entry making NO request at all - the transcript it showed was the
+        // two messages left in memory where the conversation has four, and
+        // nothing ever refetches it. 76ms of flicker is cosmetic; a history entry
+        // whose page disagrees with its URL is not.
+        router.replace(`/chat/${newConversationId}`);
       }
     } catch (err) {
       setError(errorMessage(err));
@@ -12760,11 +12824,11 @@ export default function ChatWindow({
     }
   }
 
-  // h-full, not h-screen: this fills `main`, which the (app) layout already
-  // bounds at h-screen. h-screen here would be 100vh no matter what main
-  // actually offers a child, and below md main is a border-box h-screen with
-  // pt-12, so its content box is 100vh - 3rem and a h-screen child overflows
-  // it by exactly that padding.
+  // h-full, not h-screen: this fills `main`, and the (app) layout's h-screen
+  // wrapper is what bounds it. h-screen here would be 100vh whatever main
+  // actually offers a child. Below md that is not the same number: main is a
+  // flex item stretched to the wrapper's 100vh with pt-12 on it, so its content
+  // box is 100vh - 3rem and a h-screen child overflows by exactly that padding.
   return (
     <div className="flex h-full flex-col">
       <div className="flex-1 space-y-3 overflow-y-auto p-4">
@@ -12815,6 +12879,15 @@ Both paths belong in the step header, in block order. `check_plan_parity.py`
 reads a step's file claims out of its header alone, so a header that only said
 "the two chat pages" left both of these blocks silently unchecked against disk.
 
+A **bare** filename in a header is the other half of that trap, and the checker
+now refuses it out loud rather than guessing. Materialising Task 23's blocks
+three ways: a bare `StructureViewer.tsx` under the old predicate dropped the
+token, so one path met two blocks and both were compared against `ChunkViewer.tsx`
+— DRIFT 1, exit 1, and `StructureViewer.tsx` never compared. Accepting the bare
+token instead made rule 2 read the whole task as unrun: 0 blocks compared, all six
+in SKIPPED, exit **0**. It now lands in AMBIGUOUS naming the token and exits 1.
+Full paths in headers, always.
+
 `frontend/app/(app)/chat/page.tsx`:
 
 ```tsx
@@ -12855,8 +12928,11 @@ file, no-transform on its SSE Cache-Control included, and Task 18 Step 7 commits
 it; there is nothing left for this task to add. The path is also written bare
 rather than in backticks on purpose: check_plan_parity.py reads a backticked path
 out of a step's prose as "a later task amends this file", so backticking it here
-would move Task 18's whole-file block for it into the excusable list and stop it
-being compared against disk at all.
+would move Task 18's whole-file block for it into the excusable list. It would
+still be compared against disk - the count stays 136 either way - but a mismatch
+would be classified SUPERSEDED instead of DRIFT and the run would exit 0. That is
+the ceiling the checker prints beside that list: drift in an excusable block is
+not caught.
 
 ```bash
 git add frontend/components/chat frontend/app/\(app\)/chat
@@ -13427,6 +13503,8 @@ Open `http://localhost:3000/` → redirected to `/login` → register the first 
 
 Run: `cloudflared tunnel --url http://localhost:3000`
 Expected: **one** tunnel exposes the whole app; login works over it, because the API is same-origin behind the Next.js rewrite.
+
+Then **re-measure the chat status labels over the tunnel**, which Task 18's `StreamingResponse` comment hands to this step: ask a question through the tunnel hostname and confirm 문서 검색 중... and 답변 생성 중... both appear before the answer, not with it. `no-transform` covers compression at the edge; cloudflared has its own reported SSE buffering behaviour that it does not address, and this is the first run where that can be observed.
 
 - [ ] **Step 6: Write `README.md`**
 

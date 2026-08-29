@@ -75,5 +75,5 @@ def validate_magic_bytes(extension: str, head: bytes) -> None:
 
     expected = EXPECTED_MAGIC_MIME[extension]
     if guess is None or guess.mime not in expected:
-        actual = guess.mime if guess else "unknown"
+        actual = guess.mime if guess else "알 수 없음"
         raise UploadValidationError(f"파일 내용({actual})이 .{extension} 확장자와 맞지 않습니다.")

@@ -111,9 +111,15 @@ def create_app() -> FastAPI:
         if deployed_dim is not None and deployed_dim != configured:
             raise HTTPException(
                 status_code=503,
+                # Korean like every other `detail=`. The frontend never calls this
+                # endpoint and compose healthchecks /api/health, so nothing here
+                # reaches the UI - but "no English in a detail" is a constraint the
+                # API client leans on (frontend/lib/api.ts), and a constraint with a
+                # standing exception is not one. EMBEDDING_DIM and chunks.embedding
+                # stay as they are: they are the names the operator has to type.
                 detail=(
-                    f"EMBEDDING_DIM={configured} does not match the deployed "
-                    f"chunks.embedding width ({deployed_dim}). Run a migration and re-index."
+                    f"EMBEDDING_DIM={configured}이(가) 배포된 chunks.embedding 차원"
+                    f"({deployed_dim})과 다릅니다. 마이그레이션 후 다시 색인해 주세요."
                 ),
             )
         return {"status": "ready"}

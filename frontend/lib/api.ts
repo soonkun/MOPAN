@@ -30,6 +30,16 @@ function redirectIfSessionGone(status: number): void {
 }
 
 const VALIDATION_FALLBACK = "입력한 내용을 다시 확인해 주세요.";
+// The fallback for a body with no `detail` at all. It replaces response.statusText,
+// which is English and reaches the banner verbatim: an unhandled 500 rendered
+// "Internal Server Error", a 404 on a mistyped route renders FastAPI's own
+// {"detail":"Not Found"}, and /api/documents' enqueue-failure 503 returned a
+// document object with no detail key and rendered "Service Unavailable" while its
+// Korean message sat unread in error_message. Backend `detail=` strings are Korean
+// by standing constraint (see errorMessage below); this covers every response that
+// carries no detail for that constraint to apply to. The status stays in the text
+// so a bug report still carries the one fact worth having.
+const REQUEST_FAILED = "요청을 처리하지 못했습니다.";
 const HANGUL = /[가-힣]/;
 
 /** FastAPI's `detail` is a string for an HTTPException but a LIST for a 422 -
@@ -39,10 +49,14 @@ const HANGUL = /[가-힣]/;
  *
  * Pydantic's own `msg` is English ("Value error, password must be at most 72
  * bytes"), so a raw join swaps [object Object] for English jargon in a Korean
- * UI. Show a msg only when the backend wrote it in Korean; otherwise fall back. */
+ * UI. Show a msg only when the backend wrote it in Korean; otherwise fall back.
+ *
+ * The same Hangul test guards the string branch, and not only for symmetry:
+ * FastAPI answers an unrouted path with its own `{"detail":"Not Found"}`, which
+ * no backend constraint covers because no backend code wrote it. */
 function detailText(payload: unknown, fallback: string): string {
   const detail = (payload as { detail?: unknown } | null)?.detail;
-  if (typeof detail === "string") return detail;
+  if (typeof detail === "string") return HANGUL.test(detail) ? detail : fallback;
   if (Array.isArray(detail)) {
     const messages = detail
       .map((item) => (item as { msg?: unknown })?.msg)
@@ -56,7 +70,7 @@ function detailText(payload: unknown, fallback: string): string {
 async function failure(response: Response): Promise<ApiError> {
   redirectIfSessionGone(response.status);
   const payload = await response.json().catch(() => null);
-  return new ApiError(response.status, detailText(payload, response.statusText));
+  return new ApiError(response.status, detailText(payload, `${REQUEST_FAILED} (HTTP ${response.status})`));
 }
 
 export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -91,8 +105,11 @@ export function safeNextPath(raw: string | null, fallback = "/chat"): string {
 /** Only an ApiError carries a message worth showing, and only because every
  *  `detail=` in the backend is written in Korean so that it can be handed
  *  straight to the user. That is a standing constraint on the backend, not an
- *  observation about it: an English `detail=` renders verbatim on screen, which
- *  is how "conversation not found" once appeared under the Korean empty state.
+ *  observation about it: an English `detail=` used to render verbatim on
+ *  screen, which is how "conversation not found" once appeared under the Korean
+ *  empty state. detailText now drops a detail with no Hangul in it rather than
+ *  showing it, so breaking the constraint costs the user the message instead of
+ *  showing them English - still a bug, just a quieter one.
  *  A generic Error carries nothing usable at all - a failed fetch throws a
  *  TypeError whose message is the browser's own English string ("Failed to
  *  fetch", "NetworkError when attempting to fetch resource.", "Load failed"),

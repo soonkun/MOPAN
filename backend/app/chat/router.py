@@ -123,27 +123,35 @@ async def chat(
 
     # no-transform is load-bearing, not decoration. Next.js ships `compress: true`
     # by default, so its /api/* rewrite proxy gzips this response whenever the
-    # client asks for gzip - and gzip buffers, collapsing the whole stream into
-    # one chunk delivered at the end. Every browser asks; curl does not unless
+    # client asks for gzip - and gzip buffers, so the frames stop reaching the
+    # client as they are emitted. Every browser asks; curl does not unless
     # given --compressed, which is why an early probe of the rewrite (Task 20)
     # reported the stream arriving intact and was wrong.
     #
-    # Measured through `next start` against a stub origin emitting four frames at
-    # 0/500/2000/2000ms, timing raw socket reads:
-    #   origin direct, any Accept-Encoding             uncompressed  1/501/2001ms
-    #   via Next, no Accept-Encoding                   uncompressed  23/521/2021ms
-    #   via Next, Accept-Encoding: gzip                gzip          10ms, 2008ms
-    #   via Next, Accept-Encoding: gzip + this header  uncompressed  3/503/2003ms
-    # The gzip row is two reads: the headers, then the entire body at the end. So
-    # without this a real browser gets every status frame after the answer is
-    # already in hand and STATUS_LABEL never renders at all.
+    # Measured through `next start` against a stub origin emitting four SSE frames
+    # at 0/500/2000/2000ms - so they leave the origin at 0, 500, 2500 and 4500ms -
+    # timing raw socket reads. The numbers below are CUMULATIVE ms since the
+    # request, and the first read of each row is the response headers:
+    #   origin direct, any Accept-Encoding    none  0, 0, 502, 2513, 4514, 4514
+    #   via Next, no Accept-Encoding          none  22, 522, 2530, 4536, 4536
+    #   via Next, Accept-Encoding: gzip       gzip  3, 4534, 4534
+    #   via Next, gzip + this header          none  3, 509, 2520, 4525, 4526
+    # Five reads collapse to three, and both body reads land at 4534ms - after the
+    # last frame was emitted. So without this header a browser gets the headers,
+    # then nothing until the answer is finished, and the status frames arrive in
+    # the same read as the answer they were supposed to precede.
+    #
+    # Where gzip flushes is a byte threshold, not end-of-stream: padding each frame
+    # to 8KB moves the first body read to 2533ms - still two frames late, just not
+    # all the way to the end. Real status frames here are ~45 bytes, the small end
+    # of that, which is the row above.
     #
     # `compress: false` in next.config.js would also fix it, and is worse twice
     # over: Next-only, and it turns gzip off for the whole app's HTML, JS and CSS
-    # to fix one endpoint. It also would not survive deployment, since Cloudflare
-    # compresses at its own edge regardless of what Next did, and no-transform is
-    # the documented opt-out Cloudflare honours. A response header travels with
-    # the resource to every proxy in the chain; a build flag stops at the first.
+    # to fix one endpoint. A response header travels with the resource to every
+    # proxy in the chain; a build flag stops at the first. Cloudflare's docs say
+    # it compresses at its own edge and honours no-transform - documented, not
+    # measured here, and worth re-checking against the deployment.
     #
     # X-Accel-Buffering: no beside it is nginx's vendor hint for a different
     # failure - nginx's proxy buffering, not its gzip. nginx is the one hop no

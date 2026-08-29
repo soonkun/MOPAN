@@ -26,4 +26,4 @@ async def test_ready_rejects_embedding_dim_mismatch(app, client, db):
     app.state.settings = app.state.settings.model_copy(update={"embedding_dim": deployed + 1})
     response = await client.get("/api/health/ready")
     assert response.status_code == 503
-    assert "does not match" in response.json()["detail"]
+    assert "다릅니다" in response.json()["detail"]

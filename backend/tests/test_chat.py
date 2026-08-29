@@ -89,9 +89,11 @@ async def test_chat_streams_status_then_done(logged_in):
     response = await logged_in.post("/api/chat", json={"message": "What is MOPAN?"})
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
-    # Removing no-transform breaks nothing a test, a typecheck or a build can
-    # see: the UI still works, it just silently stops streaming. See the comment
-    # on the StreamingResponse in app/chat/router.py.
+    # This line is the whole guard. Removing no-transform from the header breaks
+    # nothing else a test, a typecheck or a build can see - the UI still works, it
+    # just silently stops showing progress - so without this assertion the header
+    # would look like decoration to the next person to tidy it. See the comment on
+    # the StreamingResponse in app/chat/router.py.
     assert "no-transform" in response.headers["cache-control"]
 
     events = parse_sse(response.text)
@@ -215,7 +217,12 @@ async def test_llm_failure_is_reported_as_an_error_event(logged_in, fake_llm, db
 
     last = parse_sse(response.text)[-1]
     assert last["type"] == "error"
-    assert "boom" not in last["detail"]  # internals never reach the client
+    # Equality, not `"boom" not in detail`: that assertion passes for every string
+    # that is not the provider's, the empty one and an English one included, so it
+    # never held anything in place. This `detail` is the one backend string the UI
+    # renders straight into its error banner without an HTTP status to interpret,
+    # so it is pinned exactly - text, language and all.
+    assert last["detail"] == "답변 생성에 실패했습니다. 잠시 후 다시 시도해 주세요."
     assert "Traceback" not in response.text
     # The conversation exists and is empty rather than half-written.
     conversation_id = (await logged_in.get("/api/conversations")).json()[0]["id"]

@@ -41,8 +41,11 @@ export default function Sidebar() {
   }, []);
 
   // pathname is a dependency on purpose: the chat page creates a conversation
-  // and then navigates to /chat/{id}. Refetching on that navigation is what
-  // puts the new title into the history list.
+  // and then router.replace()s to /chat/{id}, and the new title has to reach
+  // this list. Measured on `next start`, that particular navigation is a full
+  // document load, which remounts this component and reloads the list anyway;
+  // the dependency is what covers the soft navigations - every click between
+  // conversations - and what would still cover the replace if it became one.
   useEffect(() => {
     void load();
   }, [load, pathname]);
