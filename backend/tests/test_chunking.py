@@ -194,6 +194,40 @@ def test_size_pass_breaks_at_a_blank_heading():
     assert [(c.page, c.section) for c in candidates] == [(1, "A"), (2, "B")]
 
 
+def test_size_pass_does_not_orphan_a_heading_that_is_followed_by_a_heading():
+    """Every `# Title` / `## Section` document hit this: the title opened a
+    candidate, the next heading opened another, and the title shipped as a chunk
+    of its own - 12 tokens and 10 characters on the markdown file in the dev
+    corpus, an embedding call and an index entry for a string that answers
+    nothing. The title has to ride along with the first body it introduces, and
+    the citation has to name that body's section, not the title."""
+    blocks = [
+        Block(text="농약 안전사용 지침", block_type="heading", section="농약 안전사용 지침"),
+        Block(text="1. 보관 기준", block_type="heading", page=4, section="1. 보관 기준"),
+        Block(text="농약은 서늘한 곳에 보관한다.", block_type="paragraph", page=4, section="1. 보관 기준"),
+        Block(text="2. 희석 배수", block_type="heading", page=5, section="2. 희석 배수"),
+        Block(text="라벨의 값을 따른다.", block_type="paragraph", page=5, section="2. 희석 배수"),
+    ]
+    candidates = build_size_bounded_candidates(blocks, 1000)
+
+    assert [c.content for c in candidates] == [
+        "농약 안전사용 지침\n1. 보관 기준\n농약은 서늘한 곳에 보관한다.",
+        "2. 희석 배수\n라벨의 값을 따른다.",
+    ]
+    assert [(c.page, c.section) for c in candidates] == [(4, "1. 보관 기준"), (5, "2. 희석 배수")]
+
+
+def test_size_pass_still_bounds_a_run_of_headings():
+    """Absorbing forward must not become a way past the token limit: a document
+    that is nothing but headings still has to come out under it."""
+    blocks = [Block(text=f"Heading number {i} of many.", block_type="heading") for i in range(40)]
+    candidates = build_size_bounded_candidates(blocks, 20)
+
+    assert len(candidates) > 1
+    for candidate in candidates:
+        assert count_tokens(candidate.content) <= candidate.token_count <= 20
+
+
 # --- Task 10: strategies -----------------------------------------------------
 
 from app.rag.chunking import get_chunking_strategy  # noqa: E402

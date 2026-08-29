@@ -2,12 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
-import DocumentTable from "@/components/documents/DocumentTable";
+import DocumentTable, { TERMINAL } from "@/components/documents/DocumentTable";
 import UploadDropzone from "@/components/documents/UploadDropzone";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { Collection, DocumentItem, User } from "@/lib/types";
-
-const TERMINAL = new Set(["indexed", "failed"]);
 
 export default function DocumentsPage() {
   const [user, setUser] = useState<User | null>(null);
@@ -15,6 +13,13 @@ export default function DocumentsPage() {
   const [selectedCollectionId, setSelectedCollectionId] = useState("");
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [filter, setFilter] = useState("");
+  // Empty is not the same as not-loaded - the same defect the detail page's
+  // `loading` flag fixes, and this is the third file in this codebase to have had
+  // it (Sidebar and ChatWindow were the first two). Measured at 2000ms latency /
+  // 50kB/s against a database holding four documents: without the flag 문서가
+  // 없습니다. was on screen from the first paint and still there 6s later; with
+  // it, 불러오는 중... paints instead and 문서가 없습니다. never appears.
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const documentsRef = useRef<DocumentItem[]>([]);
 
@@ -26,6 +31,8 @@ export default function DocumentsPage() {
       setError(null);
     } catch (err) {
       setError(errorMessage(err));
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -114,7 +121,11 @@ export default function DocumentsPage() {
         aria-label="문서명 / 분류 / 등록자 검색"
         className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
       />
-      <DocumentTable documents={visible} />
+      {loading ? (
+        <p className="py-8 text-center text-sm text-gray-400">불러오는 중...</p>
+      ) : (
+        <DocumentTable documents={visible} />
+      )}
     </div>
   );
 }

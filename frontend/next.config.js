@@ -14,8 +14,10 @@ module.exports = {
     // Set ABOVE settings.max_upload_size_mb, not equal to it: an over-limit
     // upload has to reach the backend to be told 파일이 최대 크기 50MB를
     // 초과했습니다. rather than being truncated into a generic 500.
-    // ponytail: 64mb is the ceiling; a real deployment behind nginx needs
-    // client_max_body_size raised the same way (Task 24).
+    // ponytail: 64mb is the ceiling. Nothing in this slice sits in front of Next
+    // to keep in step - Task 24 tunnels cloudflared straight at it - but a
+    // deployment that does add a reverse proxy has to raise that proxy's own body
+    // limit (nginx: client_max_body_size) to match.
     middlewareClientMaxBodySize: "64mb",
   },
   // Same-origin API proxy. The browser only ever calls /api/* on this origin, so:

@@ -3668,8 +3668,12 @@ async def upload_document(
     # a SpooledTemporaryFile(max_size=1MB) before this handler runs, and
     # save_upload_stream writes in CHUNK_BYTES pieces, so nothing ever holds the
     # whole body in RAM. But an oversized body is still written to the spool's temp
-    # file in full before max_bytes can reject it. Capping that needs a
-    # proxy-level client_max_body_size - deployment work, see Task 24.
+    # file in full before max_bytes can reject it. Capping that needs a body limit
+    # on a proxy in front of this app, and there is none: Task 24 exposes the
+    # stack with `cloudflared tunnel --url http://localhost:3000` straight to
+    # Next, whose middlewareClientMaxBodySize only bounds its own rewrite hop. If
+    # a reverse proxy is ever added, raise its limit (nginx: client_max_body_size)
+    # to match settings.max_upload_size_mb.
     try:
         path, size = await save_upload_stream(
             settings.upload_dir,
@@ -4888,6 +4892,40 @@ def test_size_pass_breaks_at_a_blank_heading():
 
     assert [c.content for c in candidates] == ["Body of A.", "Body of B."]
     assert [(c.page, c.section) for c in candidates] == [(1, "A"), (2, "B")]
+
+
+def test_size_pass_does_not_orphan_a_heading_that_is_followed_by_a_heading():
+    """Every `# Title` / `## Section` document hit this: the title opened a
+    candidate, the next heading opened another, and the title shipped as a chunk
+    of its own - 12 tokens and 10 characters on the markdown file in the dev
+    corpus, an embedding call and an index entry for a string that answers
+    nothing. The title has to ride along with the first body it introduces, and
+    the citation has to name that body's section, not the title."""
+    blocks = [
+        Block(text="농약 안전사용 지침", block_type="heading", section="농약 안전사용 지침"),
+        Block(text="1. 보관 기준", block_type="heading", page=4, section="1. 보관 기준"),
+        Block(text="농약은 서늘한 곳에 보관한다.", block_type="paragraph", page=4, section="1. 보관 기준"),
+        Block(text="2. 희석 배수", block_type="heading", page=5, section="2. 희석 배수"),
+        Block(text="라벨의 값을 따른다.", block_type="paragraph", page=5, section="2. 희석 배수"),
+    ]
+    candidates = build_size_bounded_candidates(blocks, 1000)
+
+    assert [c.content for c in candidates] == [
+        "농약 안전사용 지침\n1. 보관 기준\n농약은 서늘한 곳에 보관한다.",
+        "2. 희석 배수\n라벨의 값을 따른다.",
+    ]
+    assert [(c.page, c.section) for c in candidates] == [(4, "1. 보관 기준"), (5, "2. 희석 배수")]
+
+
+def test_size_pass_still_bounds_a_run_of_headings():
+    """Absorbing forward must not become a way past the token limit: a document
+    that is nothing but headings still has to come out under it."""
+    blocks = [Block(text=f"Heading number {i} of many.", block_type="heading") for i in range(40)]
+    candidates = build_size_bounded_candidates(blocks, 20)
+
+    assert len(candidates) > 1
+    for candidate in candidates:
+        assert count_tokens(candidate.content) <= candidate.token_count <= 20
 ```
 
 - [ ] **Step 2: Run tests, expect FAIL** (`app.rag.chunking` does not exist)
@@ -5034,7 +5072,9 @@ def split_to_token_limit(text: str, max_tokens: int) -> list[str]:
 def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) -> list[ChunkCandidate]:
     """Pass 1 of chunking. Opens a new candidate when a heading arrives OR when
     adding this piece would exceed max_chunk_tokens, and splits any single block
-    that is too big on its own.
+    that is too big on its own. The one exception is a candidate that so far holds
+    nothing but headings: it absorbs forward instead of breaking, so a title
+    followed straight by a section heading does not ship as a chunk of its own.
 
     Token counts accumulate incrementally, separator included. Re-encoding the
     whole accumulated string on every block append is O(n^2) tiktoken work over a
@@ -5045,6 +5085,9 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
     candidates: list[ChunkCandidate] = []
     current: ChunkCandidate | None = None
     pending_break = False
+    # True while `current` holds nothing but heading text. Such a candidate is not
+    # a chunk, it is the title of the next one - see the absorb branch below.
+    heading_only = False
 
     for block in blocks:
         # An empty or whitespace-only block would otherwise emit a zero-length
@@ -5060,11 +5103,21 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
 
         for piece in pieces:
             piece_tokens = count_tokens(piece)
+            over_limit = (
+                current is not None
+                and current.token_count + NEWLINE_TOKENS + piece_tokens > max_chunk_tokens
+            )
+            # A candidate holding nothing but headings is orphaned text, not a
+            # chunk: `# Title` followed straight by `## Section` emitted the title
+            # on its own, measured at 12 tokens / 10 characters on the markdown
+            # document in the dev corpus. Every heading-then-heading file hits it.
+            # So a section break is only honoured once the candidate has a body;
+            # until then the next piece is absorbed. The size bound still wins,
+            # which is what keeps a heading stack from growing past the limit.
             starts_new = (
                 current is None
-                or pending_break
-                or block.block_type == "heading"
-                or current.token_count + NEWLINE_TOKENS + piece_tokens > max_chunk_tokens
+                or over_limit
+                or (not heading_only and (pending_break or block.block_type == "heading"))
             )
             pending_break = False
             if starts_new:
@@ -5076,14 +5129,25 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
                     section=block.section,
                 )
                 candidates.append(current)
+                heading_only = block.block_type == "heading"
             else:
                 current.content = f"{current.content}\n{piece}"
                 current.token_count += NEWLINE_TOKENS + piece_tokens
                 current.char_count = len(current.content)
-                if current.page is None:
-                    current.page = block.page
-                if current.section is None:
-                    current.section = block.section
+                if heading_only:
+                    # Absorbing forward past a heading-only candidate: the citation
+                    # belongs to the section the body sits under, not to the title
+                    # the candidate happened to open with.
+                    if block.section is not None:
+                        current.section = block.section
+                    if block.page is not None:
+                        current.page = block.page
+                    heading_only = block.block_type == "heading"
+                else:
+                    if current.page is None:
+                        current.page = block.page
+                    if current.section is None:
+                        current.section = block.section
 
     return candidates
 ```
@@ -5143,7 +5207,7 @@ def test_out_of_range_max_chunk_tokens_is_rejected(value):
 - [ ] **Step 8: Run tests, expect PASS**
 
 Run: `pytest tests/test_chunking.py tests/test_settings.py -v`
-Expected: all 28 tests PASS (16 chunking + 12 settings)
+Expected: all 30 tests PASS (18 chunking + 12 settings)
 
 - [ ] **Step 9: Commit**
 
@@ -5691,6 +5755,38 @@ class StructureSemanticChunking(ChunkingStrategy):
     2. Semantic merge pass: adjacent candidates whose embeddings are similar
        enough that splitting them would break one idea in two get merged, as long
        as the result still fits under the token limit.
+
+    Pass 2 can only DELETE a boundary pass 1 drew; it never creates one. So the
+    document detail view shows STRUCTURE-aware chunking, and only demonstrates
+    semantic merging on a document where this pass actually fires. On the two
+    documents in the dev database it fires zero times: over their 10 stored
+    vectors all 8 adjacent-pair cosines measure 0.216-0.468 against the 0.75
+    default, and the pass-1 output those vectors came from is the stored chunking
+    unchanged (PDF 122/111/178/123 tokens, markdown 12/123/119/66/124/73 - and the
+    honest spread of that markdown file is 66 to 124 tokens, not the 66-vs-119+
+    contrast an earlier note drew, because chunk 5 is 73). Those rows predate the
+    size pass's heading-orphan fix, which is where their 12-token first chunk came
+    from; re-parsed today the same file yields 5 candidates, 136/119/66/124/73.
+
+    That is defensible, not a misconfiguration. Pass 1 opens a candidate at every
+    heading, so two adjacent candidates share a section only when the section was
+    long enough for the size bound to split it - which is the one place a semantic
+    merge would be repairing damage the size bound did. Neither dev document has
+    such a section (largest: 178 tokens against a 500-token limit), so every
+    adjacent pair spans a heading boundary, and low similarity across a heading is
+    what a heading is for. Sweeping the threshold down over the stored embeddings
+    confirms it: nothing merges anywhere until 0.45, and the first merges to
+    appear are "3. 방제 시기"+"4. 보호 장비" (0.45) and "3. 방제 약제별
+    효과"+"4. 결론 및 제언" (0.40) - two different sections glued together. At 0.35
+    the PDF is down to 2 chunks (413 and 123 tokens) and the markdown to 4; by
+    0.20 the markdown is 2. A lower threshold buys bigger chunks that mix topics,
+    not better ones, so 0.75 stays. The 0.5/0.9/0.99 cases in test_chunking.py are
+    synthetic one-hot vectors and pin none of this.
+
+    The embedding call is not overhead. The pipeline reuses these vectors for
+    every candidate the pass did not merge (see pipeline.py's `pending` list), so
+    a zero-merge document costs exactly the one batched call it would have cost
+    with no semantic pass at all.
     """
 
     def __init__(self, similarity_threshold: float = 0.75, max_chunk_tokens: int = 500):
@@ -5841,7 +5937,7 @@ def test_out_of_range_similarity_threshold_is_rejected(value):
 - [ ] **Step 8: Run tests, expect PASS**
 
 Run: `pytest tests/test_chunking.py tests/test_settings.py -v`
-Expected: all 51 tests PASS (36 chunking + 15 settings)
+Expected: all 53 tests PASS (38 chunking + 15 settings)
 
 - [ ] **Step 9: Commit**
 
@@ -11518,8 +11614,10 @@ module.exports = {
     // Set ABOVE settings.max_upload_size_mb, not equal to it: an over-limit
     // upload has to reach the backend to be told 파일이 최대 크기 50MB를
     // 초과했습니다. rather than being truncated into a generic 500.
-    // ponytail: 64mb is the ceiling; a real deployment behind nginx needs
-    // client_max_body_size raised the same way (Task 24).
+    // ponytail: 64mb is the ceiling. Nothing in this slice sits in front of Next
+    // to keep in step - Task 24 tunnels cloudflared straight at it - but a
+    // deployment that does add a reverse proxy has to raise that proxy's own body
+    // limit (nginx: client_max_body_size) to match.
     middlewareClientMaxBodySize: "64mb",
   },
   // Same-origin API proxy. The browser only ever calls /api/* on this origin, so:
@@ -12968,23 +13066,25 @@ git commit -m "feat: streaming chat UI with inline clickable citations"
 
 **Interfaces:**
 - Consumes: `apiFetch` (Task 20), backend `/api/documents`, `/api/documents/{id}`, `/api/collections`, `/api/documents/{id}/chunks`, `/api/documents/{id}/structure`, `/api/auth/me`.
-- Produces: `<UploadDropzone collectionId onUploaded />` (uses `apiFetch` with `FormData` — the Content-Type fix in Task 20 makes the raw-`fetch` workaround unnecessary), `<DocumentTable documents />` with **all eight required columns**, `<StructureViewer blocks />`, `<ChunkViewer chunks />`. The filter box lives on the page, not in the table: `DocumentTable` takes documents alone and the page passes it an already-filtered list.
+- Produces: `<UploadDropzone collectionId onUploaded />` (uses `apiFetch` with `FormData` — the Content-Type fix in Task 20 makes the raw-`fetch` workaround unnecessary), `<DocumentTable documents />` with **all eight required columns**, `<StructureViewer blocks />`, `<ChunkViewer chunks />`. The filter box lives on the page, not in the table: `DocumentTable` takes documents alone and the page passes it an already-filtered list. `DocumentTable` also exports `FILE_TYPE_LABEL` (the dropzone's `accept` list and hint text derive from it) and `TERMINAL` (the page's poll gate and the table's 대기 시간 note share one definition of "still working").
 
 - [ ] **Step 0: Raise the rewrite proxy's request-body cap**
 
-The file to change is `frontend/next.config.js`. Its path is deliberately NOT in this
-step's header: `scripts/check_plan_parity.py` treats a path named by a later task as
-licence to excuse a mismatch in an earlier one, and naming it here would silence the
-whole-file check on Task 20, Step 3 — which is where the change actually lives.
+The file to change is frontend/next.config.js, written bare rather than in backticks
+here and below. The lever is the PROSE, not the step header: check_plan_parity.py
+builds its rule-3 excuse from `step.header + "\n" + step.prose`, so a backticked path
+anywhere in a step's body is read as "a later task amends this file". Backticking it
+here moves Task 20 Step 3's whole-file block into the excusable list, where a mismatch
+is reported SUPERSEDED and the run still exits 0. Measured on this plan: with the
+backticks in place, flipping `reactStrictMode` to false on disk gave SUPERSEDED, 142
+blocks, exit 0; with them removed, the same mutation gave DRIFT 1, exit 1. Naming the
+path in this step's header would not add that excuse (the prose already did) - it
+would only start comparing this step's own blocks against the whole file on disk,
+which a 3-line config fragment can never match. That is why the fragment is described
+in prose below instead of fenced.
 
 
-Next's rewrite proxy buffers each request body through its own router process and caps it at **10MB** by default, so this task's upload was dead on arrival for any file between the proxy cap and the backend's 50MB limit. Measured, before the change: a 12MB `POST /api/documents` returned `HTTP 500 Internal Server Error` through the Next origin and `HTTP 400 {"detail":"지원하지 않는 파일 형식입니다: .exe"}` when sent to `127.0.0.1:8000` directly, with `Request body exceeded 10MB for /api/documents` and `socket hang up` in the dev server log. Same result under `next start`, because the cap lives in `resolve-routes.js`, which both modes run. After the change the 12MB body reaches the backend in both modes, and a 51MB upload gets the backend's own `413 파일이 최대 크기 50MB를 초과했습니다.` instead of a generic 500. Add to the exported config object in `frontend/next.config.js` (full file in Task 20, Step 3, which carries this change):
-
-```js
-  experimental: {
-    middlewareClientMaxBodySize: "64mb",
-  },
-```
+Next's rewrite proxy buffers each request body through its own router process and caps it at **10MB** by default, so this task's upload was dead on arrival for any file between the proxy cap and the backend's 50MB limit. Measured, before the change: a 12MB `POST /api/documents` returned `HTTP 500 Internal Server Error` through the Next origin and `HTTP 400 {"detail":"지원하지 않는 파일 형식입니다: .exe"}` when sent to `127.0.0.1:8000` directly, with `Request body exceeded 10MB for /api/documents` and `socket hang up` in the dev server log. Same result under `next start`, because the cap lives in `resolve-routes.js`, which both modes run. After the change the 12MB body reaches the backend in both modes, and a 51MB upload gets the backend's own `413 파일이 최대 크기 50MB를 초과했습니다.` instead of a generic 500. Add an `experimental` object to the exported config in frontend/next.config.js setting `middlewareClientMaxBodySize` to `"64mb"`. Not reproduced as a fenced block here: nothing would compare it (the step's verb carries no file claim, and giving it a header path would re-arm the rule-3 excuse this step exists to avoid), and Task 20, Step 3 already carries the full file - including this key and the comment explaining it - as a checked whole-file block.
 
 - [ ] **Step 1: Write `frontend/components/documents/UploadDropzone.tsx`**
 
@@ -13039,19 +13139,23 @@ export default function UploadDropzone({
       {/* A <button>, not a <div onClick>. As a div this was pointer-only: not in
           the tab order, no role, no Enter/Space handler, so the one control that
           gets a document into the system was unreachable without a mouse. The
-          drag handlers sit on it just the same, and `disabled` while busy is
-          what stops a second upload starting on top of the first. */}
+          drag handlers sit on it just the same. */}
       <button
         type="button"
         disabled={busy}
         onDragOver={(e) => {
           e.preventDefault();
-          setDragging(true);
+          if (!busy) setDragging(true);
         }}
         onDragLeave={() => setDragging(false)}
         onDrop={(e) => {
           e.preventDefault();
           setDragging(false);
+          // `disabled` does NOT cover this. Measured on Edge/Chromium 152: a real
+          // click on the disabled button produced 0 click events, but dragover and
+          // drop dispatched at it both fired - so a second file dropped mid-upload
+          // started a concurrent upload that the click path cannot start.
+          if (busy) return;
           const file = e.dataTransfer.files[0];
           if (file) void uploadFile(file);
         }}
@@ -13062,8 +13166,14 @@ export default function UploadDropzone({
       >
         {busy ? "업로드 중..." : `문서를 드래그하거나 클릭하여 업로드하세요 (${FORMATS})`}
       </button>
-      {/* Outside the button: a form control nested in a button is invalid HTML
-          and browsers swallow the click that should open the picker. */}
+      {/* Outside the button, not inside it. Nesting a form control in a <button>
+          violates the button content model, and the concrete symptom is
+          re-entrancy, not a swallowed click: the input's own click bubbles back
+          out through the button, whose onClick fires again. Measured on
+          Edge/Chromium 152 with the same handler shape - nested, one real click
+          gave 2 button-handler invocations and 1 input click; as siblings, 1 and
+          1. The picker does open either way; it is the doubled handler that is
+          the bug. */}
       <input
         ref={inputRef}
         type="file"
@@ -13113,6 +13223,26 @@ export const FILE_TYPE_LABEL: Record<string, string> = {
   html: "웹문서",
 };
 
+// Exported so the page's poll gate and this file's stalled note agree on what
+// "still working" means instead of keeping two copies of the same set.
+export const TERMINAL = new Set<DocumentStatus>(["indexed", "failed"]);
+
+// A frontend timeout would lie about a genuinely slow document, but elapsed time
+// is a fact. `updated_at` is bumped by every _set_status commit in the pipeline,
+// so this reads "no progress for N minutes", not "N minutes since upload" - which
+// is what turns a job stuck at 대기 중 (no worker running, say) from a silent hang
+// into something the user can act on.
+function StalledNote({ doc }: { doc: DocumentItem }) {
+  if (TERMINAL.has(doc.status)) return null;
+  const minutes = Math.floor((Date.now() - Date.parse(doc.updated_at)) / 60000);
+  if (minutes < 1) return null;
+  return (
+    <p className="mt-0.5 text-xs text-gray-500">
+      {minutes}분째 {STATUS_LABEL[doc.status] ?? doc.status}
+    </p>
+  );
+}
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -13142,7 +13272,23 @@ export default function DocumentTable({ documents }: { documents: DocumentItem[]
           {documents.map((doc) => (
             <tr key={doc.id} className="border-b border-gray-100 hover:bg-gray-50">
               <td className="py-2 pr-3">
-                <Link href={`/documents/${doc.id}`} className="hover:underline">
+                {/* Bounded, or the 문서명 column starves every column after it.
+                    Measured at 1280x900 with a 244-character filename in the
+                    corpus: unbounded, the table ran 2627px wide, this cell took
+                    2261px and the 상태 cell was left 28px, rendering the failure
+                    reason as a 15px-wide, 416px-tall ribbon of single characters.
+                    With max-w-xs the same page is 976/333/193px and the reason
+                    reads normally at 180x32px. Nothing escaped its cell either
+                    way - the page stayed 1280px - so this is legibility, not
+                    containment: the reason is unreadable exactly when a hostile
+                    filename is present, which is the case it was made visible
+                    for. `title` keeps the full name available on hover; the
+                    untruncated text is still in the DOM for a screen reader. */}
+                <Link
+                  href={`/documents/${doc.id}`}
+                  title={doc.filename}
+                  className="block max-w-xs truncate hover:underline"
+                >
                   {doc.filename}
                 </Link>
               </td>
@@ -13167,6 +13313,7 @@ export default function DocumentTable({ documents }: { documents: DocumentItem[]
                 {doc.error_message && (
                   <p className="mt-0.5 max-w-xs text-xs text-red-600">{doc.error_message}</p>
                 )}
+                <StalledNote doc={doc} />
               </td>
               <td className="py-2 text-right text-gray-500">{formatSize(doc.size_bytes)}</td>
             </tr>
@@ -13257,12 +13404,10 @@ export default function StructureViewer({ blocks }: { blocks: Block[] }) {
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
-import DocumentTable from "@/components/documents/DocumentTable";
+import DocumentTable, { TERMINAL } from "@/components/documents/DocumentTable";
 import UploadDropzone from "@/components/documents/UploadDropzone";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { Collection, DocumentItem, User } from "@/lib/types";
-
-const TERMINAL = new Set(["indexed", "failed"]);
 
 export default function DocumentsPage() {
   const [user, setUser] = useState<User | null>(null);
@@ -13270,6 +13415,13 @@ export default function DocumentsPage() {
   const [selectedCollectionId, setSelectedCollectionId] = useState("");
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [filter, setFilter] = useState("");
+  // Empty is not the same as not-loaded - the same defect the detail page's
+  // `loading` flag fixes, and this is the third file in this codebase to have had
+  // it (Sidebar and ChatWindow were the first two). Measured at 2000ms latency /
+  // 50kB/s against a database holding four documents: without the flag 문서가
+  // 없습니다. was on screen from the first paint and still there 6s later; with
+  // it, 불러오는 중... paints instead and 문서가 없습니다. never appears.
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const documentsRef = useRef<DocumentItem[]>([]);
 
@@ -13281,6 +13433,8 @@ export default function DocumentsPage() {
       setError(null);
     } catch (err) {
       setError(errorMessage(err));
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -13369,7 +13523,11 @@ export default function DocumentsPage() {
         aria-label="문서명 / 분류 / 등록자 검색"
         className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
       />
-      <DocumentTable documents={visible} />
+      {loading ? (
+        <p className="py-8 text-center text-sm text-gray-400">불러오는 중...</p>
+      ) : (
+        <DocumentTable documents={visible} />
+      )}
     </div>
   );
 }
@@ -13391,7 +13549,11 @@ import type { Block, Chunk, DocumentItem } from "@/lib/types";
 // unwraps with React 19's `use()`. A synchronous signature is a build error.
 export default function DocumentDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const [document, setDocument] = useState<DocumentItem | null>(null);
+  // Named `doc`, not `document`: shadowing the global is harmless here today, but
+  // the list page's poll gate reads `document.hidden`, and that pattern copied
+  // into a file where `document` is a DocumentItem reads the wrong thing in
+  // silence.
+  const [doc, setDoc] = useState<DocumentItem | null>(null);
   const [chunks, setChunks] = useState<Chunk[]>([]);
   const [blocks, setBlocks] = useState<Block[]>([]);
   // Empty is not the same as not-loaded. Without this the panes render
@@ -13407,8 +13569,8 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
       apiFetch<Chunk[]>(`/api/documents/${id}/chunks`),
       apiFetch<Block[]>(`/api/documents/${id}/structure`).catch(() => [] as Block[]),
     ])
-      .then(([doc, chunkList, blockList]) => {
-        setDocument(doc);
+      .then(([item, chunkList, blockList]) => {
+        setDoc(item);
         setChunks(chunkList);
         setBlocks(blockList);
       })
@@ -13420,41 +13582,53 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
 
   return (
     <div className="mx-auto max-w-6xl space-y-4 p-6">
-      <h1 className="text-lg font-semibold">{document?.filename ?? "문서"}</h1>
-      {document?.error_message && <ErrorBanner message={document.error_message} />}
+      <h1 className="text-lg font-semibold">{doc?.filename ?? "문서"}</h1>
+      {doc?.error_message && <ErrorBanner message={doc.error_message} />}
       <ErrorBanner message={error} />
 
       {/* Original structure on the left, chunks on the right: the comparison view
-          an admin needs to judge chunking quality.
-          tabIndex on the scroll panes, not the sections: a scroll container with
-          no focusable content in it cannot be scrolled from the keyboard in
-          Chromium, and neither pane has a single link or button in it. */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <section className="rounded border border-gray-200 p-4">
-          <h2 className="mb-3 text-sm font-medium text-gray-500">
-            원문 구조{!loading && ` (${blocks.length})`}
-          </h2>
-          <div tabIndex={0} aria-label="원문 구조" className="max-h-[70vh] overflow-y-auto">
-            {loading ? (
-              <p className="text-sm text-gray-400">불러오는 중...</p>
-            ) : (
-              <StructureViewer blocks={blocks} />
-            )}
-          </div>
-        </section>
-        <section className="rounded border border-gray-200 p-4">
-          <h2 className="mb-3 text-sm font-medium text-gray-500">
-            청크 목록{!loading && ` (${chunks.length})`}
-          </h2>
-          <div tabIndex={0} aria-label="청크 목록" className="max-h-[70vh] overflow-y-auto">
-            {loading ? (
-              <p className="text-sm text-gray-400">불러오는 중...</p>
-            ) : (
-              <ChunkViewer chunks={chunks} />
-            )}
-          </div>
-        </section>
-      </div>
+          an admin needs to judge chunking quality. What it shows is the
+          STRUCTURE-aware pass - candidates opened at every heading and at the
+          token limit. The semantic merge pass can only delete a boundary that
+          pass drew, and on the corpus in the dev database it deletes none (all
+          eight adjacent-pair cosines fall between 0.216 and 0.468 against a 0.75
+          threshold), so nothing on this screen currently demonstrates semantic
+          merging. See StructureSemanticChunking's docstring for the sweep.
+
+          aria-label on the scroll panes, and tabIndex with it. The label is the
+          real gain: without it a pane focused from the keyboard announces
+          nothing. The tabIndex is belt and braces - measured on Edge/Chromium
+          152, a plain scroller with no tabIndex and no focusable content took Tab
+          focus and scrolled on PageDown (0 -> 105), because Chrome 127+ ships
+          keyboard-focusable scrollers; it is Safari that still needs it. */}
+      {error === null && (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <section className="rounded border border-gray-200 p-4">
+            <h2 className="mb-3 text-sm font-medium text-gray-500">
+              원문 구조{!loading && ` (${blocks.length})`}
+            </h2>
+            <div tabIndex={0} aria-label="원문 구조" className="max-h-[70vh] overflow-y-auto">
+              {loading ? (
+                <p className="text-sm text-gray-400">불러오는 중...</p>
+              ) : (
+                <StructureViewer blocks={blocks} />
+              )}
+            </div>
+          </section>
+          <section className="rounded border border-gray-200 p-4">
+            <h2 className="mb-3 text-sm font-medium text-gray-500">
+              청크 목록{!loading && ` (${chunks.length})`}
+            </h2>
+            <div tabIndex={0} aria-label="청크 목록" className="max-h-[70vh] overflow-y-auto">
+              {loading ? (
+                <p className="text-sm text-gray-400">불러오는 중...</p>
+              ) : (
+                <ChunkViewer chunks={chunks} />
+              )}
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

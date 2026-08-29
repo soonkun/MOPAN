@@ -24,6 +24,38 @@ class StructureSemanticChunking(ChunkingStrategy):
     2. Semantic merge pass: adjacent candidates whose embeddings are similar
        enough that splitting them would break one idea in two get merged, as long
        as the result still fits under the token limit.
+
+    Pass 2 can only DELETE a boundary pass 1 drew; it never creates one. So the
+    document detail view shows STRUCTURE-aware chunking, and only demonstrates
+    semantic merging on a document where this pass actually fires. On the two
+    documents in the dev database it fires zero times: over their 10 stored
+    vectors all 8 adjacent-pair cosines measure 0.216-0.468 against the 0.75
+    default, and the pass-1 output those vectors came from is the stored chunking
+    unchanged (PDF 122/111/178/123 tokens, markdown 12/123/119/66/124/73 - and the
+    honest spread of that markdown file is 66 to 124 tokens, not the 66-vs-119+
+    contrast an earlier note drew, because chunk 5 is 73). Those rows predate the
+    size pass's heading-orphan fix, which is where their 12-token first chunk came
+    from; re-parsed today the same file yields 5 candidates, 136/119/66/124/73.
+
+    That is defensible, not a misconfiguration. Pass 1 opens a candidate at every
+    heading, so two adjacent candidates share a section only when the section was
+    long enough for the size bound to split it - which is the one place a semantic
+    merge would be repairing damage the size bound did. Neither dev document has
+    such a section (largest: 178 tokens against a 500-token limit), so every
+    adjacent pair spans a heading boundary, and low similarity across a heading is
+    what a heading is for. Sweeping the threshold down over the stored embeddings
+    confirms it: nothing merges anywhere until 0.45, and the first merges to
+    appear are "3. 방제 시기"+"4. 보호 장비" (0.45) and "3. 방제 약제별
+    효과"+"4. 결론 및 제언" (0.40) - two different sections glued together. At 0.35
+    the PDF is down to 2 chunks (413 and 123 tokens) and the markdown to 4; by
+    0.20 the markdown is 2. A lower threshold buys bigger chunks that mix topics,
+    not better ones, so 0.75 stays. The 0.5/0.9/0.99 cases in test_chunking.py are
+    synthetic one-hot vectors and pin none of this.
+
+    The embedding call is not overhead. The pipeline reuses these vectors for
+    every candidate the pass did not merge (see pipeline.py's `pending` list), so
+    a zero-merge document costs exactly the one batched call it would have cost
+    with no semantic pass at all.
     """
 
     def __init__(self, similarity_threshold: float = 0.75, max_chunk_tokens: int = 500):

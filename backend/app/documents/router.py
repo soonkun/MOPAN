@@ -136,8 +136,12 @@ async def upload_document(
     # a SpooledTemporaryFile(max_size=1MB) before this handler runs, and
     # save_upload_stream writes in CHUNK_BYTES pieces, so nothing ever holds the
     # whole body in RAM. But an oversized body is still written to the spool's temp
-    # file in full before max_bytes can reject it. Capping that needs a
-    # proxy-level client_max_body_size - deployment work, see Task 24.
+    # file in full before max_bytes can reject it. Capping that needs a body limit
+    # on a proxy in front of this app, and there is none: Task 24 exposes the
+    # stack with `cloudflared tunnel --url http://localhost:3000` straight to
+    # Next, whose middlewareClientMaxBodySize only bounds its own rewrite hop. If
+    # a reverse proxy is ever added, raise its limit (nginx: client_max_body_size)
+    # to match settings.max_upload_size_mb.
     try:
         path, size = await save_upload_stream(
             settings.upload_dir,

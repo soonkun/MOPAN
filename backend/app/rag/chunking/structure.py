@@ -105,7 +105,9 @@ def split_to_token_limit(text: str, max_tokens: int) -> list[str]:
 def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) -> list[ChunkCandidate]:
     """Pass 1 of chunking. Opens a new candidate when a heading arrives OR when
     adding this piece would exceed max_chunk_tokens, and splits any single block
-    that is too big on its own.
+    that is too big on its own. The one exception is a candidate that so far holds
+    nothing but headings: it absorbs forward instead of breaking, so a title
+    followed straight by a section heading does not ship as a chunk of its own.
 
     Token counts accumulate incrementally, separator included. Re-encoding the
     whole accumulated string on every block append is O(n^2) tiktoken work over a
@@ -116,6 +118,9 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
     candidates: list[ChunkCandidate] = []
     current: ChunkCandidate | None = None
     pending_break = False
+    # True while `current` holds nothing but heading text. Such a candidate is not
+    # a chunk, it is the title of the next one - see the absorb branch below.
+    heading_only = False
 
     for block in blocks:
         # An empty or whitespace-only block would otherwise emit a zero-length
@@ -131,11 +136,21 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
 
         for piece in pieces:
             piece_tokens = count_tokens(piece)
+            over_limit = (
+                current is not None
+                and current.token_count + NEWLINE_TOKENS + piece_tokens > max_chunk_tokens
+            )
+            # A candidate holding nothing but headings is orphaned text, not a
+            # chunk: `# Title` followed straight by `## Section` emitted the title
+            # on its own, measured at 12 tokens / 10 characters on the markdown
+            # document in the dev corpus. Every heading-then-heading file hits it.
+            # So a section break is only honoured once the candidate has a body;
+            # until then the next piece is absorbed. The size bound still wins,
+            # which is what keeps a heading stack from growing past the limit.
             starts_new = (
                 current is None
-                or pending_break
-                or block.block_type == "heading"
-                or current.token_count + NEWLINE_TOKENS + piece_tokens > max_chunk_tokens
+                or over_limit
+                or (not heading_only and (pending_break or block.block_type == "heading"))
             )
             pending_break = False
             if starts_new:
@@ -147,13 +162,24 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
                     section=block.section,
                 )
                 candidates.append(current)
+                heading_only = block.block_type == "heading"
             else:
                 current.content = f"{current.content}\n{piece}"
                 current.token_count += NEWLINE_TOKENS + piece_tokens
                 current.char_count = len(current.content)
-                if current.page is None:
-                    current.page = block.page
-                if current.section is None:
-                    current.section = block.section
+                if heading_only:
+                    # Absorbing forward past a heading-only candidate: the citation
+                    # belongs to the section the body sits under, not to the title
+                    # the candidate happened to open with.
+                    if block.section is not None:
+                        current.section = block.section
+                    if block.page is not None:
+                        current.page = block.page
+                    heading_only = block.block_type == "heading"
+                else:
+                    if current.page is None:
+                        current.page = block.page
+                    if current.section is None:
+                        current.section = block.section
 
     return candidates

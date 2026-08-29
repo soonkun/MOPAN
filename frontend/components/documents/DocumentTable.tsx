@@ -27,6 +27,26 @@ export const FILE_TYPE_LABEL: Record<string, string> = {
   html: "웹문서",
 };
 
+// Exported so the page's poll gate and this file's stalled note agree on what
+// "still working" means instead of keeping two copies of the same set.
+export const TERMINAL = new Set<DocumentStatus>(["indexed", "failed"]);
+
+// A frontend timeout would lie about a genuinely slow document, but elapsed time
+// is a fact. `updated_at` is bumped by every _set_status commit in the pipeline,
+// so this reads "no progress for N minutes", not "N minutes since upload" - which
+// is what turns a job stuck at 대기 중 (no worker running, say) from a silent hang
+// into something the user can act on.
+function StalledNote({ doc }: { doc: DocumentItem }) {
+  if (TERMINAL.has(doc.status)) return null;
+  const minutes = Math.floor((Date.now() - Date.parse(doc.updated_at)) / 60000);
+  if (minutes < 1) return null;
+  return (
+    <p className="mt-0.5 text-xs text-gray-500">
+      {minutes}분째 {STATUS_LABEL[doc.status] ?? doc.status}
+    </p>
+  );
+}
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -56,7 +76,23 @@ export default function DocumentTable({ documents }: { documents: DocumentItem[]
           {documents.map((doc) => (
             <tr key={doc.id} className="border-b border-gray-100 hover:bg-gray-50">
               <td className="py-2 pr-3">
-                <Link href={`/documents/${doc.id}`} className="hover:underline">
+                {/* Bounded, or the 문서명 column starves every column after it.
+                    Measured at 1280x900 with a 244-character filename in the
+                    corpus: unbounded, the table ran 2627px wide, this cell took
+                    2261px and the 상태 cell was left 28px, rendering the failure
+                    reason as a 15px-wide, 416px-tall ribbon of single characters.
+                    With max-w-xs the same page is 976/333/193px and the reason
+                    reads normally at 180x32px. Nothing escaped its cell either
+                    way - the page stayed 1280px - so this is legibility, not
+                    containment: the reason is unreadable exactly when a hostile
+                    filename is present, which is the case it was made visible
+                    for. `title` keeps the full name available on hover; the
+                    untruncated text is still in the DOM for a screen reader. */}
+                <Link
+                  href={`/documents/${doc.id}`}
+                  title={doc.filename}
+                  className="block max-w-xs truncate hover:underline"
+                >
                   {doc.filename}
                 </Link>
               </td>
@@ -81,6 +117,7 @@ export default function DocumentTable({ documents }: { documents: DocumentItem[]
                 {doc.error_message && (
                   <p className="mt-0.5 max-w-xs text-xs text-red-600">{doc.error_message}</p>
                 )}
+                <StalledNote doc={doc} />
               </td>
               <td className="py-2 text-right text-gray-500">{formatSize(doc.size_bytes)}</td>
             </tr>
