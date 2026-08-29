@@ -1,6 +1,23 @@
 /** @type {import('next').NextConfig} */
 module.exports = {
   reactStrictMode: true,
+  experimental: {
+    // The rewrite proxy below buffers each request body through Next's own
+    // router process, which caps it at 10MB by default (getCloneableBody in
+    // next/dist/server/lib/router-utils/resolve-routes.js - the same code path
+    // in `next dev` and `next start`). The backend advertises a 50MB limit, so
+    // without this every upload between 10MB and 50MB - an ordinary scanned PDF
+    // - died in the proxy. Measured: a 12MB POST to /api/documents returned
+    // HTTP 500 "Internal Server Error" through :3100 and HTTP 400 with the
+    // backend's Korean detail when sent to :8000 directly; the dev server
+    // logged "Request body exceeded 10MB" and "socket hang up".
+    // Set ABOVE settings.max_upload_size_mb, not equal to it: an over-limit
+    // upload has to reach the backend to be told 파일이 최대 크기 50MB를
+    // 초과했습니다. rather than being truncated into a generic 500.
+    // ponytail: 64mb is the ceiling; a real deployment behind nginx needs
+    // client_max_body_size raised the same way (Task 24).
+    middlewareClientMaxBodySize: "64mb",
+  },
   // Same-origin API proxy. The browser only ever calls /api/* on this origin, so:
   //  - CORS never applies
   //  - SameSite=Lax session cookies are sent normally, including behind a tunnel

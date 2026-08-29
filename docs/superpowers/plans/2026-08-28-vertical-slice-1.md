@@ -11505,6 +11505,23 @@ Five reads collapse to three, and with gzip both body reads land at 4534 ms — 
 /** @type {import('next').NextConfig} */
 module.exports = {
   reactStrictMode: true,
+  experimental: {
+    // The rewrite proxy below buffers each request body through Next's own
+    // router process, which caps it at 10MB by default (getCloneableBody in
+    // next/dist/server/lib/router-utils/resolve-routes.js - the same code path
+    // in `next dev` and `next start`). The backend advertises a 50MB limit, so
+    // without this every upload between 10MB and 50MB - an ordinary scanned PDF
+    // - died in the proxy. Measured: a 12MB POST to /api/documents returned
+    // HTTP 500 "Internal Server Error" through :3100 and HTTP 400 with the
+    // backend's Korean detail when sent to :8000 directly; the dev server
+    // logged "Request body exceeded 10MB" and "socket hang up".
+    // Set ABOVE settings.max_upload_size_mb, not equal to it: an over-limit
+    // upload has to reach the backend to be told 파일이 최대 크기 50MB를
+    // 초과했습니다. rather than being truncated into a generic 500.
+    // ponytail: 64mb is the ceiling; a real deployment behind nginx needs
+    // client_max_body_size raised the same way (Task 24).
+    middlewareClientMaxBodySize: "64mb",
+  },
   // Same-origin API proxy. The browser only ever calls /api/* on this origin, so:
   //  - CORS never applies
   //  - SameSite=Lax session cookies are sent normally, including behind a tunnel
@@ -12947,10 +12964,27 @@ git commit -m "feat: streaming chat UI with inline clickable citations"
 **Files:**
 - Create: `frontend/components/documents/UploadDropzone.tsx`, `DocumentTable.tsx`, `ChunkViewer.tsx`, `StructureViewer.tsx`
 - Create: `frontend/app/(app)/documents/page.tsx`, `frontend/app/(app)/documents/[id]/page.tsx`
+- Modify: frontend/next.config.js (Task 20) — see Step 0.
 
 **Interfaces:**
-- Consumes: `apiFetch` (Task 20), backend `/api/documents`, `/api/collections`, `/api/documents/{id}/chunks`, `/api/documents/{id}/structure`, `/api/auth/me`.
-- Produces: `<UploadDropzone collectionId onUploaded />` (uses `apiFetch` with `FormData` — the Content-Type fix in Task 20 makes the raw-`fetch` workaround unnecessary), `<DocumentTable documents filter />` with **all eight required columns**, `<StructureViewer blocks />`, `<ChunkViewer chunks />`.
+- Consumes: `apiFetch` (Task 20), backend `/api/documents`, `/api/documents/{id}`, `/api/collections`, `/api/documents/{id}/chunks`, `/api/documents/{id}/structure`, `/api/auth/me`.
+- Produces: `<UploadDropzone collectionId onUploaded />` (uses `apiFetch` with `FormData` — the Content-Type fix in Task 20 makes the raw-`fetch` workaround unnecessary), `<DocumentTable documents />` with **all eight required columns**, `<StructureViewer blocks />`, `<ChunkViewer chunks />`. The filter box lives on the page, not in the table: `DocumentTable` takes documents alone and the page passes it an already-filtered list.
+
+- [ ] **Step 0: Raise the rewrite proxy's request-body cap**
+
+The file to change is `frontend/next.config.js`. Its path is deliberately NOT in this
+step's header: `scripts/check_plan_parity.py` treats a path named by a later task as
+licence to excuse a mismatch in an earlier one, and naming it here would silence the
+whole-file check on Task 20, Step 3 — which is where the change actually lives.
+
+
+Next's rewrite proxy buffers each request body through its own router process and caps it at **10MB** by default, so this task's upload was dead on arrival for any file between the proxy cap and the backend's 50MB limit. Measured, before the change: a 12MB `POST /api/documents` returned `HTTP 500 Internal Server Error` through the Next origin and `HTTP 400 {"detail":"지원하지 않는 파일 형식입니다: .exe"}` when sent to `127.0.0.1:8000` directly, with `Request body exceeded 10MB for /api/documents` and `socket hang up` in the dev server log. Same result under `next start`, because the cap lives in `resolve-routes.js`, which both modes run. After the change the 12MB body reaches the backend in both modes, and a 51MB upload gets the backend's own `413 파일이 최대 크기 50MB를 초과했습니다.` instead of a generic 500. Add to the exported config object in `frontend/next.config.js` (full file in Task 20, Step 3, which carries this change):
+
+```js
+  experimental: {
+    middlewareClientMaxBodySize: "64mb",
+  },
+```
 
 - [ ] **Step 1: Write `frontend/components/documents/UploadDropzone.tsx`**
 
@@ -12960,7 +12994,15 @@ git commit -m "feat: streaming chat UI with inline clickable citations"
 import { useRef, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
 import ErrorBanner from "@/components/ui/ErrorBanner";
+import { FILE_TYPE_LABEL } from "@/components/documents/DocumentTable";
 import type { DocumentItem } from "@/lib/types";
+
+// One source of truth with the table's 형식 column, so the dropzone can never
+// advertise a format the table has no label for, or vice versa.
+const ACCEPT = Object.keys(FILE_TYPE_LABEL)
+  .map((ext) => `.${ext}`)
+  .join(",");
+const FORMATS = Object.values(FILE_TYPE_LABEL).join(", ");
 
 export default function UploadDropzone({
   collectionId,
@@ -12994,7 +13036,14 @@ export default function UploadDropzone({
 
   return (
     <div className="space-y-2">
-      <div
+      {/* A <button>, not a <div onClick>. As a div this was pointer-only: not in
+          the tab order, no role, no Enter/Space handler, so the one control that
+          gets a document into the system was unreachable without a mouse. The
+          drag handlers sit on it just the same, and `disabled` while busy is
+          what stops a second upload starting on top of the first. */}
+      <button
+        type="button"
+        disabled={busy}
         onDragOver={(e) => {
           e.preventDefault();
           setDragging(true);
@@ -13007,25 +13056,25 @@ export default function UploadDropzone({
           if (file) void uploadFile(file);
         }}
         onClick={() => inputRef.current?.click()}
-        className={`cursor-pointer rounded border-2 border-dashed p-8 text-center text-sm ${
+        className={`w-full rounded border-2 border-dashed p-8 text-center text-sm ${
           dragging ? "border-gray-500 bg-gray-50" : "border-gray-300"
-        }`}
+        } ${busy ? "text-gray-400" : "cursor-pointer"}`}
       >
-        {busy
-          ? "업로드 중..."
-          : "문서를 드래그하거나 클릭하여 업로드하세요 (PDF, DOCX, TXT, MD, HTML)"}
-        <input
-          ref={inputRef}
-          type="file"
-          accept=".pdf,.docx,.txt,.md,.html"
-          className="hidden"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) void uploadFile(file);
-            e.target.value = "";
-          }}
-        />
-      </div>
+        {busy ? "업로드 중..." : `문서를 드래그하거나 클릭하여 업로드하세요 (${FORMATS})`}
+      </button>
+      {/* Outside the button: a form control nested in a button is invalid HTML
+          and browsers swallow the click that should open the picker. */}
+      <input
+        ref={inputRef}
+        type="file"
+        accept={ACCEPT}
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) void uploadFile(file);
+          e.target.value = "";
+        }}
+      />
       <ErrorBanner message={error} />
     </div>
   );
@@ -13052,8 +13101,11 @@ const STATUS_LABEL: Record<DocumentStatus, string> = {
 
 // Raw enum values are not labels. `uppercase` on doc.file_type printed DOCX and
 // MD at the user; the five values are the ALLOWED_EXTENSIONS set in
-// backend/app/documents/validation.py.
-const FILE_TYPE_LABEL: Record<string, string> = {
+// backend/app/documents/validation.py. Exported because UploadDropzone derives
+// both its `accept` attribute and its hint text from it: the same page used to
+// offer "PDF, DOCX, TXT, MD, HTML" in the dropzone and render 웹문서/마크다운 in
+// this column, two vocabularies for one set of formats, kept in step by hand.
+export const FILE_TYPE_LABEL: Record<string, string> = {
   pdf: "PDF",
   docx: "워드",
   txt: "텍스트",
@@ -13104,12 +13156,17 @@ export default function DocumentTable({ documents }: { documents: DocumentItem[]
               </td>
               <td className="py-2 pr-3 text-right text-gray-500">{doc.chunk_count}</td>
               <td className="py-2 pr-3">
-                <span
-                  className={doc.status === "failed" ? "text-red-600" : "text-gray-700"}
-                  title={doc.error_message ?? undefined}
-                >
+                <span className={doc.status === "failed" ? "text-red-600" : "text-gray-700"}>
                   {STATUS_LABEL[doc.status] ?? doc.status}
                 </span>
+                {/* Why a document failed only ever appears here: the upload POST
+                    returned 202 long before the worker failed, so no banner on
+                    the page ever sees this message. It was a `title` tooltip,
+                    which is pointer-only - a keyboard or screen reader user got
+                    "실패" and no reason at all. */}
+                {doc.error_message && (
+                  <p className="mt-0.5 max-w-xs text-xs text-red-600">{doc.error_message}</p>
+                )}
               </td>
               <td className="py-2 text-right text-gray-500">{formatSize(doc.size_bytes)}</td>
             </tr>
@@ -13271,11 +13328,21 @@ export default function DocumentsPage() {
       <h1 className="text-lg font-semibold">문서</h1>
       <ErrorBanner message={error} />
 
-      {user?.role === "admin" ? (
+      {/* `user === null` is "not loaded yet", not "not an admin". Branching on
+          user?.role alone told every admin 문서 등록은 관리자만 할 수 있습니다.
+          for the length of the /api/auth/me round trip, then swapped it for the
+          dropzone and shoved the table down the page. */}
+      {user === null ? null : user.role === "admin" ? (
         <div className="space-y-3">
           <div className="flex items-center gap-2">
-            <label className="text-sm text-gray-500">분류</label>
+            {/* htmlFor/id, not a bare <label>: a label that wraps nothing and
+                points at nothing names nothing, so the select was announced
+                only as a combo box with no idea what it selects. */}
+            <label htmlFor="collection-select" className="text-sm text-gray-500">
+              분류
+            </label>
             <select
+              id="collection-select"
               value={selectedCollectionId}
               onChange={(e) => setSelectedCollectionId(e.target.value)}
               className="rounded border border-gray-300 px-2 py-1 text-sm"
@@ -13299,6 +13366,7 @@ export default function DocumentsPage() {
         value={filter}
         onChange={(e) => setFilter(e.target.value)}
         placeholder="문서명 / 분류 / 등록자 검색"
+        aria-label="문서명 / 분류 / 등록자 검색"
         className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
       />
       <DocumentTable documents={visible} />
@@ -13326,6 +13394,11 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
   const [document, setDocument] = useState<DocumentItem | null>(null);
   const [chunks, setChunks] = useState<Chunk[]>([]);
   const [blocks, setBlocks] = useState<Block[]>([]);
+  // Empty is not the same as not-loaded. Without this the panes render
+  // "원문 구조를 불러올 수 없습니다." and "아직 청크가 없습니다." for the length
+  // of the fetch - two false statements, and the structure one reads as a hard
+  // failure - and the (0) counts in the headings then jump to their real values.
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -13339,7 +13412,10 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
         setChunks(chunkList);
         setBlocks(blockList);
       })
-      .catch((err) => setError(errorMessage(err)));
+      .catch((err) => setError(errorMessage(err)))
+      // finally, not a tail of .then: a 404 on the document otherwise leaves both
+      // panes saying 불러오는 중... forever, under a banner explaining why.
+      .finally(() => setLoading(false));
   }, [id]);
 
   return (
@@ -13349,18 +13425,33 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
       <ErrorBanner message={error} />
 
       {/* Original structure on the left, chunks on the right: the comparison view
-          an admin needs to judge chunking quality. */}
+          an admin needs to judge chunking quality.
+          tabIndex on the scroll panes, not the sections: a scroll container with
+          no focusable content in it cannot be scrolled from the keyboard in
+          Chromium, and neither pane has a single link or button in it. */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <section className="rounded border border-gray-200 p-4">
-          <h2 className="mb-3 text-sm font-medium text-gray-500">원문 구조 ({blocks.length})</h2>
-          <div className="max-h-[70vh] overflow-y-auto">
-            <StructureViewer blocks={blocks} />
+          <h2 className="mb-3 text-sm font-medium text-gray-500">
+            원문 구조{!loading && ` (${blocks.length})`}
+          </h2>
+          <div tabIndex={0} aria-label="원문 구조" className="max-h-[70vh] overflow-y-auto">
+            {loading ? (
+              <p className="text-sm text-gray-400">불러오는 중...</p>
+            ) : (
+              <StructureViewer blocks={blocks} />
+            )}
           </div>
         </section>
         <section className="rounded border border-gray-200 p-4">
-          <h2 className="mb-3 text-sm font-medium text-gray-500">청크 목록 ({chunks.length})</h2>
-          <div className="max-h-[70vh] overflow-y-auto">
-            <ChunkViewer chunks={chunks} />
+          <h2 className="mb-3 text-sm font-medium text-gray-500">
+            청크 목록{!loading && ` (${chunks.length})`}
+          </h2>
+          <div tabIndex={0} aria-label="청크 목록" className="max-h-[70vh] overflow-y-auto">
+            {loading ? (
+              <p className="text-sm text-gray-400">불러오는 중...</p>
+            ) : (
+              <ChunkViewer chunks={chunks} />
+            )}
           </div>
         </section>
       </div>
@@ -13377,7 +13468,7 @@ Expected: build completes with no TypeScript errors
 - [ ] **Step 7: Commit**
 
 ```bash
-git add frontend/components/documents frontend/app/\(app\)/documents
+git add frontend/components/documents frontend/app/\(app\)/documents frontend/next.config.js
 git commit -m "feat: documents UI with full metadata table and structure/chunk comparison"
 ```
 
