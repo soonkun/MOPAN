@@ -24,12 +24,20 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
   // failure - and the (0) counts in the headings then jump to their real values.
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Swallowed here rather than failing the whole page - the chunks are still
+  // worth showing - but kept, not discarded: the backend distinguishes
+  // 원본 파일을 더 이상 찾을 수 없습니다. from a parser failure, and a bare
+  // `catch(() => [])` replaced both with StructureViewer's generic empty state.
+  const [structureError, setStructureError] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([
       apiFetch<DocumentItem>(`/api/documents/${id}`),
       apiFetch<Chunk[]>(`/api/documents/${id}/chunks`),
-      apiFetch<Block[]>(`/api/documents/${id}/structure`).catch(() => [] as Block[]),
+      apiFetch<Block[]>(`/api/documents/${id}/structure`).catch((err) => {
+        setStructureError(errorMessage(err));
+        return [] as Block[];
+      }),
     ])
       .then(([item, chunkList, blockList]) => {
         setDoc(item);
@@ -57,21 +65,31 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
           threshold), so nothing on this screen currently demonstrates semantic
           merging. See StructureSemanticChunking's docstring for the sweep.
 
-          aria-label on the scroll panes, and tabIndex with it. The label is the
-          real gain: without it a pane focused from the keyboard announces
-          nothing. The tabIndex is belt and braces - measured on Edge/Chromium
-          152, a plain scroller with no tabIndex and no focusable content took Tab
-          focus and scrolled on PageDown (0 -> 105), because Chrome 127+ ships
-          keyboard-focusable scrollers; it is Safari that still needs it. */}
+          role/aria-label/tabIndex on the scroll panes. The label is the real
+          gain: without it a pane focused from the keyboard announces nothing.
+          The role is what makes the label legal - ARIA in HTML forbids
+          aria-label on a bare div's implicit `generic` role, and a name on a
+          generic element may be dropped outright. The tabIndex is belt and
+          braces - measured on Edge/Chromium 152, a plain scroller with no
+          tabIndex and no focusable content took Tab focus and scrolled on
+          PageDown (0 -> 105), because Chrome 127+ ships keyboard-focusable
+          scrollers; it is Safari that still needs it. */}
       {error === null && (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <section className="rounded border border-gray-200 p-4">
             <h2 className="mb-3 text-sm font-medium text-gray-500">
               원문 구조{!loading && ` (${blocks.length})`}
             </h2>
-            <div tabIndex={0} aria-label="원문 구조" className="max-h-[70vh] overflow-y-auto">
+            <div
+              role="region"
+              tabIndex={0}
+              aria-label="원문 구조"
+              className="max-h-[70vh] overflow-y-auto"
+            >
               {loading ? (
                 <p className="text-sm text-gray-400">불러오는 중...</p>
+              ) : structureError ? (
+                <p className="text-sm text-red-600">{structureError}</p>
               ) : (
                 <StructureViewer blocks={blocks} />
               )}
@@ -81,7 +99,12 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
             <h2 className="mb-3 text-sm font-medium text-gray-500">
               청크 목록{!loading && ` (${chunks.length})`}
             </h2>
-            <div tabIndex={0} aria-label="청크 목록" className="max-h-[70vh] overflow-y-auto">
+            <div
+              role="region"
+              tabIndex={0}
+              aria-label="청크 목록"
+              className="max-h-[70vh] overflow-y-auto"
+            >
               {loading ? (
                 <p className="text-sm text-gray-400">불러오는 중...</p>
               ) : (

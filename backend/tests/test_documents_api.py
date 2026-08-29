@@ -5,6 +5,8 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
+from app.models.chunk import EMBEDDING_DIM, Chunk
+
 MISSING_ID = uuid.uuid4()
 
 
@@ -188,7 +190,56 @@ async def test_every_route_requires_authentication(client, method, path):
 
 
 async def test_get_unknown_chunk_returns_404(admin_client):
-    assert (await admin_client.get(f"/api/chunks/{uuid.uuid4()}")).status_code == 404
+    response = await admin_client.get(f"/api/chunks/{uuid.uuid4()}")
+    assert response.status_code == 404
+    # The detail is user-facing: it renders in the chat citation modal, labelled
+    # 출처, when a cited chunk's document has been deleted. 청크 is internal
+    # vocabulary the chat surface uses nowhere else.
+    assert response.json()["detail"] == "출처 내용을 불러올 수 없습니다."
+
+
+async def test_chunk_response_reports_embedding_state(admin_client, db, collection_id):
+    """`embedded` is derived from the embedding column, not stored: the vector
+    itself is 1536 floats and never goes on the wire."""
+    upload = await admin_client.post(
+        "/api/documents",
+        data={"collection_id": collection_id},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+    )
+    document_id = uuid.UUID(upload.json()["id"])
+    db.add_all(
+        [
+            Chunk(
+                document_id=document_id,
+                chunk_index=0,
+                content="embedded chunk",
+                token_count=2,
+                char_count=14,
+                chunk_metadata={"strategy": "semantic"},
+                embedding=[0.0] * EMBEDDING_DIM,
+            ),
+            Chunk(
+                document_id=document_id,
+                chunk_index=1,
+                content="unembedded chunk",
+                token_count=2,
+                char_count=16,
+                chunk_metadata={},
+                embedding=None,
+            ),
+        ]
+    )
+    await db.commit()
+
+    response = await admin_client.get(f"/api/documents/{document_id}/chunks")
+    assert response.status_code == 200
+    body = response.json()
+    assert [c["embedded"] for c in body] == [True, False]
+    assert body[0]["chunk_metadata"] == {"strategy": "semantic"}
+    assert "embedding" not in body[0]
+
+    single = await admin_client.get(f"/api/chunks/{body[0]['id']}")
+    assert single.json()["embedded"] is True
 
 
 async def test_document_structure_returns_parsed_blocks(admin_client, collection_id):

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
-import DocumentTable, { TERMINAL } from "@/components/documents/DocumentTable";
+import DocumentTable, { STATUS_LABEL, TERMINAL } from "@/components/documents/DocumentTable";
 import UploadDropzone from "@/components/documents/UploadDropzone";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { Collection, DocumentItem, User } from "@/lib/types";
@@ -12,20 +12,25 @@ export default function DocumentsPage() {
   const [collections, setCollections] = useState<Collection[]>([]);
   const [selectedCollectionId, setSelectedCollectionId] = useState("");
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
-  const [filter, setFilter] = useState("");
+  const [search, setSearch] = useState("");
+  const [collectionFilter, setCollectionFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
   // Empty is not the same as not-loaded - the same defect the detail page's
-  // `loading` flag fixes, and this is the third file in this codebase to have had
-  // it (Sidebar and ChatWindow were the first two). Measured at 2000ms latency /
-  // 50kB/s against a database holding four documents: without the flag 문서가
-  // 없습니다. was on screen from the first paint and still there 6s later; with
-  // it, 불러오는 중... paints instead and 문서가 없습니다. never appears.
+  // `loading` flag fixes. Measured at 2000ms latency / 50kB/s against a database
+  // holding four documents: without the flag 문서가 없습니다. was on screen from
+  // the first paint and still there 6s later; with it, 불러오는 중... paints
+  // instead and 문서가 없습니다. never appears.
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const documentsRef = useRef<DocumentItem[]>([]);
 
+  // The collection filter goes to the server - GET /api/documents takes
+  // collection_id - so a filtered view does not download the other collections'
+  // rows on every 3s poll. Status has no such parameter and is filtered below.
   const loadDocuments = useCallback(async () => {
+    const query = collectionFilter ? `?collection_id=${collectionFilter}` : "";
     try {
-      const items = await apiFetch<DocumentItem[]>("/api/documents");
+      const items = await apiFetch<DocumentItem[]>(`/api/documents${query}`);
       documentsRef.current = items;
       setDocuments(items);
       setError(null);
@@ -34,7 +39,7 @@ export default function DocumentsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [collectionFilter]);
 
   useEffect(() => {
     // No client-side write on page load: the default collection is seeded when
@@ -50,6 +55,11 @@ export default function DocumentsPage() {
         if (cols.length > 0) setSelectedCollectionId(cols[0].id);
       })
       .catch((err) => setError(errorMessage(err)));
+  }, []);
+
+  // Separate from the effect above so changing the collection filter refetches
+  // the documents alone, not /api/auth/me and /api/collections with them.
+  useEffect(() => {
     void loadDocuments();
   }, [loadDocuments]);
 
@@ -65,15 +75,17 @@ export default function DocumentsPage() {
   }, [loadDocuments]);
 
   const visible = useMemo(() => {
-    const needle = filter.trim().toLowerCase();
-    if (!needle) return documents;
-    return documents.filter(
-      (d) =>
+    const needle = search.trim().toLowerCase();
+    return documents.filter((d) => {
+      if (statusFilter && d.status !== statusFilter) return false;
+      if (!needle) return true;
+      return (
         d.filename.toLowerCase().includes(needle) ||
         (d.collection_name ?? "").toLowerCase().includes(needle) ||
-        (d.uploader_email ?? "").toLowerCase().includes(needle),
-    );
-  }, [documents, filter]);
+        (d.uploader_email ?? "").toLowerCase().includes(needle)
+      );
+    });
+  }, [documents, search, statusFilter]);
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 p-6">
@@ -91,7 +103,7 @@ export default function DocumentsPage() {
                 points at nothing names nothing, so the select was announced
                 only as a combo box with no idea what it selects. */}
             <label htmlFor="collection-select" className="text-sm text-gray-500">
-              분류
+              등록할 분류
             </label>
             <select
               id="collection-select"
@@ -114,13 +126,47 @@ export default function DocumentsPage() {
         <p className="text-sm text-gray-500">문서 등록은 관리자만 할 수 있습니다.</p>
       )}
 
-      <input
-        value={filter}
-        onChange={(e) => setFilter(e.target.value)}
-        placeholder="문서명 / 분류 / 등록자 검색"
-        aria-label="문서명 / 분류 / 등록자 검색"
-        className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
-      />
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="문서명 / 분류 / 등록자 검색"
+          aria-label="문서명 / 분류 / 등록자 검색"
+          className="min-w-56 flex-1 rounded border border-gray-300 px-3 py-2 text-sm"
+        />
+        <label htmlFor="collection-filter" className="text-sm text-gray-500">
+          분류 필터
+        </label>
+        <select
+          id="collection-filter"
+          value={collectionFilter}
+          onChange={(e) => setCollectionFilter(e.target.value)}
+          className="rounded border border-gray-300 px-2 py-2 text-sm"
+        >
+          <option value="">전체</option>
+          {collections.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+        <label htmlFor="status-filter" className="text-sm text-gray-500">
+          상태 필터
+        </label>
+        <select
+          id="status-filter"
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          className="rounded border border-gray-300 px-2 py-2 text-sm"
+        >
+          <option value="">전체</option>
+          {Object.entries(STATUS_LABEL).map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </div>
       {loading ? (
         <p className="py-8 text-center text-sm text-gray-400">불러오는 중...</p>
       ) : (

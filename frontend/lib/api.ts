@@ -9,11 +9,16 @@ const API_BASE_URL = "";
 const PUBLIC_PATHS = ["/login", "/register"];
 
 export class ApiError extends Error {
-  constructor(
-    public status: number,
-    message: string,
-  ) {
+  // A plain field, not a `public status` constructor parameter property. That
+  // shorthand is the one piece of TypeScript here that is not erasable - it
+  // emits an assignment - so it was the single line stopping
+  // `node --experimental-strip-types` from importing this module, and with it
+  // the zero-dependency test in api.test.ts.
+  status: number;
+
+  constructor(status: number, message: string) {
     super(message);
+    this.status = status;
     this.name = "ApiError";
   }
 }
@@ -119,16 +124,35 @@ export function errorMessage(err: unknown): string {
   return "알 수 없는 오류가 발생했습니다.";
 }
 
-/** Reads the SSE stream from POST /api/chat. EventSource cannot POST. */
+/** A 200 whose body simply stops. `done` and `error` are the only two frames
+ * that end a /api/chat stream, so a reader that reaches end-of-body without
+ * having seen one was cut off mid-answer - a proxy or tunnel truncating the
+ * tail, or the ASGI server killing the generator. Without this the read loop
+ * just exited and streamChat resolved normally, so the caller cleared its
+ * spinner, re-enabled the form and rendered nothing: the question sat on screen
+ * with no answer and nothing to say it had failed. */
+const STREAM_TRUNCATED = "답변을 끝까지 받지 못했습니다. 다시 시도해 주세요.";
+
+/** Reads the SSE stream from POST /api/chat. EventSource cannot POST.
+ *
+ * `signal` aborts the fetch AND the in-flight body read. Not optional in
+ * practice: without it a stream outlives the component that started it, and the
+ * `done` frame of an abandoned answer still ran that component's
+ * `router.replace` - navigating a user who had already clicked away to a URL
+ * they never chose. An abort rejects the pending `reader.read()` with an
+ * AbortError, so an intentional abort surfaces as that and never as
+ * STREAM_TRUNCATED. */
 export async function streamChat(
   body: { conversation_id?: string | null; message: string; collection_ids?: string[] },
   onEvent: (event: ChatEvent) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/api/chat`, {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal,
   });
 
   if (!response.ok || !response.body) {
@@ -138,6 +162,7 @@ export async function streamChat(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let terminated = false;
 
   for (;;) {
     const { done, value } = await reader.read();
@@ -150,10 +175,17 @@ export async function streamChat(
       const line = frame.split("\n").find((l) => l.startsWith("data: "));
       if (!line) continue;
       try {
-        onEvent(JSON.parse(line.slice("data: ".length)) as ChatEvent);
+        const event = JSON.parse(line.slice("data: ".length)) as ChatEvent;
+        if (event.type === "done" || event.type === "error") terminated = true;
+        onEvent(event);
       } catch {
         // Ignore a malformed frame rather than killing the whole stream.
       }
     }
   }
+
+  // status 0, the XHR convention for "no HTTP status to report": the response
+  // itself was a 200 and only its body failed. ApiError rather than a bare
+  // Error because errorMessage() shows the message of nothing else.
+  if (!terminated) throw new ApiError(0, STREAM_TRUNCATED);
 }

@@ -217,6 +217,30 @@ def test_size_pass_does_not_orphan_a_heading_that_is_followed_by_a_heading():
     assert [(c.page, c.section) for c in candidates] == [(4, "1. 보관 기준"), (5, "2. 희석 배수")]
 
 
+def test_size_pass_does_not_orphan_a_heading_that_a_long_body_would_push_over():
+    """The heading-then-heading fix had a hole its own test could not reach: it
+    ran at max_tokens=1000, where nothing is ever over the limit. When the body
+    that follows a heading is long enough that heading + first piece exceeds the
+    limit, `over_limit` fires BEFORE the heading_only guard is consulted and the
+    heading ships alone anyway. Measured on the unfixed code: a heading plus a
+    40-sentence paragraph under max=200 gave token counts [4, 196, 196, 168] -
+    the 4 is the orphan. Sweeping body length against token limit, 350 of 1330
+    combinations reproduced it. The body's first piece has to be split against
+    what is LEFT after the heading, not against the whole limit."""
+    body = " ".join(f"This is sentence number {i} of the body." for i in range(40))
+    blocks = [
+        Block(text="1. Dilution", block_type="heading", page=1, section="1. Dilution"),
+        Block(text=body, block_type="paragraph", page=1, section="1. Dilution"),
+    ]
+    candidates = build_size_bounded_candidates(blocks, 200)
+
+    assert candidates[0].content.startswith("1. Dilution\n"), (
+        f"heading orphaned: first candidate is {candidates[0].content!r}"
+    )
+    # The absorb must not be bought by busting the bound it exists under.
+    assert all(c.token_count <= 200 for c in candidates), [c.token_count for c in candidates]
+
+
 def test_size_pass_still_bounds_a_run_of_headings():
     """Absorbing forward must not become a way past the token limit: a document
     that is nothing but headings still has to come out under it."""

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 
 class DocumentResponse(BaseModel):
@@ -31,8 +31,17 @@ class ChunkResponse(BaseModel):
     page: int | None
     section: str | None
     chunk_metadata: dict
+    # Read off the embedding column rather than stored separately, and a bool
+    # rather than the vector itself: 1536 floats per chunk is not something the
+    # UI can use, and a second column would be a second thing to keep true.
+    embedded: bool = Field(validation_alias="embedding")
 
     model_config = {"from_attributes": True}
+
+    @field_validator("embedded", mode="before")
+    @classmethod
+    def _embedded_from_vector(cls, value: object) -> bool:
+        return value is not None
 
 
 class BlockResponse(BaseModel):

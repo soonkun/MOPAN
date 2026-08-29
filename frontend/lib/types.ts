@@ -44,6 +44,8 @@ export interface Chunk {
   page: number | null;
   section: string | null;
   chunk_metadata: Record<string, unknown>;
+  // Derived server-side from the chunk's embedding column; see ChunkResponse.
+  embedded: boolean;
 }
 
 export interface Block {

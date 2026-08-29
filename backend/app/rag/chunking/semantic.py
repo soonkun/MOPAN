@@ -37,13 +37,17 @@ class StructureSemanticChunking(ChunkingStrategy):
     size pass's heading-orphan fix, which is where their 12-token first chunk came
     from; re-parsed today the same file yields 5 candidates, 136/119/66/124/73.
 
-    That is defensible, not a misconfiguration. Pass 1 opens a candidate at every
-    heading, so two adjacent candidates share a section only when the section was
-    long enough for the size bound to split it - which is the one place a semantic
-    merge would be repairing damage the size bound did. Neither dev document has
-    such a section (largest: 178 tokens against a 500-token limit), so every
-    adjacent pair spans a heading boundary, and low similarity across a heading is
-    what a heading is for. Sweeping the threshold down over the stored embeddings
+    That is structural, not a misconfiguration - and the merge pass can only ever
+    delete a heading boundary, never repair a size split. Pass 1 closes A and opens
+    B at piece p exactly when `A.tokens + NEWLINE_TOKENS + tokens(p) > max`, and
+    `B.tokens >= tokens(p)`; pass 2 merges exactly when
+    `A.tokens + NEWLINE_TOKENS + B.tokens <= max`. Same limit, same separator
+    constant, so the merge predicate is the negation of the split predicate: a pair
+    the size bound split can never be rejoined at any similarity. Swept
+    max_chunk_tokens 20..400 over a heading plus a 40-sentence body with cosine
+    forced to 1.0 - 381 limits, zero rejoins. Which leaves only the other case:
+    every merge this pass CAN perform joins two candidates pass 1 opened at
+    different headings. Sweeping the threshold down over the stored embeddings
     confirms it: nothing merges anywhere until 0.45, and the first merges to
     appear are "3. 방제 시기"+"4. 보호 장비" (0.45) and "3. 방제 약제별
     효과"+"4. 결론 및 제언" (0.40) - two different sections glued together. At 0.35

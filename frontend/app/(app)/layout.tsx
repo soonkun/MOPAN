@@ -17,8 +17,15 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           overflow-y-auto is load-bearing twice over. It bounds the scroll, and
           it makes the computed overflow-x `auto` too, which zeroes this flex
           item's automatic minimum size - that is what stops Task 23's wide
-          table from pushing the 256px sidebar off-screen. */}
-      <main className="flex-1 overflow-y-auto pt-12 md:pt-0">{children}</main>
+          table from pushing the 256px sidebar off-screen.
+          id="app-main" is the handle the Sidebar's drawer uses to set `inert`
+          on this element while it is open. It is not set as a JSX prop here
+          because that state lives in the Sidebar client component and this
+          layout is a server component; the id keeps the coupling greppable
+          instead of leaving a bare document.querySelector("main"). */}
+      <main id="app-main" className="flex-1 overflow-y-auto pt-12 md:pt-0">
+        {children}
+      </main>
     </div>
   );
 }

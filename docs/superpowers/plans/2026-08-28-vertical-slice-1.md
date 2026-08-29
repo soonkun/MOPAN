@@ -3440,7 +3440,7 @@ class CollectionResponse(BaseModel):
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 
 class DocumentResponse(BaseModel):
@@ -3470,8 +3470,17 @@ class ChunkResponse(BaseModel):
     page: int | None
     section: str | None
     chunk_metadata: dict
+    # Read off the embedding column rather than stored separately, and a bool
+    # rather than the vector itself: 1536 floats per chunk is not something the
+    # UI can use, and a second column would be a second thing to keep true.
+    embedded: bool = Field(validation_alias="embedding")
 
     model_config = {"from_attributes": True}
+
+    @field_validator("embedded", mode="before")
+    @classmethod
+    def _embedded_from_vector(cls, value: object) -> bool:
+        return value is not None
 
 
 class BlockResponse(BaseModel):
@@ -3792,7 +3801,10 @@ async def get_chunk(
     300-character snippet."""
     chunk = await db.get(Chunk, chunk_id)
     if chunk is None:
-        raise HTTPException(status_code=404, detail="청크를 찾을 수 없습니다.")
+        # Worded for where it is actually read: this detail renders inside the
+        # chat citation modal, which is labelled 출처. 청크 is an internal word
+        # the chat surface never uses anywhere else.
+        raise HTTPException(status_code=404, detail="출처 내용을 불러올 수 없습니다.")
     return chunk
 
 
@@ -3845,6 +3857,8 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+
+from app.models.chunk import EMBEDDING_DIM, Chunk
 
 MISSING_ID = uuid.uuid4()
 
@@ -4029,7 +4043,56 @@ async def test_every_route_requires_authentication(client, method, path):
 
 
 async def test_get_unknown_chunk_returns_404(admin_client):
-    assert (await admin_client.get(f"/api/chunks/{uuid.uuid4()}")).status_code == 404
+    response = await admin_client.get(f"/api/chunks/{uuid.uuid4()}")
+    assert response.status_code == 404
+    # The detail is user-facing: it renders in the chat citation modal, labelled
+    # 출처, when a cited chunk's document has been deleted. 청크 is internal
+    # vocabulary the chat surface uses nowhere else.
+    assert response.json()["detail"] == "출처 내용을 불러올 수 없습니다."
+
+
+async def test_chunk_response_reports_embedding_state(admin_client, db, collection_id):
+    """`embedded` is derived from the embedding column, not stored: the vector
+    itself is 1536 floats and never goes on the wire."""
+    upload = await admin_client.post(
+        "/api/documents",
+        data={"collection_id": collection_id},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+    )
+    document_id = uuid.UUID(upload.json()["id"])
+    db.add_all(
+        [
+            Chunk(
+                document_id=document_id,
+                chunk_index=0,
+                content="embedded chunk",
+                token_count=2,
+                char_count=14,
+                chunk_metadata={"strategy": "semantic"},
+                embedding=[0.0] * EMBEDDING_DIM,
+            ),
+            Chunk(
+                document_id=document_id,
+                chunk_index=1,
+                content="unembedded chunk",
+                token_count=2,
+                char_count=16,
+                chunk_metadata={},
+                embedding=None,
+            ),
+        ]
+    )
+    await db.commit()
+
+    response = await admin_client.get(f"/api/documents/{document_id}/chunks")
+    assert response.status_code == 200
+    body = response.json()
+    assert [c["embedded"] for c in body] == [True, False]
+    assert body[0]["chunk_metadata"] == {"strategy": "semantic"}
+    assert "embedding" not in body[0]
+
+    single = await admin_client.get(f"/api/chunks/{body[0]['id']}")
+    assert single.json()["embedded"] is True
 
 
 @pytest.mark.xfail(
@@ -4055,7 +4118,7 @@ async def test_document_structure_returns_parsed_blocks(admin_client, collection
 
 Run: `pytest tests/test_documents_api.py` (Postgres running)
 Note: the structure endpoint needs `get_parser`, which lands in Task 8. `get_parser` is therefore imported *inside* `get_document_structure`, not at module scope - a module-level import would stop `app.main` from importing at all and take the whole suite down with it, so xfailing the one test is not enough on its own. `test_document_structure_returns_parsed_blocks` carries `@pytest.mark.xfail(raises=ModuleNotFoundError, strict=True)`; strict means it fails the suite as an XPASS the moment Task 8 lands, so the marker cannot be forgotten. Task 8 Step 9 must drop the marker and Task 8 Step 11 must include `backend/tests/test_documents_api.py` in its `git add`.
-Expected: 21 passed, 1 xfailed
+Expected: 22 passed, 1 xfailed
 
 - [ ] **Step 9: Commit**
 
@@ -5090,9 +5153,26 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
     heading_only = False
 
     for block in blocks:
+        # A heading-only candidate has to absorb the body that follows it, so that
+        # body's FIRST piece must leave room for the heading. Splitting against the
+        # full limit instead makes heading + piece exceed it, `over_limit` fires,
+        # and the heading ships alone - the very orphan the absorb branch below
+        # exists to prevent. Measured before this: a heading plus a long paragraph
+        # under max=200 gave [4, 196, 196, 168], the 4 being the orphaned heading;
+        # sweeping body length x token limit, 350 of 1330 combinations orphaned it.
+        # The whole block takes the reduced limit, not just its first piece, which
+        # costs the later pieces the heading's own token count - single digits
+        # against a 500-token limit.
+        # ponytail: if a heading stack ever fills the limit the budget goes <1 and
+        # we fall back, accepting the orphan rather than shredding the body.
+        limit = max_chunk_tokens
+        if heading_only and current is not None:
+            budget = max_chunk_tokens - current.token_count - NEWLINE_TOKENS
+            if budget >= 1:
+                limit = budget
         # An empty or whitespace-only block would otherwise emit a zero-length
         # candidate, which costs an embedding call and retrieves nothing.
-        pieces = [p for p in split_to_token_limit(block.text, max_chunk_tokens) if p.strip()]
+        pieces = [p for p in split_to_token_limit(block.text, limit) if p.strip()]
         if not pieces:
             # ...but a heading with no text is still a section boundary, and
             # text_parser emits one for a bare "#" line. Dropping it outright
@@ -5768,13 +5848,17 @@ class StructureSemanticChunking(ChunkingStrategy):
     size pass's heading-orphan fix, which is where their 12-token first chunk came
     from; re-parsed today the same file yields 5 candidates, 136/119/66/124/73.
 
-    That is defensible, not a misconfiguration. Pass 1 opens a candidate at every
-    heading, so two adjacent candidates share a section only when the section was
-    long enough for the size bound to split it - which is the one place a semantic
-    merge would be repairing damage the size bound did. Neither dev document has
-    such a section (largest: 178 tokens against a 500-token limit), so every
-    adjacent pair spans a heading boundary, and low similarity across a heading is
-    what a heading is for. Sweeping the threshold down over the stored embeddings
+    That is structural, not a misconfiguration - and the merge pass can only ever
+    delete a heading boundary, never repair a size split. Pass 1 closes A and opens
+    B at piece p exactly when `A.tokens + NEWLINE_TOKENS + tokens(p) > max`, and
+    `B.tokens >= tokens(p)`; pass 2 merges exactly when
+    `A.tokens + NEWLINE_TOKENS + B.tokens <= max`. Same limit, same separator
+    constant, so the merge predicate is the negation of the split predicate: a pair
+    the size bound split can never be rejoined at any similarity. Swept
+    max_chunk_tokens 20..400 over a heading plus a 40-sentence body with cosine
+    forced to 1.0 - 381 limits, zero rejoins. Which leaves only the other case:
+    every merge this pass CAN perform joins two candidates pass 1 opened at
+    different headings. Sweeping the threshold down over the stored embeddings
     confirms it: nothing merges anywhere until 0.45, and the first merges to
     appear are "3. 방제 시기"+"4. 보호 장비" (0.45) and "3. 방제 약제별
     효과"+"4. 결론 및 제언" (0.40) - two different sections glued together. At 0.35
@@ -11508,17 +11592,21 @@ git commit -m "fix: OR-join simple lexemes so the sparse retriever answers real 
 - Create: `frontend/package.json`, `tsconfig.json`, `next.config.js`, `tailwind.config.ts`, `postcss.config.js`
 - Create: `frontend/app/globals.css`, `app/layout.tsx`, `app/page.tsx`, `app/login/page.tsx`, `app/register/page.tsx`
 - Create: `frontend/middleware.ts`
-- Create: `frontend/lib/api.ts`, `frontend/lib/types.ts`
+- Create: `frontend/lib/api.ts`, `frontend/lib/types.ts`, `frontend/lib/api.test.ts`
 - Create: `frontend/components/ui/ErrorBanner.tsx`
 
 **Interfaces:**
-- Produces: `apiFetch<T>(path, options?) -> Promise<T>` (same-origin relative paths, `credentials: "include"`, JSON `Content-Type` **only for string bodies**, a 401 outside `/login` and `/register` sends the browser to `/login`), `streamChat(body, onEvent) -> Promise<void>` (SSE reader), `ApiError`.
+- Produces: `apiFetch<T>(path, options?) -> Promise<T>` (same-origin relative paths, `credentials: "include"`, JSON `Content-Type` **only for string bodies**, a 401 outside `/login` and `/register` sends the browser to `/login`), `streamChat(body, onEvent, signal?) -> Promise<void>` (SSE reader), `ApiError`.
 - Produces: TS types `User, Collection, DocumentItem, Chunk, Block, Citation, Conversation, Message, ChatEvent`.
 - Produces: `middleware.ts` redirecting unauthenticated visitors to `/login`; `/` redirecting to `/chat`.
 
 Two things `apiFetch` has to get right that are easy to leave out:
 1. **A 401 must navigate, not just throw.** `middleware.ts` checks only that the cookie *exists*; the backend decides whether it is valid. When a session dies server-side — revoked from another tab, dropped by a Redis restart — the cookie is still there, middleware lets the page render, and every request then throws. Without the redirect the user is stuck on a working-looking but permanently empty shell. It must not fire on `/login` or `/register`, where a 401 means "wrong password" and belongs in the banner.
 2. **FastAPI's `detail` is not always a string.** `HTTPException` gives a string; a 422 gives a **list** of `{loc, msg, type}` — the app's own validation handler returns `{"detail": [...]}`. Reading `.detail` straight into `ApiError` renders `[object Object]` in the error banner, which is what a user typing an over-72-byte password would actually see.
+
+Two things `streamChat` has to get right that are easy to leave out, and both were live bugs:
+1. **A stream that ends without `done` or `error` must not resolve.** Those two are the only terminal frames, so end-of-body without one means the tail was cut off — a proxy or tunnel truncating it, or the ASGI server killing the generator, which is exactly the risk Task 24's cloudflared hop introduces. The read loop simply `break`ing on `done` recorded nothing about whether a terminal frame had ever arrived, so it resolved as if the answer had come: driven in headless Edge against a stub origin that emits two status frames and then closes, the page showed one bubble, no assistant message, an empty banner, an empty status line and a re-enabled 전송 button. Nothing on screen said the question had failed. Track it and throw a Korean `ApiError` instead.
+2. **The caller must be able to abort it.** Without a `signal` a stream outlives the component that started it, and the closure keeps that component's `router`. Driven, pre-fix: ask at `/chat`, click another conversation ~800 ms in, land on `/chat/c-other`, and ~3.5 s later the abandoned stream's `done` frame ran `router.replace` and the browser jumped to `/chat/c-existing` — a URL the user never chose. With the signal threaded through, the same drive stays on `/chat/c-other`. An abort rejects the pending `reader.read()` with an `AbortError`, which is what keeps rule 1 from misfiring on a deliberate abort, and is what the caller matches on to swallow it.
 
 **The single-origin decision.** The browser talks only to the Next.js origin; `next.config.js` `rewrites()` proxies `/api/*` to the backend. That one change removes four separate blockers at once: CORS never fires, `SameSite=Lax` cookies are correct (same site, not cross-site), no API URL reaches the client bundle at all, and Cloudflare Tunnel needs **one** tunnel on port 3000 instead of two random `trycloudflare` hostnames.
 
@@ -11546,7 +11634,8 @@ Five reads collapse to three, and with gzip both body reads land at 4534 ms — 
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON lib/api.test.ts"
   },
   "dependencies": {
     "next": "15.5.24",
@@ -11582,6 +11671,7 @@ Five reads collapse to three, and with gzip both body reads land at 4534 ms — 
     "esModuleInterop": true,
     "module": "esnext",
     "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "jsx": "preserve",
@@ -11673,6 +11763,14 @@ module.exports = {
 body {
   @apply bg-white text-gray-900 antialiased;
 }
+
+/* One rule for every control on every page. The UA default ring is the only
+   focus indicator this app had, and against the dropzone's dashed border it is
+   nearly invisible. Outline, not a ring shadow: no glow. */
+:focus-visible {
+  outline: 2px solid theme("colors.gray.700");
+  outline-offset: 2px;
+}
 ```
 
 - [ ] **Step 5: Write `frontend/lib/types.ts`**
@@ -11724,6 +11822,8 @@ export interface Chunk {
   page: number | null;
   section: string | null;
   chunk_metadata: Record<string, unknown>;
+  // Derived server-side from the chunk's embedding column; see ChunkResponse.
+  embedded: boolean;
 }
 
 export interface Block {
@@ -11787,11 +11887,16 @@ const API_BASE_URL = "";
 const PUBLIC_PATHS = ["/login", "/register"];
 
 export class ApiError extends Error {
-  constructor(
-    public status: number,
-    message: string,
-  ) {
+  // A plain field, not a `public status` constructor parameter property. That
+  // shorthand is the one piece of TypeScript here that is not erasable - it
+  // emits an assignment - so it was the single line stopping
+  // `node --experimental-strip-types` from importing this module, and with it
+  // the zero-dependency test in api.test.ts.
+  status: number;
+
+  constructor(status: number, message: string) {
     super(message);
+    this.status = status;
     this.name = "ApiError";
   }
 }
@@ -11897,16 +12002,35 @@ export function errorMessage(err: unknown): string {
   return "알 수 없는 오류가 발생했습니다.";
 }
 
-/** Reads the SSE stream from POST /api/chat. EventSource cannot POST. */
+/** A 200 whose body simply stops. `done` and `error` are the only two frames
+ * that end a /api/chat stream, so a reader that reaches end-of-body without
+ * having seen one was cut off mid-answer - a proxy or tunnel truncating the
+ * tail, or the ASGI server killing the generator. Without this the read loop
+ * just exited and streamChat resolved normally, so the caller cleared its
+ * spinner, re-enabled the form and rendered nothing: the question sat on screen
+ * with no answer and nothing to say it had failed. */
+const STREAM_TRUNCATED = "답변을 끝까지 받지 못했습니다. 다시 시도해 주세요.";
+
+/** Reads the SSE stream from POST /api/chat. EventSource cannot POST.
+ *
+ * `signal` aborts the fetch AND the in-flight body read. Not optional in
+ * practice: without it a stream outlives the component that started it, and the
+ * `done` frame of an abandoned answer still ran that component's
+ * `router.replace` - navigating a user who had already clicked away to a URL
+ * they never chose. An abort rejects the pending `reader.read()` with an
+ * AbortError, so an intentional abort surfaces as that and never as
+ * STREAM_TRUNCATED. */
 export async function streamChat(
   body: { conversation_id?: string | null; message: string; collection_ids?: string[] },
   onEvent: (event: ChatEvent) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/api/chat`, {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal,
   });
 
   if (!response.ok || !response.body) {
@@ -11916,6 +12040,7 @@ export async function streamChat(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let terminated = false;
 
   for (;;) {
     const { done, value } = await reader.read();
@@ -11928,12 +12053,19 @@ export async function streamChat(
       const line = frame.split("\n").find((l) => l.startsWith("data: "));
       if (!line) continue;
       try {
-        onEvent(JSON.parse(line.slice("data: ".length)) as ChatEvent);
+        const event = JSON.parse(line.slice("data: ".length)) as ChatEvent;
+        if (event.type === "done" || event.type === "error") terminated = true;
+        onEvent(event);
       } catch {
         // Ignore a malformed frame rather than killing the whole stream.
       }
     }
   }
+
+  // status 0, the XHR convention for "no HTTP status to report": the response
+  // itself was a 200 and only its body failed. ApiError rather than a bare
+  // Error because errorMessage() shows the message of nothing else.
+  if (!terminated) throw new ApiError(0, STREAM_TRUNCATED);
 }
 ```
 
@@ -12226,14 +12358,159 @@ export default function RegisterPage() {
 }
 ```
 
-- [ ] **Step 12: Verify the frontend builds**
+- [ ] **Step 12: Write `frontend/lib/api.test.ts`**
 
-Run (from `frontend/`): `npm install && npm run build && npm run typecheck`
-Expected: build completes with no TypeScript errors. Commit `package-lock.json` so the Docker image can use `npm ci`. `typecheck` must run **after** `build`, which is what generates `next-env.d.ts` and `.next/types`.
+The two `streamChat` failures above are both invisible from the outside — one
+resolves normally, the other only shows up as a navigation seconds later — so
+they get the one runnable check in the frontend. **No test runner and no new
+dependency:** `node --test` plus Node 22's own `--experimental-strip-types`
+runs a `.ts` file directly, and `fetch`, `Response` and `ReadableStream` are
+globals, so a stream is handed to `streamChat` without a server. The stub
+replaces `globalThis.fetch`, so no test here can reach a real backend or a real
+model.
 
-There is no frontend test runner in Slice 1 and none is added here; the production build plus `tsc --noEmit` is the whole check. `next lint` is deliberately absent from `package.json`: no eslint is installed, so the script would only open an interactive configuration prompt and hang.
+Two things had to give way for that, both recorded where they live:
+`ApiError`'s `public status` constructor parameter property became a plain
+field (a parameter property is the one bit of TypeScript that is not erasable,
+and it was what stopped Node from importing the module at all), and
+`tsconfig.json` gained `allowImportingTsExtensions` so `tsc --noEmit` accepts
+the `./api.ts` specifier Node needs at runtime. That is the point of paying for
+it: the required typecheck now fails if `streamChat`'s signature drifts from
+its test.
 
-- [ ] **Step 13: Commit**
+```ts
+// Run: npm test  (node --test --experimental-strip-types lib/api.test.ts)
+//
+// No test runner, no jsdom, no new dependency: `node --test` and Node's own
+// type stripping run this file, and `fetch`/`Response`/`ReadableStream` are all
+// globals in Node 22, so a stream can be handed to streamChat directly. Nothing
+// here opens a socket - the stub replaces globalThis.fetch, so no test can
+// reach a real backend or a real model.
+//
+// It covers the two failures that were invisible from the outside: a stream
+// that stops without a terminal frame, and an aborted one.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import { ApiError, streamChat } from "./api.ts";
+import type { ChatEvent } from "./types.ts";
+
+const TRUNCATED = "답변을 끝까지 받지 못했습니다. 다시 시도해 주세요.";
+
+function sse(...payloads: unknown[]): string {
+  return payloads.map((p) => `data: ${JSON.stringify(p)}\n\n`).join("");
+}
+
+/** Replaces fetch with one serving `text` as an SSE body. `holdOpen` leaves the
+ *  stream unfinished so an abort has something to interrupt; otherwise the body
+ *  ends right after `text`, which is exactly what a truncated tail looks like
+ *  from the reader's side. Returns the signal fetch was called with. */
+function stubFetch(text: string, holdOpen = false): { signal: AbortSignal | null | undefined } {
+  const seen: { signal: AbortSignal | null | undefined } = { signal: undefined };
+  globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+    seen.signal = init?.signal;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(text));
+        if (!holdOpen) {
+          controller.close();
+          return;
+        }
+        init?.signal?.addEventListener("abort", () =>
+          controller.error(new DOMException("aborted", "AbortError")),
+        );
+      },
+    });
+    return new Response(stream, { status: 200 });
+  }) as unknown as typeof fetch;
+  return seen;
+}
+
+function collect(): { events: ChatEvent[]; onEvent: (e: ChatEvent) => void } {
+  const events: ChatEvent[] = [];
+  return { events, onEvent: (e) => events.push(e) };
+}
+
+const ASK = { conversation_id: null, message: "질문" };
+
+test("a stream that ends without a terminal frame rejects instead of resolving", async () => {
+  stubFetch(sse({ type: "status", status: "searching" }, { type: "status", status: "answering" }));
+  const { events, onEvent } = collect();
+
+  const err = await streamChat(ASK, onEvent).then(
+    () => null,
+    (e: unknown) => e,
+  );
+
+  // Before the fix this resolved: two status frames delivered, no answer, no
+  // error, and the caller cleared its spinner as if the answer had arrived.
+  assert.ok(err instanceof ApiError, `expected ApiError, got ${String(err)}`);
+  assert.equal(err.message, TRUNCATED);
+  assert.equal(events.length, 2);
+});
+
+test("a stream ending in done resolves", async () => {
+  stubFetch(
+    sse(
+      { type: "status", status: "answering" },
+      { type: "done", conversation_id: "c1", content: "답변", citations: [] },
+    ),
+  );
+  const { events, onEvent } = collect();
+
+  await streamChat(ASK, onEvent);
+
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ["status", "done"],
+  );
+});
+
+test("an error frame is terminal too - the caller already showed it", async () => {
+  stubFetch(sse({ type: "error", detail: "답변 생성에 실패했습니다." }));
+  const { events, onEvent } = collect();
+
+  await streamChat(ASK, onEvent);
+
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ["error"],
+  );
+});
+
+test("the signal reaches fetch, and an abort surfaces as AbortError", async () => {
+  const seen = stubFetch(sse({ type: "status", status: "searching" }), true);
+  const controller = new AbortController();
+  const { events, onEvent } = collect();
+
+  const pending = streamChat(ASK, onEvent, controller.signal).then(
+    () => null,
+    (e: unknown) => e,
+  );
+  // Let the first frame land before pulling the rug out, so the abort really
+  // does interrupt a read in progress.
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  controller.abort();
+  const err = (await pending) as { name?: string; message?: string } | null;
+
+  assert.equal(seen.signal, controller.signal);
+  // AbortError, NOT the truncation message: an abort is deliberate, and the
+  // caller swallows it rather than putting a red banner on the conversation the
+  // user just moved to.
+  assert.equal(err?.name, "AbortError");
+  assert.notEqual(err?.message, TRUNCATED);
+  assert.equal(events.length, 1);
+});
+```
+
+- [ ] **Step 13: Verify the frontend builds**
+
+Run (from `frontend/`): `npm install && npm run build && npm run typecheck && npm test`
+Expected: build completes with no TypeScript errors, 4 tests pass. Commit `package-lock.json` so the Docker image can use `npm ci`. `typecheck` must run **after** `build`, which is what generates `next-env.d.ts` and `.next/types`.
+
+The only frontend tests in Slice 1 are Step 12's four, and they cover `streamChat` alone — there is no component test runner, no jsdom and no React testing library, so everything rendered is covered by the production build plus `tsc --noEmit` and nothing else. `next lint` is deliberately absent from `package.json`: no eslint is installed, so the script would only open an interactive configuration prompt and hang.
+
+- [ ] **Step 14: Commit**
 
 ```bash
 git add .gitignore .env.example docker-compose.yml frontend/Dockerfile
@@ -12378,6 +12655,70 @@ the toggle occupies (8,8)–(39,38); without the padding the heading sits at
 heading moves to (24,72) and the overlap is gone. Above `md` the sidebar is
 docked, the toggle is hidden, and the padding is 0.
 
+**The two background fetches are `Promise.allSettled`, not `Promise.all`.**
+They are independent — one names the user, the other fills the history list —
+and `Promise.all` rejects the pair on the first failure, so `setUser` never ran
+when only the list failed. Measured with `/api/auth/me` answering 200 and
+`/api/conversations` answering 500: the footer identity line was still the
+`\u00a0` placeholder, i.e. a transient history-list error rendered the user as
+logged out. With `allSettled` the same stubbed pair renders
+`tester@example.com · 관리자` in the footer, the Korean detail in the history
+region's `role="alert"`, and no conversation links. The list is still applied in
+the same tick as the user, so `conversations` never passes through `[]` and the
+empty state still never flashes — re-measured by polling the live DOM against a
+400 ms-delayed list: **0 of 94** samples held "아직 대화가 없습니다.", 80 held a
+real title. The failure that reaches `error` is the list's, checked before the
+user's, because that banner renders in the history region where a list error
+belongs.
+
+**The current conversation is marked, and every active link carries
+`aria-current="page"`.** Which conversation you are in is the one piece of state
+a history list exists to convey, and the history links carried a hover style
+only: measured at `/chat/c3`, every link's computed background was
+`rgba(0, 0, 0, 0)` and the document held **0** `aria-current` nodes. The active
+link now takes the same `bg-gray-200 font-medium` the nav links already used —
+measured `rgb(229, 231, 235)` / weight 500 against `rgba(0, 0, 0, 0)` / weight
+400 for its siblings — and `aria-current="page"` goes on both the history link
+and the `/chat`-or-`/documents` nav link, whose state had been background colour
+alone and therefore invisible to a screen reader. Exactly one node carries it on
+any page (`/chat/c3` → the history link; `/chat` → the nav link), because a
+conversation URL never equals a nav href.
+
+**`open` is cleared when the docked nav applies.** `md:hidden` only stops the
+drawer from being *displayed* above 768px; the state stayed `true`, so resizing
+390 → 1280 → 390 with the drawer open measured `drawerDisplay: "flex"` with the
+toggle absent on the way back down — the drawer was up without the user
+reopening it. One `matchMedia("(min-width: 768px)")` listener closes it, and the
+same round trip now measures the drawer absent, the toggle present, `inert`
+released and `body` overflow back to `visible`. 768px duplicates Tailwind's `md`
+in JS on purpose; there is no cheaper way to read a breakpoint the classes own.
+
+**`aria-modal="true"` is backed by `inert` on `<main>` and a `body` scroll
+lock.** Measured with the drawer open before the fix: `mainInert: false`,
+`mainAriaHidden: null`, 4 focusable elements still inside `<main>`, and
+`bodyOverflow: "visible"` — so the page behind a `fixed` overlay scrolled on
+touch. The JS Tab trap covered the keyboard case and modern AT honours
+`aria-modal`, which is why this was structural rather than broken. `<main>`
+carries `id="app-main"` and the drawer effect sets the attribute with
+`setAttribute` rather than a JSX `inert` prop: `open` lives in the Sidebar
+client component while `<main>` is rendered by the `(app)` layout, which is a
+server component, so there is no prop to pass without turning the layout into a
+client component. Both are released in the effect cleanup — verified after
+Escape, after a backdrop click, and after navigating from inside the drawer.
+
+**The `<nav>` is named and the focus trap is not selector-brittle.** The landmark
+announced as an unnamed "navigation" because `MOPAN` is a `<div>`, so it takes
+`aria-label="주 메뉴"`. `대화 기록` deliberately stays a `<div>` rather than
+becoming a heading: the sidebar precedes `<main>` in the DOM, so a heading here
+would sit above every page's `<h1>` and break the heading order Tasks 22 and 23
+were measured against. The trap's `querySelectorAll` was `"a, button"` — correct
+for today's sidebar and wrong the moment a history-search `<input>` lands inside
+the dialog, at which point the computed `last` is no longer the real last stop
+and Tab escapes; it is now the usual focusable set. The measured drawer contents
+are unchanged by the widening (7 focusables with 3 conversations, close button
+last), and every `<button>` in the file carries `type="button"`, the default
+being `submit`.
+
 - [ ] **Step 1: Write `frontend/components/layout/Sidebar.tsx`**
 
 ```tsx
@@ -12389,6 +12730,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { Conversation, User } from "@/lib/types";
+
+// The trap has to enumerate everything focusable inside the drawer, not just
+// what happens to be in it today: with "a, button" the first <input> added to
+// the sidebar (a history filter) becomes an element the trap does not know
+// about, so `last` stops being the real last stop and Tab escapes the dialog.
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 export default function Sidebar() {
   const pathname = usePathname();
@@ -12409,18 +12757,26 @@ export default function Sidebar() {
   const toggleRef = useRef<HTMLButtonElement>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
 
+  // allSettled, not all: these two requests are independent and Promise.all
+  // rejects the pair on the first failure, so a 500 from /api/conversations
+  // threw away a perfectly good /api/auth/me and left the footer showing the
+  // blank U+00A0 placeholder - a transient history-list error made the user
+  // look logged out. Each result is now applied on its own. The list is still set
+  // in the same tick as the user, so `conversations` stays null - never [] -
+  // until the fetch resolves, which is what keeps the empty state from
+  // flashing. The conversations failure is checked first because the banner
+  // renders in the history region, where its own error belongs.
   const load = useCallback(async () => {
-    try {
-      const [me, list] = await Promise.all([
-        apiFetch<User>("/api/auth/me"),
-        apiFetch<Conversation[]>("/api/conversations"),
-      ]);
-      setUser(me);
-      setConversations(list);
-      setError(null);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
+    const [me, list] = await Promise.allSettled([
+      apiFetch<User>("/api/auth/me"),
+      apiFetch<Conversation[]>("/api/conversations"),
+    ]);
+    if (me.status === "fulfilled") setUser(me.value);
+    if (list.status === "fulfilled") setConversations(list.value);
+    const failed = [list, me].find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    setError(failed ? errorMessage(failed.reason) : null);
   }, []);
 
   // pathname is a dependency on purpose: the chat page creates a conversation
@@ -12439,7 +12795,19 @@ export default function Sidebar() {
   // Escape closes it, and focus returns to the toggle that opened it.
   useEffect(() => {
     if (!open) return;
-    drawerRef.current?.querySelector<HTMLElement>("a, button")?.focus();
+    drawerRef.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
+    // aria-modal="true" is a promise that nothing outside the dialog is
+    // reachable; `inert` is what makes it true for the DOM rather than only
+    // for AT that honours the attribute - measured with the drawer open,
+    // <main> still held 4 focusable elements. It is set from here with
+    // setAttribute rather than as a JSX prop because `open` lives in this
+    // client component while <main> is rendered by (app)/layout.tsx, which is
+    // a server component. The body lock is the pointer half of the same bug:
+    // the drawer is `fixed`, so without it the page behind scrolls on touch.
+    const main = document.getElementById("app-main");
+    main?.setAttribute("inert", "");
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setOpen(false);
@@ -12448,7 +12816,7 @@ export default function Sidebar() {
       // The drawer covers the page but does not remove it from the tab order,
       // so without this Tab walks into content hidden behind the overlay.
       if (event.key !== "Tab") return;
-      const focusable = drawerRef.current?.querySelectorAll<HTMLElement>("a, button");
+      const focusable = drawerRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE);
       if (!focusable?.length) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
@@ -12463,9 +12831,24 @@ export default function Sidebar() {
     document.addEventListener("keydown", onKeyDown);
     return () => {
       document.removeEventListener("keydown", onKeyDown);
+      main?.removeAttribute("inert");
+      document.body.style.overflow = previousOverflow;
       toggleRef.current?.focus();
     };
   }, [open]);
+
+  // `md:hidden` only stops the drawer from being *displayed* above 768px; the
+  // state stays true, so resizing 390 -> 1280 -> 390 with it open brought the
+  // drawer back on the way down without the user reopening it. 768px is
+  // Tailwind's `md`, the same breakpoint the classes use.
+  useEffect(() => {
+    const docked = window.matchMedia("(min-width: 768px)");
+    const onChange = () => {
+      if (docked.matches) setOpen(false);
+    };
+    docked.addEventListener("change", onChange);
+    return () => docked.removeEventListener("change", onChange);
+  }, []);
 
   async function handleLogout() {
     // Navigate only on success. A `finally` here lands the user on /login after
@@ -12492,20 +12875,32 @@ export default function Sidebar() {
   ];
 
   const content = (
-    <nav className="flex h-full w-64 flex-col border-r border-gray-200 bg-gray-50 p-3">
+    // aria-label because the MOPAN line above is a <div>, so the landmark had
+    // no accessible name and announced as a bare "navigation". 대화 기록 stays
+    // a <div> rather than becoming a heading: the sidebar precedes <main> in
+    // the DOM, so a heading here would sit above every page's <h1>.
+    <nav
+      aria-label="주 메뉴"
+      className="flex h-full w-64 flex-col border-r border-gray-200 bg-gray-50 p-3"
+    >
       <div className="mb-4 px-3 text-sm font-semibold text-gray-500">MOPAN</div>
-      {navLinks.map((link) => (
-        <Link
-          key={link.href}
-          href={link.href}
-          onClick={() => setOpen(false)}
-          className={`rounded px-3 py-2 text-sm hover:bg-gray-200 ${
-            pathname === link.href ? "bg-gray-200 font-medium" : ""
-          }`}
-        >
-          {link.label}
-        </Link>
-      ))}
+      {navLinks.map((link) => {
+        const active = pathname === link.href;
+        return (
+          <Link
+            key={link.href}
+            href={link.href}
+            onClick={() => setOpen(false)}
+            // The background alone said "you are here" to sighted users only.
+            aria-current={active ? "page" : undefined}
+            className={`rounded px-3 py-2 text-sm hover:bg-gray-200 ${
+              active ? "bg-gray-200 font-medium" : ""
+            }`}
+          >
+            {link.label}
+          </Link>
+        );
+      })}
 
       <div className="mt-4 flex-1 overflow-y-auto">
         <div className="mb-1 px-3 text-xs tracking-wide text-gray-400">대화 기록</div>
@@ -12513,16 +12908,26 @@ export default function Sidebar() {
         {!error && conversations?.length === 0 && (
           <p className="px-3 py-2 text-xs text-gray-400">아직 대화가 없습니다.</p>
         )}
-        {conversations?.map((c) => (
-          <Link
-            key={c.id}
-            href={`/chat/${c.id}`}
-            onClick={() => setOpen(false)}
-            className="block truncate rounded px-3 py-2 text-sm hover:bg-gray-200"
-          >
-            {c.title}
-          </Link>
-        ))}
+        {/* Which conversation you are in is the one piece of state a history
+            list exists to convey, and the links carried only a hover style:
+            measured at /chat/c3, every link's computed background was
+            rgba(0,0,0,0). Same treatment as the nav links above. */}
+        {conversations?.map((c) => {
+          const active = pathname === `/chat/${c.id}`;
+          return (
+            <Link
+              key={c.id}
+              href={`/chat/${c.id}`}
+              onClick={() => setOpen(false)}
+              aria-current={active ? "page" : undefined}
+              className={`block truncate rounded px-3 py-2 text-sm hover:bg-gray-200 ${
+                active ? "bg-gray-200 font-medium" : ""
+              }`}
+            >
+              {c.title}
+            </Link>
+          );
+        })}
       </div>
 
       <div className="mt-3 border-t border-gray-200 pt-3">
@@ -12534,7 +12939,11 @@ export default function Sidebar() {
           {user ? `${user.email}${user.role === "admin" ? " · 관리자" : ""}` : "\u00a0"}
         </div>
         {logoutError && <ErrorBanner message={logoutError} />}
+        {/* type="button" on every button in this file: the default is
+            "submit", which is a live bug the moment one of them ends up
+            inside a <form>. */}
         <button
+          type="button"
           onClick={() => void handleLogout()}
           className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm hover:bg-gray-200"
         >
@@ -12553,6 +12962,7 @@ export default function Sidebar() {
       {!open && (
         <button
           ref={toggleRef}
+          type="button"
           aria-label="메뉴 열기"
           aria-controls="sidebar-drawer"
           className="fixed left-2 top-2 z-20 rounded border border-gray-300 bg-white px-2 py-1 text-sm md:hidden"
@@ -12575,6 +12985,7 @@ export default function Sidebar() {
           {/* A button, not a div: this overlay is the only way to close the
               drawer, and as a div it is unreachable without a pointer. */}
           <button
+            type="button"
             aria-label="메뉴 닫기"
             className="flex-1 bg-black/30"
             onClick={() => setOpen(false)}
@@ -12608,8 +13019,15 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           overflow-y-auto is load-bearing twice over. It bounds the scroll, and
           it makes the computed overflow-x `auto` too, which zeroes this flex
           item's automatic minimum size - that is what stops Task 23's wide
-          table from pushing the 256px sidebar off-screen. */}
-      <main className="flex-1 overflow-y-auto pt-12 md:pt-0">{children}</main>
+          table from pushing the 256px sidebar off-screen.
+          id="app-main" is the handle the Sidebar's drawer uses to set `inert`
+          on this element while it is open. It is not set as a JSX prop here
+          because that state lives in the Sidebar client component and this
+          layout is a server component; the id keeps the coupling greppable
+          instead of leaving a bare document.querySelector("main"). */}
+      <main id="app-main" className="flex-1 overflow-y-auto pt-12 md:pt-0">
+        {children}
+      </main>
     </div>
   );
 }
@@ -12644,6 +13062,9 @@ git commit -m "feat: responsive sidebar with user info and logout"
 **Interfaces:**
 - Consumes: `streamChat`, `apiFetch`, `Message`/`Citation`/`ChatEvent` (Task 20), backend `/api/chat` (SSE) and `/api/conversations/{id}/messages`.
 - Produces: `<ChatWindow initialConversationId />` — shows each status frame as it arrives, renders `[n]` markers **inline** as clickable badges, and opens a modal that fetches the full chunk from `/api/chunks/{id}`.
+- **The in-flight answer is aborted when this window stops being the one on screen**, via an `AbortController` handed to `streamChat` and a cleanup effect keyed on `initialConversationId` — not on `[]`. `/chat/{a}` → `/chat/{b}` is the same component in the same slot, so React re-renders it with a new prop rather than unmounting it, and a `[]`-keyed cleanup never runs for the case that actually reproduced: ask at `/chat`, click another conversation ~800 ms in, and ~3.5 s later the abandoned stream's `done` frame ran this component's `router.replace` and threw the browser onto `/chat/c-existing`, a URL the user never chose. Driven in headless Edge against a stub origin, before and after. The `catch` matches on `err.name === "AbortError"` and swallows it: an abort is this component's own doing, and rendering it would put a red banner on the conversation the user just opened, about the one they just left.
+- **The answer is announced through its own off-screen `aria-live` region, not through the status line and not through `role="log"` on the transcript.** The status line is *emptied* the moment the answer lands, so a screen reader heard 문서 검색 중… then 답변 생성 중… then nothing — the one thing the user asked for was never announced. `role="log"` on the transcript container is the obvious fix and is wrong here: that container is filled by the transcript fetch *after* mount, so it re-announces the entire history on arrival at `/chat/{id}`. The separate region only ever changes on `done`. Measured: asking inside an existing conversation leaves it holding the answer while the status line is empty. The first answer of a *brand new* conversation is the exception — `router.replace` reloads the document ~76 ms later and takes the region with it, the same reload the answer bubble itself survives only by being refetched.
+- **An `error` frame removes the optimistic user bubble; a thrown error does not.** On an `error` frame the backend has rolled the conversation back — `test_llm_failure_is_reported_as_an_error_event` asserts the conversation is left empty — so leaving the question on screen shows something that is not saved anywhere and is silently lost on the next reload. A truncated stream or a dropped connection is the opposite case: the backend may well have committed the exchange, so the bubble stays.
 - The status only streams because `/api/chat` sends `Cache-Control: no-cache, no-transform` (Task 18). Without `no-transform`, Next's default `compress: true` gzips the rewrite proxy's copy of the stream for any client that sends `Accept-Encoding: gzip` — which every browser does — gzip buffers it, and with frames this small (~45 bytes) nothing reaches the client until the answer is finished — measured at 4534 ms against an origin whose last frame left at 4500 ms. The status frames then arrive in the same read as the answer, so `STATUS_LABEL` has nothing left to announce and this component looks like it hangs for the whole retrieval-plus-model round trip. Measured through `next start`, cumulative socket-read times, and note the condition: a probe that omits `Accept-Encoding` sees no compression and no problem, which is how Task 20 first got this wrong. See the comment on that `StreamingResponse`.
 - **The URL change after the first answer uses `router.replace`, and `window.history.replaceState` was tried and rejected.** Measured on `next start`, same clicks, POST `/api/chat` answered by a stubbed SSE body: `router.replace` costs a full document load here (`performance.timeOrigin` changes, `/api/auth/me` and `/api/conversations` are requested again), so the answer is off screen for ~76 ms over loopback — rAF frames of the new document at 31, 53 and 63 ms hold no messages, the transcript is back at 80 ms. Back, Forward and reload are all correct after it: Back re-requests `/api/conversations/{id}/messages` and restores the conversation. `replaceState` removes that reload and the Sidebar still refetches, but Next patches `replaceState` to re-run its router restore with the tree it already has, so the history entry keeps the `/chat` new-chat tree under a `/chat/{id}` URL. Measured on that variant: the next sidebar click degrades to a full page load, and Back then restores that entry making **no request at all** — it showed the two messages left in memory for a conversation that has four, and nothing ever refetches. A 76 ms flicker is cosmetic; a history entry whose page disagrees with its URL is not.
 
@@ -12720,10 +13141,12 @@ export default function CitationBadge({ citation }: { citation: Citation }) {
       >
         <div className="p-4">
           <div className="mb-2 flex items-start justify-between gap-4">
-            {/* No `uppercase`: this line is a filename plus Korean labels. */}
-            <p className="text-xs tracking-wide text-gray-400">
+            {/* h2, not p: it is the modal's only title, and without a heading a
+                screen reader landing on 닫기 has nothing to jump back to.
+                No `uppercase`: this line is a filename plus Korean labels. */}
+            <h2 className="text-xs tracking-wide text-gray-400">
               [{citation.index}] {label(citation)}
-            </p>
+            </h2>
             <button
               type="button"
               onClick={() => dialogRef.current?.close()}
@@ -12817,8 +13240,8 @@ import MessageBubble from "@/components/chat/MessageBubble";
 import type { Message } from "@/lib/types";
 
 const STATUS_LABEL: Record<string, string> = {
-  searching: "문서 검색 중...",
-  answering: "답변 생성 중...",
+  searching: "문서 검색 중…",
+  answering: "답변 생성 중…",
 };
 
 export default function ChatWindow({
@@ -12843,7 +13266,23 @@ export default function ChatWindow({
   const [status, setStatus] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The answer, repeated into an off-screen live region - see the markup below
+  // for why the transcript itself cannot be the live region.
+  const [announcement, setAnnouncement] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Abort an answer still in flight when this window stops being the one on
+  // screen. Without it streamChat outlived the component and its closure kept
+  // the old `router`: ask at /chat, click another conversation mid-answer, and
+  // ~3.5s later the abandoned stream's `done` frame ran router.replace and
+  // threw the browser onto a conversation the user never chose.
+  //
+  // Keyed on initialConversationId, not []: /chat/{a} -> /chat/{b} is the same
+  // component in the same slot, so React re-renders it with a new prop rather
+  // than unmounting it, and a []-keyed cleanup never runs for the case that
+  // actually reproduced.
+  useEffect(() => () => abortRef.current?.abort(), [initialConversationId]);
 
   useEffect(() => {
     if (!initialConversationId) return;
@@ -12862,13 +13301,17 @@ export default function ChatWindow({
     if (!input.trim() || sending) return;
 
     const question = input;
+    const pendingId = `temp-${Date.now()}`;
+    const controller = new AbortController();
+    abortRef.current = controller;
     setInput("");
     setError(null);
+    setAnnouncement("");
     setSending(true);
     setMessages((prev) => [
       ...prev,
       {
-        id: `temp-${Date.now()}`,
+        id: pendingId,
         role: "user",
         content: question,
         citations: [],
@@ -12882,25 +13325,38 @@ export default function ChatWindow({
       // answer() is a single non-streaming llm_provider.chat() call so `token` is
       // never emitted at all (it is Slice 3's), and the `citations` frame carries
       // the identical array that `done` carries one frame later.
-      await streamChat({ conversation_id: conversationId, message: question }, (event) => {
-        if (event.type === "status") {
-          setStatus(STATUS_LABEL[event.status] ?? null);
-        } else if (event.type === "error") {
-          setError(event.detail);
-        } else if (event.type === "done") {
-          newConversationId = event.conversation_id;
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: `assistant-${Date.now()}`,
-              role: "assistant",
-              content: event.content,
-              citations: event.citations,
-              created_at: new Date().toISOString(),
-            },
-          ]);
-        }
-      });
+      await streamChat(
+        { conversation_id: conversationId, message: question },
+        (event) => {
+          if (event.type === "status") {
+            setStatus(STATUS_LABEL[event.status] ?? null);
+          } else if (event.type === "error") {
+            setError(event.detail);
+            // Take the question back off screen with it. An `error` frame means
+            // the backend rolled the conversation back - a brand new one is
+            // deleted, an existing one keeps neither message - so leaving the
+            // bubble up shows a question that is not saved anywhere, and the
+            // next reload silently loses it. Only this branch does it: a
+            // truncated stream or a dropped connection throws instead, and
+            // there the backend may well have committed the exchange.
+            setMessages((prev) => prev.filter((m) => m.id !== pendingId));
+          } else if (event.type === "done") {
+            newConversationId = event.conversation_id;
+            setAnnouncement(event.content);
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `assistant-${Date.now()}`,
+                role: "assistant",
+                content: event.content,
+                citations: event.citations,
+                created_at: new Date().toISOString(),
+              },
+            ]);
+          }
+        },
+        controller.signal,
+      );
 
       if (!conversationId && newConversationId) {
         setConversationId(newConversationId);
@@ -12932,7 +13388,14 @@ export default function ChatWindow({
         router.replace(`/chat/${newConversationId}`);
       }
     } catch (err) {
-      setError(errorMessage(err));
+      // An abort is this component's own doing, not a failure: the user moved
+      // on. Rendering it would put a red banner on the conversation they just
+      // opened, about the one they just left. Name check rather than
+      // `instanceof DOMException` - fetch and the stream reader are free to
+      // reject with either, and only the name is guaranteed.
+      if ((err as { name?: string } | null)?.name !== "AbortError") {
+        setError(errorMessage(err));
+      }
     } finally {
       setStatus(null);
       setSending(false);
@@ -12959,6 +13422,25 @@ export default function ChatWindow({
             전송 and the answer landing, and it is never focused. */}
         <p aria-live="polite" className="text-sm text-gray-400">
           {status}
+        </p>
+        {/* The answer itself, off screen, because a screen reader was told
+            문서 검색 중… and 답변 생성 중… and then nothing at all - the status
+            line is emptied the moment the answer lands, so the one thing the
+            user asked for was never announced.
+
+            A separate region rather than role="log" on the transcript above:
+            that container is populated by the transcript fetch AFTER mount, so
+            a live region wrapping it re-announces every message in the history
+            on arrival at /chat/{id}. This one only ever changes on `done`.
+
+            Measured in headless Edge against a stub origin: asking inside an
+            existing conversation leaves this region holding the answer while
+            the status line is empty. The very FIRST answer of a brand new
+            conversation is the exception - router.replace reloads the document
+            ~76ms later (see below) and takes this region with it, the same
+            reload the answer bubble itself survives only by being refetched. */}
+        <p aria-live="polite" className="sr-only">
+          {announcement}
         </p>
         <div ref={bottomRef} />
       </div>
@@ -13066,7 +13548,13 @@ git commit -m "feat: streaming chat UI with inline clickable citations"
 
 **Interfaces:**
 - Consumes: `apiFetch` (Task 20), backend `/api/documents`, `/api/documents/{id}`, `/api/collections`, `/api/documents/{id}/chunks`, `/api/documents/{id}/structure`, `/api/auth/me`.
-- Produces: `<UploadDropzone collectionId onUploaded />` (uses `apiFetch` with `FormData` — the Content-Type fix in Task 20 makes the raw-`fetch` workaround unnecessary), `<DocumentTable documents />` with **all eight required columns**, `<StructureViewer blocks />`, `<ChunkViewer chunks />`. The filter box lives on the page, not in the table: `DocumentTable` takes documents alone and the page passes it an already-filtered list. `DocumentTable` also exports `FILE_TYPE_LABEL` (the dropzone's `accept` list and hint text derive from it) and `TERMINAL` (the page's poll gate and the table's 대기 시간 note share one definition of "still working").
+- Produces: `<UploadDropzone collectionId onUploaded />` (uses `apiFetch` with `FormData` — the Content-Type fix in Task 20 makes the raw-`fetch` workaround unnecessary), `<DocumentTable documents />`, `<StructureViewer blocks />`, `<ChunkViewer chunks />`.
+
+**Columns — eight, against the requirement's nine.** The requirement (§10) lists 문서명, Collection, 파일형식, 등록자, 등록일, Chunk 수, **Embedding 상태**, **Index 상태**, 크기. This table ships one 상태 column in place of the last two, deliberately: backend/app/rag/pipeline.py writes each chunk's vector and its row in a single `vector_store.upsert`, and both retrieval indexes (`ix_chunks_embedding` HNSW, `ix_chunks_content_tsv` GIN over the generated `content_tsv`) are Postgres-maintained on that insert. There is no state in Slice 1 where a document is embedded but not indexed, so two columns would always show the same value and one of them would be decoration. Split them when a separate indexing stage exists (a remote vector store, or an index build the pipeline can report on independently); the `DocumentStatus` union is the place a new stage would surface.
+
+**Search AND filter**, the requirement's 검색 및 필터, are three controls on the page, not in the table: a free-text box over 문서명/분류/등록자, a 분류 filter, and a 상태 filter. `DocumentTable` takes documents alone and the page passes it an already-filtered list. The 분류 filter goes to the server (`GET /api/documents?collection_id=`) so the 3s poll does not re-download the other collections' rows; 상태 has no such parameter and is filtered client-side. The upload target `<select>` is a separate control labelled 등록할 분류 — overloading it would make choosing where to upload also change what the table shows. `DocumentTable` exports `FILE_TYPE_LABEL` (the dropzone's `accept` list, hint text and client-side precheck derive from it), `STATUS_LABEL` (the 상태 filter's options) and `TERMINAL` (the page's poll gate and the table's 대기 시간 note share one definition of "still working").
+
+**Per-chunk fields** in `<ChunkViewer />` are the requirement's seven: Chunk ID, Page, Section, Token 수, Character 수, Metadata, Embedding 상태. `chunk_index` is 0-based on the wire and displayed 1-based. `Embedding 상태` reaches the client as `ChunkResponse.embedded`, derived from the chunk's `embedding` column (Task 7) rather than stored — the vector itself is 1536 floats and never goes on the wire.
 
 - [ ] **Step 0: Raise the rewrite proxy's request-body cap**
 
@@ -13077,11 +13565,15 @@ anywhere in a step's body is read as "a later task amends this file". Backtickin
 here moves Task 20 Step 3's whole-file block into the excusable list, where a mismatch
 is reported SUPERSEDED and the run still exits 0. Measured on this plan: with the
 backticks in place, flipping `reactStrictMode` to false on disk gave SUPERSEDED, 142
-blocks, exit 0; with them removed, the same mutation gave DRIFT 1, exit 1. Naming the
-path in this step's header would not add that excuse (the prose already did) - it
-would only start comparing this step's own blocks against the whole file on disk,
-which a 3-line config fragment can never match. That is why the fragment is described
-in prose below instead of fenced.
+blocks, exit 0; with them removed, the same mutation gave DRIFT 1, exit 1. The step
+HEADER is read the same way - rule 3 builds `last_mention` from header and prose
+together with no verb filter - so backticking the path in this step's header alone,
+with the prose left bare, reproduces the same disarming exactly: measured, the same
+`reactStrictMode` mutation went from DRIFT 1 / exit 1 to SUPERSEDED / exit 0. And it
+buys nothing in exchange: `blocks compared against disk` stayed at 142 either way,
+because this step's verb ("Raise") carries no file claim and the step has no fenced
+block to compare. That is why the path stays bare in both the header and the prose,
+and why the fragment is described in prose below instead of fenced.
 
 
 Next's rewrite proxy buffers each request body through its own router process and caps it at **10MB** by default, so this task's upload was dead on arrival for any file between the proxy cap and the backend's 50MB limit. Measured, before the change: a 12MB `POST /api/documents` returned `HTTP 500 Internal Server Error` through the Next origin and `HTTP 400 {"detail":"지원하지 않는 파일 형식입니다: .exe"}` when sent to `127.0.0.1:8000` directly, with `Request body exceeded 10MB for /api/documents` and `socket hang up` in the dev server log. Same result under `next start`, because the cap lives in `resolve-routes.js`, which both modes run. After the change the 12MB body reaches the backend in both modes, and a 51MB upload gets the backend's own `413 파일이 최대 크기 50MB를 초과했습니다.` instead of a generic 500. Add an `experimental` object to the exported config in frontend/next.config.js setting `middlewareClientMaxBodySize` to `"64mb"`. Not reproduced as a fenced block here: nothing would compare it (the step's verb carries no file claim, and giving it a header path would re-arm the rule-3 excuse this step exists to avoid), and Task 20, Step 3 already carries the full file - including this key and the comment explaining it - as a checked whole-file block.
@@ -13099,10 +13591,27 @@ import type { DocumentItem } from "@/lib/types";
 
 // One source of truth with the table's 형식 column, so the dropzone can never
 // advertise a format the table has no label for, or vice versa.
-const ACCEPT = Object.keys(FILE_TYPE_LABEL)
-  .map((ext) => `.${ext}`)
-  .join(",");
+const EXTENSIONS = Object.keys(FILE_TYPE_LABEL);
+const ACCEPT = EXTENSIONS.map((ext) => `.${ext}`).join(",");
 const FORMATS = Object.values(FILE_TYPE_LABEL).join(", ");
+
+// Must match settings.max_upload_size_mb. backend/app/documents/validation.py is
+// the real boundary; this only spares the user a 60MB upload that ends in a 413,
+// and `accept` above cannot do it because it filters the picker, not a drop.
+const MAX_UPLOAD_MB = 50;
+
+function rejection(file: File): string | null {
+  // Same rule as validation.py's extension_of: no dot means no extension, not
+  // "the whole name is the extension".
+  const extension = file.name.includes(".") ? file.name.split(".").pop()!.toLowerCase() : "";
+  if (!EXTENSIONS.includes(extension)) {
+    return `지원하지 않는 파일 형식입니다: .${extension}`;
+  }
+  if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+    return `파일이 최대 크기 ${MAX_UPLOAD_MB}MB를 초과했습니다.`;
+  }
+  return null;
+}
 
 export default function UploadDropzone({
   collectionId,
@@ -13117,6 +13626,11 @@ export default function UploadDropzone({
   const [busy, setBusy] = useState(false);
 
   async function uploadFile(file: File) {
+    const refusal = rejection(file);
+    if (refusal) {
+      setError(refusal);
+      return;
+    }
     setError(null);
     setBusy(true);
     const formData = new FormData();
@@ -13198,9 +13712,9 @@ import Link from "next/link";
 import type { DocumentItem, DocumentStatus } from "@/lib/types";
 
 // Keyed on the DocumentStatus union, not `string`, so a new backend status is a
-// compile error here rather than a raw enum value on screen. The `?? raw`
-// fallback at the call site still covers a backend deployed ahead of this.
-const STATUS_LABEL: Record<DocumentStatus, string> = {
+// compile error here rather than a raw enum value on screen. Exported because the
+// page's 상태 filter builds its options from it.
+export const STATUS_LABEL: Record<DocumentStatus, string> = {
   uploaded: "대기 중",
   parsing: "파싱 중",
   chunking: "청킹 중",
@@ -13209,12 +13723,9 @@ const STATUS_LABEL: Record<DocumentStatus, string> = {
   failed: "실패",
 };
 
-// Raw enum values are not labels. `uppercase` on doc.file_type printed DOCX and
-// MD at the user; the five values are the ALLOWED_EXTENSIONS set in
+// The five keys are the ALLOWED_EXTENSIONS set in
 // backend/app/documents/validation.py. Exported because UploadDropzone derives
-// both its `accept` attribute and its hint text from it: the same page used to
-// offer "PDF, DOCX, TXT, MD, HTML" in the dropzone and render 웹문서/마크다운 in
-// this column, two vocabularies for one set of formats, kept in step by hand.
+// its `accept` attribute, its hint text and its client-side precheck from it.
 export const FILE_TYPE_LABEL: Record<string, string> = {
   pdf: "PDF",
   docx: "워드",
@@ -13227,11 +13738,10 @@ export const FILE_TYPE_LABEL: Record<string, string> = {
 // "still working" means instead of keeping two copies of the same set.
 export const TERMINAL = new Set<DocumentStatus>(["indexed", "failed"]);
 
-// A frontend timeout would lie about a genuinely slow document, but elapsed time
-// is a fact. `updated_at` is bumped by every _set_status commit in the pipeline,
-// so this reads "no progress for N minutes", not "N minutes since upload" - which
-// is what turns a job stuck at 대기 중 (no worker running, say) from a silent hang
-// into something the user can act on.
+// `updated_at` is bumped by every _set_status commit in the pipeline, so this
+// reads "no progress for N minutes", not "N minutes since upload" - which is what
+// turns a job stuck at 대기 중 (no worker running, say) into something the user
+// can act on.
 function StalledNote({ doc }: { doc: DocumentItem }) {
   if (TERMINAL.has(doc.status)) return null;
   const minutes = Math.floor((Date.now() - Date.parse(doc.updated_at)) / 60000);
@@ -13258,14 +13768,19 @@ export default function DocumentTable({ documents }: { documents: DocumentItem[]
       <table className="w-full text-left text-sm">
         <thead>
           <tr className="border-b border-gray-200 text-gray-500">
-            <th className="py-2 pr-3">문서명</th>
-            <th className="py-2 pr-3">분류</th>
-            <th className="py-2 pr-3">형식</th>
-            <th className="py-2 pr-3">등록자</th>
-            <th className="py-2 pr-3">등록일</th>
-            <th className="py-2 pr-3 text-right">청크 수</th>
-            <th className="py-2 pr-3">상태</th>
-            <th className="py-2 text-right">크기</th>
+            <th scope="col" className="py-2 pr-3">문서명</th>
+            <th scope="col" className="py-2 pr-3">분류</th>
+            <th scope="col" className="py-2 pr-3">형식</th>
+            <th scope="col" className="py-2 pr-3">등록자</th>
+            <th scope="col" className="py-2 pr-3">등록일</th>
+            <th scope="col" className="py-2 pr-3 text-right">청크 수</th>
+            {/* One 상태 column, not the spec's separate Embedding/Index pair.
+                backend/app/rag/pipeline.py writes the vector and its row in one
+                vector_store.upsert, and both retrieval indexes are Postgres-
+                maintained on that insert, so no document can be embedded but not
+                indexed. Two columns would always show the same value. */}
+            <th scope="col" className="py-2 pr-3">상태</th>
+            <th scope="col" className="py-2 text-right">크기</th>
           </tr>
         </thead>
         <tbody>
@@ -13273,17 +13788,10 @@ export default function DocumentTable({ documents }: { documents: DocumentItem[]
             <tr key={doc.id} className="border-b border-gray-100 hover:bg-gray-50">
               <td className="py-2 pr-3">
                 {/* Bounded, or the 문서명 column starves every column after it.
-                    Measured at 1280x900 with a 244-character filename in the
-                    corpus: unbounded, the table ran 2627px wide, this cell took
-                    2261px and the 상태 cell was left 28px, rendering the failure
-                    reason as a 15px-wide, 416px-tall ribbon of single characters.
-                    With max-w-xs the same page is 976/333/193px and the reason
-                    reads normally at 180x32px. Nothing escaped its cell either
-                    way - the page stayed 1280px - so this is legibility, not
-                    containment: the reason is unreadable exactly when a hostile
-                    filename is present, which is the case it was made visible
-                    for. `title` keeps the full name available on hover; the
-                    untruncated text is still in the DOM for a screen reader. */}
+                    Measured at 1280x900 with a 244-character filename: unbounded,
+                    this cell took 2261px and left the 상태 cell 28px, rendering
+                    the failure reason as a 15px-wide ribbon of single characters;
+                    with max-w-xs the same reason reads normally at 180x32px. */}
                 <Link
                   href={`/documents/${doc.id}`}
                   title={doc.filename}
@@ -13307,9 +13815,7 @@ export default function DocumentTable({ documents }: { documents: DocumentItem[]
                 </span>
                 {/* Why a document failed only ever appears here: the upload POST
                     returned 202 long before the worker failed, so no banner on
-                    the page ever sees this message. It was a `title` tooltip,
-                    which is pointer-only - a keyboard or screen reader user got
-                    "실패" and no reason at all. */}
+                    the page ever sees this message. */}
                 {doc.error_message && (
                   <p className="mt-0.5 max-w-xs text-xs text-red-600">{doc.error_message}</p>
                 )}
@@ -13339,11 +13845,19 @@ export default function ChunkViewer({ chunks }: { chunks: Chunk[] }) {
       {chunks.map((chunk) => (
         <div key={chunk.id} className="rounded border border-gray-200 p-3 text-sm">
           <div className="mb-1 flex flex-wrap gap-3 text-xs text-gray-400">
-            <span>청크 {chunk.chunk_index}</span>
+            {/* chunk_index is 0-based on the wire; the heading is not. */}
+            <span>청크 {chunk.chunk_index + 1}</span>
+            <span className="break-all">ID {chunk.id}</span>
             {chunk.section && <span>소제목: {chunk.section}</span>}
             {chunk.page !== null && <span>{chunk.page}쪽</span>}
             <span>토큰 {chunk.token_count}개</span>
             <span>{chunk.char_count}자</span>
+            <span>{chunk.embedded ? "임베딩 완료" : "임베딩 없음"}</span>
+            {Object.keys(chunk.chunk_metadata).length > 0 && (
+              <span className="break-all">
+                메타데이터 {JSON.stringify(chunk.chunk_metadata)}
+              </span>
+            )}
           </div>
           <p className="whitespace-pre-wrap text-gray-800">{chunk.content}</p>
         </div>
@@ -13404,7 +13918,7 @@ export default function StructureViewer({ blocks }: { blocks: Block[] }) {
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
-import DocumentTable, { TERMINAL } from "@/components/documents/DocumentTable";
+import DocumentTable, { STATUS_LABEL, TERMINAL } from "@/components/documents/DocumentTable";
 import UploadDropzone from "@/components/documents/UploadDropzone";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { Collection, DocumentItem, User } from "@/lib/types";
@@ -13414,20 +13928,25 @@ export default function DocumentsPage() {
   const [collections, setCollections] = useState<Collection[]>([]);
   const [selectedCollectionId, setSelectedCollectionId] = useState("");
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
-  const [filter, setFilter] = useState("");
+  const [search, setSearch] = useState("");
+  const [collectionFilter, setCollectionFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
   // Empty is not the same as not-loaded - the same defect the detail page's
-  // `loading` flag fixes, and this is the third file in this codebase to have had
-  // it (Sidebar and ChatWindow were the first two). Measured at 2000ms latency /
-  // 50kB/s against a database holding four documents: without the flag 문서가
-  // 없습니다. was on screen from the first paint and still there 6s later; with
-  // it, 불러오는 중... paints instead and 문서가 없습니다. never appears.
+  // `loading` flag fixes. Measured at 2000ms latency / 50kB/s against a database
+  // holding four documents: without the flag 문서가 없습니다. was on screen from
+  // the first paint and still there 6s later; with it, 불러오는 중... paints
+  // instead and 문서가 없습니다. never appears.
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const documentsRef = useRef<DocumentItem[]>([]);
 
+  // The collection filter goes to the server - GET /api/documents takes
+  // collection_id - so a filtered view does not download the other collections'
+  // rows on every 3s poll. Status has no such parameter and is filtered below.
   const loadDocuments = useCallback(async () => {
+    const query = collectionFilter ? `?collection_id=${collectionFilter}` : "";
     try {
-      const items = await apiFetch<DocumentItem[]>("/api/documents");
+      const items = await apiFetch<DocumentItem[]>(`/api/documents${query}`);
       documentsRef.current = items;
       setDocuments(items);
       setError(null);
@@ -13436,7 +13955,7 @@ export default function DocumentsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [collectionFilter]);
 
   useEffect(() => {
     // No client-side write on page load: the default collection is seeded when
@@ -13452,6 +13971,11 @@ export default function DocumentsPage() {
         if (cols.length > 0) setSelectedCollectionId(cols[0].id);
       })
       .catch((err) => setError(errorMessage(err)));
+  }, []);
+
+  // Separate from the effect above so changing the collection filter refetches
+  // the documents alone, not /api/auth/me and /api/collections with them.
+  useEffect(() => {
     void loadDocuments();
   }, [loadDocuments]);
 
@@ -13467,15 +13991,17 @@ export default function DocumentsPage() {
   }, [loadDocuments]);
 
   const visible = useMemo(() => {
-    const needle = filter.trim().toLowerCase();
-    if (!needle) return documents;
-    return documents.filter(
-      (d) =>
+    const needle = search.trim().toLowerCase();
+    return documents.filter((d) => {
+      if (statusFilter && d.status !== statusFilter) return false;
+      if (!needle) return true;
+      return (
         d.filename.toLowerCase().includes(needle) ||
         (d.collection_name ?? "").toLowerCase().includes(needle) ||
-        (d.uploader_email ?? "").toLowerCase().includes(needle),
-    );
-  }, [documents, filter]);
+        (d.uploader_email ?? "").toLowerCase().includes(needle)
+      );
+    });
+  }, [documents, search, statusFilter]);
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 p-6">
@@ -13493,7 +14019,7 @@ export default function DocumentsPage() {
                 points at nothing names nothing, so the select was announced
                 only as a combo box with no idea what it selects. */}
             <label htmlFor="collection-select" className="text-sm text-gray-500">
-              분류
+              등록할 분류
             </label>
             <select
               id="collection-select"
@@ -13516,13 +14042,47 @@ export default function DocumentsPage() {
         <p className="text-sm text-gray-500">문서 등록은 관리자만 할 수 있습니다.</p>
       )}
 
-      <input
-        value={filter}
-        onChange={(e) => setFilter(e.target.value)}
-        placeholder="문서명 / 분류 / 등록자 검색"
-        aria-label="문서명 / 분류 / 등록자 검색"
-        className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
-      />
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="문서명 / 분류 / 등록자 검색"
+          aria-label="문서명 / 분류 / 등록자 검색"
+          className="min-w-56 flex-1 rounded border border-gray-300 px-3 py-2 text-sm"
+        />
+        <label htmlFor="collection-filter" className="text-sm text-gray-500">
+          분류 필터
+        </label>
+        <select
+          id="collection-filter"
+          value={collectionFilter}
+          onChange={(e) => setCollectionFilter(e.target.value)}
+          className="rounded border border-gray-300 px-2 py-2 text-sm"
+        >
+          <option value="">전체</option>
+          {collections.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+        <label htmlFor="status-filter" className="text-sm text-gray-500">
+          상태 필터
+        </label>
+        <select
+          id="status-filter"
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          className="rounded border border-gray-300 px-2 py-2 text-sm"
+        >
+          <option value="">전체</option>
+          {Object.entries(STATUS_LABEL).map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </div>
       {loading ? (
         <p className="py-8 text-center text-sm text-gray-400">불러오는 중...</p>
       ) : (
@@ -13562,12 +14122,20 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
   // failure - and the (0) counts in the headings then jump to their real values.
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Swallowed here rather than failing the whole page - the chunks are still
+  // worth showing - but kept, not discarded: the backend distinguishes
+  // 원본 파일을 더 이상 찾을 수 없습니다. from a parser failure, and a bare
+  // `catch(() => [])` replaced both with StructureViewer's generic empty state.
+  const [structureError, setStructureError] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([
       apiFetch<DocumentItem>(`/api/documents/${id}`),
       apiFetch<Chunk[]>(`/api/documents/${id}/chunks`),
-      apiFetch<Block[]>(`/api/documents/${id}/structure`).catch(() => [] as Block[]),
+      apiFetch<Block[]>(`/api/documents/${id}/structure`).catch((err) => {
+        setStructureError(errorMessage(err));
+        return [] as Block[];
+      }),
     ])
       .then(([item, chunkList, blockList]) => {
         setDoc(item);
@@ -13595,21 +14163,31 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
           threshold), so nothing on this screen currently demonstrates semantic
           merging. See StructureSemanticChunking's docstring for the sweep.
 
-          aria-label on the scroll panes, and tabIndex with it. The label is the
-          real gain: without it a pane focused from the keyboard announces
-          nothing. The tabIndex is belt and braces - measured on Edge/Chromium
-          152, a plain scroller with no tabIndex and no focusable content took Tab
-          focus and scrolled on PageDown (0 -> 105), because Chrome 127+ ships
-          keyboard-focusable scrollers; it is Safari that still needs it. */}
+          role/aria-label/tabIndex on the scroll panes. The label is the real
+          gain: without it a pane focused from the keyboard announces nothing.
+          The role is what makes the label legal - ARIA in HTML forbids
+          aria-label on a bare div's implicit `generic` role, and a name on a
+          generic element may be dropped outright. The tabIndex is belt and
+          braces - measured on Edge/Chromium 152, a plain scroller with no
+          tabIndex and no focusable content took Tab focus and scrolled on
+          PageDown (0 -> 105), because Chrome 127+ ships keyboard-focusable
+          scrollers; it is Safari that still needs it. */}
       {error === null && (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <section className="rounded border border-gray-200 p-4">
             <h2 className="mb-3 text-sm font-medium text-gray-500">
               원문 구조{!loading && ` (${blocks.length})`}
             </h2>
-            <div tabIndex={0} aria-label="원문 구조" className="max-h-[70vh] overflow-y-auto">
+            <div
+              role="region"
+              tabIndex={0}
+              aria-label="원문 구조"
+              className="max-h-[70vh] overflow-y-auto"
+            >
               {loading ? (
                 <p className="text-sm text-gray-400">불러오는 중...</p>
+              ) : structureError ? (
+                <p className="text-sm text-red-600">{structureError}</p>
               ) : (
                 <StructureViewer blocks={blocks} />
               )}
@@ -13619,7 +14197,12 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
             <h2 className="mb-3 text-sm font-medium text-gray-500">
               청크 목록{!loading && ` (${chunks.length})`}
             </h2>
-            <div tabIndex={0} aria-label="청크 목록" className="max-h-[70vh] overflow-y-auto">
+            <div
+              role="region"
+              tabIndex={0}
+              aria-label="청크 목록"
+              className="max-h-[70vh] overflow-y-auto"
+            >
               {loading ? (
                 <p className="text-sm text-gray-400">불러오는 중...</p>
               ) : (
@@ -13638,6 +14221,15 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
 
 Run (from `frontend/`): `npm run build`
 Expected: build completes with no TypeScript errors
+
+Known flake, hit on the first run of this step: the build fails during
+"Collecting page data" with `PageNotFoundError: Cannot find module for page:
+/_not-found`, and the same for `/documents/[id]`, while both `page.js` files
+are present under `.next/server/app/`. The cause is a stale `.next` left behind
+by the dev servers and builds of Tasks 20-22, whose manifests predate this
+task's routes; an immediate rerun succeeded. Delete the directory rather than
+diagnosing the error - `rm -rf frontend/.next` before running the build. It is a
+cache and nothing in the repo depends on its contents.
 
 - [ ] **Step 7: Commit**
 

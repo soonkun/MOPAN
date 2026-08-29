@@ -260,7 +260,10 @@ async def get_chunk(
     300-character snippet."""
     chunk = await db.get(Chunk, chunk_id)
     if chunk is None:
-        raise HTTPException(status_code=404, detail="청크를 찾을 수 없습니다.")
+        # Worded for where it is actually read: this detail renders inside the
+        # chat citation modal, which is labelled 출처. 청크 is an internal word
+        # the chat surface never uses anywhere else.
+        raise HTTPException(status_code=404, detail="출처 내용을 불러올 수 없습니다.")
     return chunk
 
 

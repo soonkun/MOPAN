@@ -7,6 +7,13 @@ import { apiFetch, errorMessage } from "@/lib/api";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { Conversation, User } from "@/lib/types";
 
+// The trap has to enumerate everything focusable inside the drawer, not just
+// what happens to be in it today: with "a, button" the first <input> added to
+// the sidebar (a history filter) becomes an element the trap does not know
+// about, so `last` stops being the real last stop and Tab escapes the dialog.
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 export default function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
@@ -26,18 +33,26 @@ export default function Sidebar() {
   const toggleRef = useRef<HTMLButtonElement>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
 
+  // allSettled, not all: these two requests are independent and Promise.all
+  // rejects the pair on the first failure, so a 500 from /api/conversations
+  // threw away a perfectly good /api/auth/me and left the footer showing the
+  // blank U+00A0 placeholder - a transient history-list error made the user
+  // look logged out. Each result is now applied on its own. The list is still set
+  // in the same tick as the user, so `conversations` stays null - never [] -
+  // until the fetch resolves, which is what keeps the empty state from
+  // flashing. The conversations failure is checked first because the banner
+  // renders in the history region, where its own error belongs.
   const load = useCallback(async () => {
-    try {
-      const [me, list] = await Promise.all([
-        apiFetch<User>("/api/auth/me"),
-        apiFetch<Conversation[]>("/api/conversations"),
-      ]);
-      setUser(me);
-      setConversations(list);
-      setError(null);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
+    const [me, list] = await Promise.allSettled([
+      apiFetch<User>("/api/auth/me"),
+      apiFetch<Conversation[]>("/api/conversations"),
+    ]);
+    if (me.status === "fulfilled") setUser(me.value);
+    if (list.status === "fulfilled") setConversations(list.value);
+    const failed = [list, me].find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    setError(failed ? errorMessage(failed.reason) : null);
   }, []);
 
   // pathname is a dependency on purpose: the chat page creates a conversation
@@ -56,7 +71,19 @@ export default function Sidebar() {
   // Escape closes it, and focus returns to the toggle that opened it.
   useEffect(() => {
     if (!open) return;
-    drawerRef.current?.querySelector<HTMLElement>("a, button")?.focus();
+    drawerRef.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
+    // aria-modal="true" is a promise that nothing outside the dialog is
+    // reachable; `inert` is what makes it true for the DOM rather than only
+    // for AT that honours the attribute - measured with the drawer open,
+    // <main> still held 4 focusable elements. It is set from here with
+    // setAttribute rather than as a JSX prop because `open` lives in this
+    // client component while <main> is rendered by (app)/layout.tsx, which is
+    // a server component. The body lock is the pointer half of the same bug:
+    // the drawer is `fixed`, so without it the page behind scrolls on touch.
+    const main = document.getElementById("app-main");
+    main?.setAttribute("inert", "");
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setOpen(false);
@@ -65,7 +92,7 @@ export default function Sidebar() {
       // The drawer covers the page but does not remove it from the tab order,
       // so without this Tab walks into content hidden behind the overlay.
       if (event.key !== "Tab") return;
-      const focusable = drawerRef.current?.querySelectorAll<HTMLElement>("a, button");
+      const focusable = drawerRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE);
       if (!focusable?.length) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
@@ -80,9 +107,24 @@ export default function Sidebar() {
     document.addEventListener("keydown", onKeyDown);
     return () => {
       document.removeEventListener("keydown", onKeyDown);
+      main?.removeAttribute("inert");
+      document.body.style.overflow = previousOverflow;
       toggleRef.current?.focus();
     };
   }, [open]);
+
+  // `md:hidden` only stops the drawer from being *displayed* above 768px; the
+  // state stays true, so resizing 390 -> 1280 -> 390 with it open brought the
+  // drawer back on the way down without the user reopening it. 768px is
+  // Tailwind's `md`, the same breakpoint the classes use.
+  useEffect(() => {
+    const docked = window.matchMedia("(min-width: 768px)");
+    const onChange = () => {
+      if (docked.matches) setOpen(false);
+    };
+    docked.addEventListener("change", onChange);
+    return () => docked.removeEventListener("change", onChange);
+  }, []);
 
   async function handleLogout() {
     // Navigate only on success. A `finally` here lands the user on /login after
@@ -109,20 +151,32 @@ export default function Sidebar() {
   ];
 
   const content = (
-    <nav className="flex h-full w-64 flex-col border-r border-gray-200 bg-gray-50 p-3">
+    // aria-label because the MOPAN line above is a <div>, so the landmark had
+    // no accessible name and announced as a bare "navigation". 대화 기록 stays
+    // a <div> rather than becoming a heading: the sidebar precedes <main> in
+    // the DOM, so a heading here would sit above every page's <h1>.
+    <nav
+      aria-label="주 메뉴"
+      className="flex h-full w-64 flex-col border-r border-gray-200 bg-gray-50 p-3"
+    >
       <div className="mb-4 px-3 text-sm font-semibold text-gray-500">MOPAN</div>
-      {navLinks.map((link) => (
-        <Link
-          key={link.href}
-          href={link.href}
-          onClick={() => setOpen(false)}
-          className={`rounded px-3 py-2 text-sm hover:bg-gray-200 ${
-            pathname === link.href ? "bg-gray-200 font-medium" : ""
-          }`}
-        >
-          {link.label}
-        </Link>
-      ))}
+      {navLinks.map((link) => {
+        const active = pathname === link.href;
+        return (
+          <Link
+            key={link.href}
+            href={link.href}
+            onClick={() => setOpen(false)}
+            // The background alone said "you are here" to sighted users only.
+            aria-current={active ? "page" : undefined}
+            className={`rounded px-3 py-2 text-sm hover:bg-gray-200 ${
+              active ? "bg-gray-200 font-medium" : ""
+            }`}
+          >
+            {link.label}
+          </Link>
+        );
+      })}
 
       <div className="mt-4 flex-1 overflow-y-auto">
         <div className="mb-1 px-3 text-xs tracking-wide text-gray-400">대화 기록</div>
@@ -130,16 +184,26 @@ export default function Sidebar() {
         {!error && conversations?.length === 0 && (
           <p className="px-3 py-2 text-xs text-gray-400">아직 대화가 없습니다.</p>
         )}
-        {conversations?.map((c) => (
-          <Link
-            key={c.id}
-            href={`/chat/${c.id}`}
-            onClick={() => setOpen(false)}
-            className="block truncate rounded px-3 py-2 text-sm hover:bg-gray-200"
-          >
-            {c.title}
-          </Link>
-        ))}
+        {/* Which conversation you are in is the one piece of state a history
+            list exists to convey, and the links carried only a hover style:
+            measured at /chat/c3, every link's computed background was
+            rgba(0,0,0,0). Same treatment as the nav links above. */}
+        {conversations?.map((c) => {
+          const active = pathname === `/chat/${c.id}`;
+          return (
+            <Link
+              key={c.id}
+              href={`/chat/${c.id}`}
+              onClick={() => setOpen(false)}
+              aria-current={active ? "page" : undefined}
+              className={`block truncate rounded px-3 py-2 text-sm hover:bg-gray-200 ${
+                active ? "bg-gray-200 font-medium" : ""
+              }`}
+            >
+              {c.title}
+            </Link>
+          );
+        })}
       </div>
 
       <div className="mt-3 border-t border-gray-200 pt-3">
@@ -151,7 +215,11 @@ export default function Sidebar() {
           {user ? `${user.email}${user.role === "admin" ? " · 관리자" : ""}` : "\u00a0"}
         </div>
         {logoutError && <ErrorBanner message={logoutError} />}
+        {/* type="button" on every button in this file: the default is
+            "submit", which is a live bug the moment one of them ends up
+            inside a <form>. */}
         <button
+          type="button"
           onClick={() => void handleLogout()}
           className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm hover:bg-gray-200"
         >
@@ -170,6 +238,7 @@ export default function Sidebar() {
       {!open && (
         <button
           ref={toggleRef}
+          type="button"
           aria-label="메뉴 열기"
           aria-controls="sidebar-drawer"
           className="fixed left-2 top-2 z-20 rounded border border-gray-300 bg-white px-2 py-1 text-sm md:hidden"
@@ -192,6 +261,7 @@ export default function Sidebar() {
           {/* A button, not a div: this overlay is the only way to close the
               drawer, and as a div it is unreachable without a pointer. */}
           <button
+            type="button"
             aria-label="메뉴 닫기"
             className="flex-1 bg-black/30"
             onClick={() => setOpen(false)}

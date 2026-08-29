@@ -123,9 +123,26 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
     heading_only = False
 
     for block in blocks:
+        # A heading-only candidate has to absorb the body that follows it, so that
+        # body's FIRST piece must leave room for the heading. Splitting against the
+        # full limit instead makes heading + piece exceed it, `over_limit` fires,
+        # and the heading ships alone - the very orphan the absorb branch below
+        # exists to prevent. Measured before this: a heading plus a long paragraph
+        # under max=200 gave [4, 196, 196, 168], the 4 being the orphaned heading;
+        # sweeping body length x token limit, 350 of 1330 combinations orphaned it.
+        # The whole block takes the reduced limit, not just its first piece, which
+        # costs the later pieces the heading's own token count - single digits
+        # against a 500-token limit.
+        # ponytail: if a heading stack ever fills the limit the budget goes <1 and
+        # we fall back, accepting the orphan rather than shredding the body.
+        limit = max_chunk_tokens
+        if heading_only and current is not None:
+            budget = max_chunk_tokens - current.token_count - NEWLINE_TOKENS
+            if budget >= 1:
+                limit = budget
         # An empty or whitespace-only block would otherwise emit a zero-length
         # candidate, which costs an embedding call and retrieves nothing.
-        pieces = [p for p in split_to_token_limit(block.text, max_chunk_tokens) if p.strip()]
+        pieces = [p for p in split_to_token_limit(block.text, limit) if p.strip()]
         if not pieces:
             # ...but a heading with no text is still a section boundary, and
             # text_parser emits one for a bare "#" line. Dropping it outright

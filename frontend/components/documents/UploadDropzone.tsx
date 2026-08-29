@@ -8,10 +8,27 @@ import type { DocumentItem } from "@/lib/types";
 
 // One source of truth with the table's 형식 column, so the dropzone can never
 // advertise a format the table has no label for, or vice versa.
-const ACCEPT = Object.keys(FILE_TYPE_LABEL)
-  .map((ext) => `.${ext}`)
-  .join(",");
+const EXTENSIONS = Object.keys(FILE_TYPE_LABEL);
+const ACCEPT = EXTENSIONS.map((ext) => `.${ext}`).join(",");
 const FORMATS = Object.values(FILE_TYPE_LABEL).join(", ");
+
+// Must match settings.max_upload_size_mb. backend/app/documents/validation.py is
+// the real boundary; this only spares the user a 60MB upload that ends in a 413,
+// and `accept` above cannot do it because it filters the picker, not a drop.
+const MAX_UPLOAD_MB = 50;
+
+function rejection(file: File): string | null {
+  // Same rule as validation.py's extension_of: no dot means no extension, not
+  // "the whole name is the extension".
+  const extension = file.name.includes(".") ? file.name.split(".").pop()!.toLowerCase() : "";
+  if (!EXTENSIONS.includes(extension)) {
+    return `지원하지 않는 파일 형식입니다: .${extension}`;
+  }
+  if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+    return `파일이 최대 크기 ${MAX_UPLOAD_MB}MB를 초과했습니다.`;
+  }
+  return null;
+}
 
 export default function UploadDropzone({
   collectionId,
@@ -26,6 +43,11 @@ export default function UploadDropzone({
   const [busy, setBusy] = useState(false);
 
   async function uploadFile(file: File) {
+    const refusal = rejection(file);
+    if (refusal) {
+      setError(refusal);
+      return;
+    }
     setError(null);
     setBusy(true);
     const formData = new FormData();

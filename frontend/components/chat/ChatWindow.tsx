@@ -8,8 +8,8 @@ import MessageBubble from "@/components/chat/MessageBubble";
 import type { Message } from "@/lib/types";
 
 const STATUS_LABEL: Record<string, string> = {
-  searching: "문서 검색 중...",
-  answering: "답변 생성 중...",
+  searching: "문서 검색 중…",
+  answering: "답변 생성 중…",
 };
 
 export default function ChatWindow({
@@ -34,7 +34,23 @@ export default function ChatWindow({
   const [status, setStatus] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The answer, repeated into an off-screen live region - see the markup below
+  // for why the transcript itself cannot be the live region.
+  const [announcement, setAnnouncement] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Abort an answer still in flight when this window stops being the one on
+  // screen. Without it streamChat outlived the component and its closure kept
+  // the old `router`: ask at /chat, click another conversation mid-answer, and
+  // ~3.5s later the abandoned stream's `done` frame ran router.replace and
+  // threw the browser onto a conversation the user never chose.
+  //
+  // Keyed on initialConversationId, not []: /chat/{a} -> /chat/{b} is the same
+  // component in the same slot, so React re-renders it with a new prop rather
+  // than unmounting it, and a []-keyed cleanup never runs for the case that
+  // actually reproduced.
+  useEffect(() => () => abortRef.current?.abort(), [initialConversationId]);
 
   useEffect(() => {
     if (!initialConversationId) return;
@@ -53,13 +69,17 @@ export default function ChatWindow({
     if (!input.trim() || sending) return;
 
     const question = input;
+    const pendingId = `temp-${Date.now()}`;
+    const controller = new AbortController();
+    abortRef.current = controller;
     setInput("");
     setError(null);
+    setAnnouncement("");
     setSending(true);
     setMessages((prev) => [
       ...prev,
       {
-        id: `temp-${Date.now()}`,
+        id: pendingId,
         role: "user",
         content: question,
         citations: [],
@@ -73,25 +93,38 @@ export default function ChatWindow({
       // answer() is a single non-streaming llm_provider.chat() call so `token` is
       // never emitted at all (it is Slice 3's), and the `citations` frame carries
       // the identical array that `done` carries one frame later.
-      await streamChat({ conversation_id: conversationId, message: question }, (event) => {
-        if (event.type === "status") {
-          setStatus(STATUS_LABEL[event.status] ?? null);
-        } else if (event.type === "error") {
-          setError(event.detail);
-        } else if (event.type === "done") {
-          newConversationId = event.conversation_id;
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: `assistant-${Date.now()}`,
-              role: "assistant",
-              content: event.content,
-              citations: event.citations,
-              created_at: new Date().toISOString(),
-            },
-          ]);
-        }
-      });
+      await streamChat(
+        { conversation_id: conversationId, message: question },
+        (event) => {
+          if (event.type === "status") {
+            setStatus(STATUS_LABEL[event.status] ?? null);
+          } else if (event.type === "error") {
+            setError(event.detail);
+            // Take the question back off screen with it. An `error` frame means
+            // the backend rolled the conversation back - a brand new one is
+            // deleted, an existing one keeps neither message - so leaving the
+            // bubble up shows a question that is not saved anywhere, and the
+            // next reload silently loses it. Only this branch does it: a
+            // truncated stream or a dropped connection throws instead, and
+            // there the backend may well have committed the exchange.
+            setMessages((prev) => prev.filter((m) => m.id !== pendingId));
+          } else if (event.type === "done") {
+            newConversationId = event.conversation_id;
+            setAnnouncement(event.content);
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `assistant-${Date.now()}`,
+                role: "assistant",
+                content: event.content,
+                citations: event.citations,
+                created_at: new Date().toISOString(),
+              },
+            ]);
+          }
+        },
+        controller.signal,
+      );
 
       if (!conversationId && newConversationId) {
         setConversationId(newConversationId);
@@ -123,7 +156,14 @@ export default function ChatWindow({
         router.replace(`/chat/${newConversationId}`);
       }
     } catch (err) {
-      setError(errorMessage(err));
+      // An abort is this component's own doing, not a failure: the user moved
+      // on. Rendering it would put a red banner on the conversation they just
+      // opened, about the one they just left. Name check rather than
+      // `instanceof DOMException` - fetch and the stream reader are free to
+      // reject with either, and only the name is guaranteed.
+      if ((err as { name?: string } | null)?.name !== "AbortError") {
+        setError(errorMessage(err));
+      }
     } finally {
       setStatus(null);
       setSending(false);
@@ -150,6 +190,25 @@ export default function ChatWindow({
             전송 and the answer landing, and it is never focused. */}
         <p aria-live="polite" className="text-sm text-gray-400">
           {status}
+        </p>
+        {/* The answer itself, off screen, because a screen reader was told
+            문서 검색 중… and 답변 생성 중… and then nothing at all - the status
+            line is emptied the moment the answer lands, so the one thing the
+            user asked for was never announced.
+
+            A separate region rather than role="log" on the transcript above:
+            that container is populated by the transcript fetch AFTER mount, so
+            a live region wrapping it re-announces every message in the history
+            on arrival at /chat/{id}. This one only ever changes on `done`.
+
+            Measured in headless Edge against a stub origin: asking inside an
+            existing conversation leaves this region holding the answer while
+            the status line is empty. The very FIRST answer of a brand new
+            conversation is the exception - router.replace reloads the document
+            ~76ms later (see below) and takes this region with it, the same
+            reload the answer bubble itself survives only by being refetched. */}
+        <p aria-live="polite" className="sr-only">
+          {announcement}
         </p>
         <div ref={bottomRef} />
       </div>

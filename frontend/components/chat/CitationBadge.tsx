@@ -66,10 +66,12 @@ export default function CitationBadge({ citation }: { citation: Citation }) {
       >
         <div className="p-4">
           <div className="mb-2 flex items-start justify-between gap-4">
-            {/* No `uppercase`: this line is a filename plus Korean labels. */}
-            <p className="text-xs tracking-wide text-gray-400">
+            {/* h2, not p: it is the modal's only title, and without a heading a
+                screen reader landing on 닫기 has nothing to jump back to.
+                No `uppercase`: this line is a filename plus Korean labels. */}
+            <h2 className="text-xs tracking-wide text-gray-400">
               [{citation.index}] {label(citation)}
-            </p>
+            </h2>
             <button
               type="button"
               onClick={() => dialogRef.current?.close()}

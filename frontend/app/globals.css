@@ -7,3 +7,11 @@
 body {
   @apply bg-white text-gray-900 antialiased;
 }
+
+/* One rule for every control on every page. The UA default ring is the only
+   focus indicator this app had, and against the dropzone's dashed border it is
+   nearly invisible. Outline, not a ring shadow: no glow. */
+:focus-visible {
+  outline: 2px solid theme("colors.gray.700");
+  outline-offset: 2px;
+}
