@@ -7910,7 +7910,7 @@ def chunk_to_evidence(chunk: RetrievedChunk) -> Evidence:
 ```python
 import uuid
 
-from sqlalchemy import func, select, text
+from sqlalchemy import ARRAY, Text, bindparam, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chunk import Chunk
@@ -7947,27 +7947,48 @@ from app.models.document import Document
 # It also cost a 482-heap-block scan at 20k rows, 9.9ms against 0.05ms.
 #
 # Korean function words get the same treatment from KOREAN_STOPWORDS, because
-# the english dictionary does not know them: without it '이 병은 어떻게
-# 방제합니까?' matched only chunks made of '이/그/것/어떻게' and put them at rank
-# 1, and 2 of 4 natural Korean questions were outranked by that noise. With it,
-# 4 of 4 rank the right chunk first and the josa-mismatch probes abstain.
+# the english dictionary does not know them: without it '그것은 어떻게 하는
+# 것입니까?' matched only chunks made of '그/것은/어떻게/하는' and put them at
+# rank 1, and natural Korean questions were outranked by that noise. With it
+# they rank the right chunk first and the josa-mismatch probes abstain.
+#
+# Two entries were REMOVED after measurement. Neither may come back without a
+# new measurement, because both are content words in a real query:
+#   '방법은' is 방법 + the topic marker - a noun, not a function word. Listed,
+#     it deleted the only discriminating term in '안전사용 방법은'.
+#   '이' is the demonstrative AND 이 = louse, a real pest on an agriculture
+#     platform. Listed, '이 방제 약제' filtered down to lexemes the target
+#     document does not carry and returned [] - the sparse half contributed
+#     nothing at all. Unlisted, the demonstrative can put a function-word chunk
+#     into the sparse ranking, which is the softer failure of the two: the
+#     query's other lexemes and the entire dense half still compete, whereas
+#     [] is total. Pinned by
+#     test_a_content_word_that_looks_like_a_function_word_is_still_searchable.
 #
 # quote_literal is what keeps user text out of tsquery syntax: '|', '&', '!',
 # ':*', '(' and a bare quote all arrive as ordinary characters inside a quoted
 # lexeme. The lexemes themselves come from to_tsvector, never from the raw
-# string, and query_text is a bound parameter, so nothing user-supplied is ever
-# concatenated into SQL.
+# string, and both query_text and the stopword list are bound parameters, so
+# nothing at all is concatenated into this SQL. The list used to be f-string
+# interpolated three lines below this claim; that was safe only because every
+# entry happened to be quote-free Hangul, and `= ANY(:ko_stopwords)` is the
+# same length and survives someone making the list configurable.
 #
 # ponytail: hand-listed Korean stopwords, because Postgres ships no Korean
 # dictionary and a .stop file would need container filesystem plumbing. It only
 # covers free-standing function words - josa are glued to the noun and cannot be
 # listed, so '역병이' still does not match a document that wrote '역병은': two
-# unrelated tokens to a whitespace tokenizer. That is a recall ceiling the dense
-# half covers, and the real fix is a Korean analyzer (mecab-ko or pg_bigm) on a
-# column of its own - a migration and a slice of its own. Grow this list only on
-# measured noise; if it passes ~40 entries, take the analyzer instead.
+# unrelated tokens to a whitespace tokenizer. That residue costs BOTH ways, and
+# calling it a recall ceiling alone understated it: '그것은', '것이고',
+# '것입니다' and '것인가' are unlisted josa-glued forms that still put
+# function-word noise at sparse rank 1, which is a precision ceiling too. The
+# dense half covers the recall side; only the fusion covers the precision side.
+# The real fix is a Korean analyzer (mecab-ko or pg_bigm) on a column of its own
+# - a migration and a slice of its own. Grow this list only on measured noise,
+# and only with words that are function words in EVERY reading; if it passes
+# ~40 entries, take the analyzer instead. Only 5 of these 15 entries are
+# observed by a test today.
 KOREAN_STOPWORDS = (
-    "이",
     "그",
     "저",
     "것",
@@ -7981,16 +8002,17 @@ KOREAN_STOPWORDS = (
     "무엇입니까",
     "어떻게",
     "하는",
-    "방법은",
     "및",
     "또는",
 )
 
-_TS_QUERY = text(f"""to_tsquery('simple',
+_TS_QUERY = text("""to_tsquery('simple',
     (SELECT string_agg(quote_literal(lexeme), ' | ')
        FROM unnest(to_tsvector('simple', :query_text))
       WHERE to_tsvector('english', lexeme) <> ''::tsvector
-        AND lexeme NOT IN ({", ".join(f"'{w}'" for w in KOREAN_STOPWORDS)})))""")
+        AND NOT lexeme = ANY(:ko_stopwords)))""").bindparams(
+    bindparam("ko_stopwords", value=list(KOREAN_STOPWORDS), type_=ARRAY(Text))
+)
 
 
 async def keyword_search(
@@ -8368,6 +8390,22 @@ async def corpus(db):
             chunk_metadata={},
             embedding=None,
         ),
+        # '이' is not only the demonstrative - it is also 이 = louse, a real pest
+        # on an agriculture platform. This chunk's ONLY lexeme in common with the
+        # query '이 방제 약제' is that word, so listing it as a stopword made the
+        # sparse half return [] for a legitimate pest question. Shares nothing
+        # with 'tomato blight', 'durian ripeness' or the Korean blight chunk.
+        Chunk(
+            document_id=doc_a.id,
+            chunk_index=6,
+            content="축사용 살충제는 이 구제에 효과가 있습니다",
+            token_count=6,
+            char_count=23,
+            page=12,
+            section=None,
+            chunk_metadata={},
+            embedding=None,
+        ),
     ]
     db.add_all(chunks)
     await db.commit()
@@ -8490,14 +8528,16 @@ async def test_empty_corpus_returns_no_evidence(db):
 NO_LEXEMES = ["", "   ", "!!! ??? ---", "\n\t", "'''", ") ( ) ((( ", "\\", "'|'&'!'(:*)\\"]
 
 
-@pytest.mark.parametrize(
-    "query",
-    [
-        "how does it?",
-        "What is it that we should do about all of this?",
-        "이 것은 어떻게 하는 방법은 무엇입니까",
-    ],
-)
+STOPWORD_ONLY = [
+    "how does it?",
+    "What is it that we should do about all of this?",
+    # NOT '이 ... 방법은 ...': both of those were removed from KOREAN_STOPWORDS
+    # as content words, so a query built on them is no longer all-stopword.
+    "그 것은 어떻게 하는 무엇입니까",
+]
+
+
+@pytest.mark.parametrize("query", STOPWORD_ONLY)
 async def test_a_query_of_only_stopwords_abstains_instead_of_retrieving_noise(db, corpus, query):
     """Every lexeme here is a stopword, so the query filters down to nothing and the
     sparse half contributes nothing - the dense half answers alone. The corpus holds
@@ -8516,6 +8556,19 @@ async def test_a_korean_question_outranks_the_korean_function_word_noise(db, cor
     korean_chunk = next(c for c in corpus["chunks"] if c.content.startswith("토마토 역병은"))
     results = await keyword_search(db, "역병은 어떻게 퍼집니까?", 20)
     assert results[0] == str(korean_chunk.id)
+
+
+async def test_a_content_word_that_looks_like_a_function_word_is_still_searchable(db, corpus):
+    """'이' is the demonstrative AND 이 = louse, a real pest term. It was listed as
+    a Korean stopword, and this is the query that measured the cost: the target
+    chunk's ONLY lexeme in common with '이 방제 약제' is 이, so filtering it out
+    left a tsquery of 방제 | 약제 that chunk does not carry - the sparse half
+    returned [] for a legitimate pest question. The second assertion is what makes
+    the first one bite: without 이 the query finds nothing, so the first assertion
+    can only pass because 이 survives the filter. Re-listing 이 fails this."""
+    louse = next(c for c in corpus["chunks"] if c.content.startswith("축사용"))
+    assert str(louse.id) in await keyword_search(db, "이 방제 약제", 20)
+    assert str(louse.id) not in await keyword_search(db, "방제 약제", 20)
 
 
 @pytest.mark.parametrize("query", NO_LEXEMES)
@@ -8547,13 +8600,22 @@ async def test_keyword_search_treats_tsquery_syntax_as_ordinary_text(db, corpus,
     assert await db.scalar(select(func.count()).select_from(Chunk)) == len(corpus["chunks"])
 
 
-@pytest.mark.parametrize("query", NO_LEXEMES)
-async def test_hybrid_search_survives_a_query_with_no_lexemes(db, corpus, query):
+@pytest.mark.parametrize("query", NO_LEXEMES + STOPWORD_ONLY)
+async def test_hybrid_search_survives_a_query_that_contributes_no_sparse_ranking(db, corpus, query):
     """End to end, not just the sparse half. The sparse side contributes nothing
     for any of these, so fusion runs on a single ranking and the answer path still
-    gets evidence - a user pasting punctuation into the box must not 500."""
+    gets evidence - a user pasting punctuation into the box must not 500.
+
+    The all-stopword half of the parametrisation is where the RRF-displacement
+    argument in test_a_query_of_only_stopwords_abstains_instead_of_retrieving_noise
+    is actually observed above the keyword_search layer, rather than only argued in
+    that test's docstring. Both function-word chunks have no embedding, so the
+    dense half cannot reach them: if the sparse half ever stopped abstaining they
+    would arrive at sparse rank 1 (1/61) and outscore every dense hit from rank 6
+    down (1/66). The second assertion is what would catch that."""
     evidence = await _search(db, corpus, query=query)
     assert evidence
+    assert all("것은" not in e.content and "How does" not in e.content for e in evidence)
     assert all(e.metadata["keyword_rank"] is None for e in evidence)
 
 

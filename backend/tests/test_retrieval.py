@@ -172,6 +172,22 @@ async def corpus(db):
             chunk_metadata={},
             embedding=None,
         ),
+        # '이' is not only the demonstrative - it is also 이 = louse, a real pest
+        # on an agriculture platform. This chunk's ONLY lexeme in common with the
+        # query '이 방제 약제' is that word, so listing it as a stopword made the
+        # sparse half return [] for a legitimate pest question. Shares nothing
+        # with 'tomato blight', 'durian ripeness' or the Korean blight chunk.
+        Chunk(
+            document_id=doc_a.id,
+            chunk_index=6,
+            content="축사용 살충제는 이 구제에 효과가 있습니다",
+            token_count=6,
+            char_count=23,
+            page=12,
+            section=None,
+            chunk_metadata={},
+            embedding=None,
+        ),
     ]
     db.add_all(chunks)
     await db.commit()
@@ -294,14 +310,16 @@ async def test_empty_corpus_returns_no_evidence(db):
 NO_LEXEMES = ["", "   ", "!!! ??? ---", "\n\t", "'''", ") ( ) ((( ", "\\", "'|'&'!'(:*)\\"]
 
 
-@pytest.mark.parametrize(
-    "query",
-    [
-        "how does it?",
-        "What is it that we should do about all of this?",
-        "이 것은 어떻게 하는 방법은 무엇입니까",
-    ],
-)
+STOPWORD_ONLY = [
+    "how does it?",
+    "What is it that we should do about all of this?",
+    # NOT '이 ... 방법은 ...': both of those were removed from KOREAN_STOPWORDS
+    # as content words, so a query built on them is no longer all-stopword.
+    "그 것은 어떻게 하는 무엇입니까",
+]
+
+
+@pytest.mark.parametrize("query", STOPWORD_ONLY)
 async def test_a_query_of_only_stopwords_abstains_instead_of_retrieving_noise(db, corpus, query):
     """Every lexeme here is a stopword, so the query filters down to nothing and the
     sparse half contributes nothing - the dense half answers alone. The corpus holds
@@ -320,6 +338,19 @@ async def test_a_korean_question_outranks_the_korean_function_word_noise(db, cor
     korean_chunk = next(c for c in corpus["chunks"] if c.content.startswith("토마토 역병은"))
     results = await keyword_search(db, "역병은 어떻게 퍼집니까?", 20)
     assert results[0] == str(korean_chunk.id)
+
+
+async def test_a_content_word_that_looks_like_a_function_word_is_still_searchable(db, corpus):
+    """'이' is the demonstrative AND 이 = louse, a real pest term. It was listed as
+    a Korean stopword, and this is the query that measured the cost: the target
+    chunk's ONLY lexeme in common with '이 방제 약제' is 이, so filtering it out
+    left a tsquery of 방제 | 약제 that chunk does not carry - the sparse half
+    returned [] for a legitimate pest question. The second assertion is what makes
+    the first one bite: without 이 the query finds nothing, so the first assertion
+    can only pass because 이 survives the filter. Re-listing 이 fails this."""
+    louse = next(c for c in corpus["chunks"] if c.content.startswith("축사용"))
+    assert str(louse.id) in await keyword_search(db, "이 방제 약제", 20)
+    assert str(louse.id) not in await keyword_search(db, "방제 약제", 20)
 
 
 @pytest.mark.parametrize("query", NO_LEXEMES)
@@ -351,13 +382,22 @@ async def test_keyword_search_treats_tsquery_syntax_as_ordinary_text(db, corpus,
     assert await db.scalar(select(func.count()).select_from(Chunk)) == len(corpus["chunks"])
 
 
-@pytest.mark.parametrize("query", NO_LEXEMES)
-async def test_hybrid_search_survives_a_query_with_no_lexemes(db, corpus, query):
+@pytest.mark.parametrize("query", NO_LEXEMES + STOPWORD_ONLY)
+async def test_hybrid_search_survives_a_query_that_contributes_no_sparse_ranking(db, corpus, query):
     """End to end, not just the sparse half. The sparse side contributes nothing
     for any of these, so fusion runs on a single ranking and the answer path still
-    gets evidence - a user pasting punctuation into the box must not 500."""
+    gets evidence - a user pasting punctuation into the box must not 500.
+
+    The all-stopword half of the parametrisation is where the RRF-displacement
+    argument in test_a_query_of_only_stopwords_abstains_instead_of_retrieving_noise
+    is actually observed above the keyword_search layer, rather than only argued in
+    that test's docstring. Both function-word chunks have no embedding, so the
+    dense half cannot reach them: if the sparse half ever stopped abstaining they
+    would arrive at sparse rank 1 (1/61) and outscore every dense hit from rank 6
+    down (1/66). The second assertion is what would catch that."""
     evidence = await _search(db, corpus, query=query)
     assert evidence
+    assert all("것은" not in e.content and "How does" not in e.content for e in evidence)
     assert all(e.metadata["keyword_rank"] is None for e in evidence)
 
 
