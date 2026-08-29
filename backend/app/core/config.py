@@ -116,6 +116,10 @@ class Settings(BaseSettings):
             raise ValueError("RETRIEVAL_TOP_N must be >= 1")
         if self.retrieval_candidate_limit < 1:
             raise ValueError("RETRIEVAL_CANDIDATE_LIMIT must be >= 1")
+        # Same shape: a negative budget boots fine and then degrades into one
+        # below-the-floor log per request forever, never an error.
+        if self.answer_context_token_budget < 1:
+            raise ValueError("ANSWER_CONTEXT_TOKEN_BUDGET must be >= 1")
         return self
 
 

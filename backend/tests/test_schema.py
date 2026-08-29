@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from alembic import command
 from alembic.autogenerate import compare_metadata
@@ -9,6 +11,10 @@ from app.core.config import get_settings
 from app.models import Base
 
 pytestmark = pytest.mark.integration
+
+# Created at import, before any fixture runs, so fileConfig has something to
+# disable. See test_running_migrations_does_not_disable_application_loggers.
+_WATCHED_LOGGERS = [logging.getLogger(n) for n in ("mopan.chat", "mopan.retrieval", "mopan.rag")]
 
 
 async def test_orm_matches_migrated_schema(test_engine):
@@ -115,3 +121,18 @@ def test_downgrade_then_upgrade_round_trips(migrated_database):
     config.set_main_option("sqlalchemy.url", TEST_DATABASE_URL)
     command.downgrade(config, "base")
     command.upgrade(config, "head")
+
+
+def test_running_migrations_does_not_disable_application_loggers(migrated_database):
+    """alembic/env.py calls fileConfig, whose disable_existing_loggers defaults to
+    True: it silences every logger that exists but is not named in alembic.ini.
+    Migrations run in-process here, so the default killed every mopan.* logger for
+    the rest of the session, and the caplog assertions elsewhere only passed
+    because they happened to run before a DB-touching module was imported.
+
+    _WATCHED_LOGGERS is built at module import, i.e. during collection and so
+    before this session-scoped fixture runs. Calling getLogger() inside the test
+    body instead would create the logger fresh, after the damage, and pass
+    unconditionally."""
+    for logger in _WATCHED_LOGGERS:
+        assert logger.disabled is False, logger.name
