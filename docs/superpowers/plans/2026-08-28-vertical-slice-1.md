@@ -6874,8 +6874,8 @@ git commit -m "feat: VectorStore interface with a pgvector implementation"
 
 **Interfaces:**
 - Consumes: `get_parser` (Task 8), `get_chunking_strategy` (Task 10), `LLMProvider` (Task 11), `VectorStore`/`VectorItem` (Task 12), `Document` model (Task 3).
-- Produces: `async process_document(db, vector_store, llm_provider, chunking_strategy, document_id, *, upload_dir) -> None`.
-- Produces: `backend/app/worker.py` exposing `WorkerSettings` with `on_startup`/`on_shutdown` owning the engine, arq-safe resources, `job_timeout`, `max_tries=2`, and an `on_job_failure` hook that marks the document `failed`. Run identically in Docker and locally: `arq app.worker.WorkerSettings`.
+- Produces: `async process_document(db, vector_store, llm_provider, chunking_strategy, document_id) -> None`. No `upload_dir`: `documents.storage_path` is already absolute (Task 6 anchors `UPLOAD_DIR`), so a second copy of it here could only disagree.
+- Produces: `backend/app/worker.py` exposing `WorkerSettings` with `on_startup`/`on_shutdown` owning the engine, arq-safe resources, `job_timeout` and `max_tries=2`, plus a failure handler that marks the document `failed`. That handler lives INSIDE the job function, not in `WorkerSettings`: arq 0.26 has no `on_job_failure` hook, and `arq.worker.get_kwargs()` silently drops every attribute that is not a `Worker` parameter - so a hook by that name looks configured and never runs. Verified: `get_kwargs` on a class carrying `on_job_failure` returns it dropped. Run identically in Docker and locally: `arq app.worker.WorkerSettings`.
 
 - [ ] **Step 1: Write `backend/app/rag/pipeline.py`**
 
@@ -6900,6 +6900,9 @@ USER_FACING_FAILURE = "문서를 처리하지 못했습니다. 파일 형식과 
 
 
 async def _set_status(db: AsyncSession, document: Document, status: str) -> None:
+    """Commit each transition on its own: the Documents UI polls this column, so
+    a status that is only visible inside the pipeline's transaction shows the
+    user nothing for the whole job."""
     document.status = status
     await db.commit()
 
@@ -6918,15 +6921,12 @@ async def process_document(
 
     started = time.perf_counter()
     try:
-        # Idempotency: arq retries and manual re-processing must not multiply the
-        # corpus. Without this, a job that fails after chunks were flushed appends
-        # a fresh set on every one of its retries.
-        await vector_store.delete_by_document(document.id)
-
         await _set_status(db, document, "parsing")
         parser = get_parser(document.file_type)
-        # CPU-bound and blocking: a 300-page pypdf parse on the worker's single
-        # event loop stalls every other queued job and arq's own heartbeat.
+        # CPU-bound and blocking (it reads the file too): a 300-page pypdf parse
+        # on the worker's single event loop stalls every other queued job and
+        # arq's own heartbeat. The chunking strategies thread their tiktoken
+        # passes for the same reason.
         parsed = await to_thread.run_sync(parser.parse, document.storage_path)
 
         await _set_status(db, document, "chunking")
@@ -6941,6 +6941,20 @@ async def process_document(
             for candidate, vector in zip(pending, vectors, strict=True):
                 candidate.embedding = vector
 
+        # Idempotency: arq retries and manual re-processing must not multiply the
+        # corpus. Without this delete, a job that fails after the chunks were
+        # flushed appends a fresh set on every retry.
+        #
+        # Deliberately adjacent to the upsert rather than at the top of the job.
+        # The property this pipeline REQUIRES is only that the delete precedes
+        # the insert - true either way. Keeping them adjacent additionally means
+        # that on a transactional backend a failure between here and the final
+        # commit rolls both back, so a transient re-index failure does not empty
+        # the index of a document that was previously fine. Do not depend on
+        # that: a remote store (Qdrant) has no transaction and would degrade to
+        # "old chunks gone, new chunks missing", which is why it stays a bonus
+        # and not a contract.
+        await vector_store.delete_by_document(document.id)
         await vector_store.upsert(
             [
                 VectorItem(
@@ -6970,10 +6984,10 @@ async def process_document(
             duration_ms=round((time.perf_counter() - started) * 1000, 2),
         )
     except Exception:
-        # The most likely failure here is a DATABASE error at a commit, which
-        # leaves the session in a pending-rollback state - a bare `commit()` in
-        # this handler would raise PendingRollbackError and the document would be
-        # stuck mid-pipeline forever with no error_message.
+        # The most likely failure here is a DATABASE error at a commit or a
+        # flush, which leaves the session in a pending-rollback state - a bare
+        # `commit()` in this handler would raise PendingRollbackError and the
+        # document would be stuck mid-pipeline forever with no error_message.
         await db.rollback()
         document = await db.get(Document, uuid.UUID(document_id))
         if document is not None:
@@ -6989,19 +7003,20 @@ async def process_document(
 - [ ] **Step 2: Write `backend/app/worker.py`**
 
 ```python
+import asyncio
 import logging
 import uuid
 
 from arq.connections import RedisSettings
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.config import get_settings
-from app.core.db import make_engine
+from app.core.db import make_engine, make_sessionmaker
 from app.core.logging import configure_logging
 from app.llm.openai_provider import OpenAIProvider
-from app.models.document import Document
+from app.models.document import TERMINAL_STATUSES, Document
 from app.rag.chunking import get_chunking_strategy
-from app.rag.pipeline import USER_FACING_FAILURE, process_document as run_pipeline
+from app.rag.pipeline import USER_FACING_FAILURE
+from app.rag.pipeline import process_document as run_pipeline
 from app.retrieval.vector_store import PgVectorStore
 
 logger = logging.getLogger("mopan.worker")
@@ -7016,7 +7031,7 @@ async def startup(ctx: dict) -> None:
     engine = make_engine(settings)
     ctx["settings"] = settings
     ctx["engine"] = engine
-    ctx["sessionmaker"] = async_sessionmaker(engine, expire_on_commit=False)
+    ctx["sessionmaker"] = make_sessionmaker(engine)
     ctx["llm_provider"] = OpenAIProvider(
         api_key=settings.openai_api_key,
         embedding_model=settings.embedding_model,
@@ -7030,47 +7045,58 @@ async def startup(ctx: dict) -> None:
 
 
 async def shutdown(ctx: dict) -> None:
+    # arq owns and closes its own Redis pool (ctx["redis"]); the worker adds no
+    # session/cache client because nothing in the pipeline needs one.
     await ctx["llm_provider"].aclose()
     await ctx["engine"].dispose()
 
 
-async def process_document(ctx: dict, document_id: str) -> None:
-    settings = ctx["settings"]
-    async with ctx["sessionmaker"]() as db:
-        await run_pipeline(
-            db,
-            PgVectorStore(db),
-            ctx["llm_provider"],
-            get_chunking_strategy(settings),
-            document_id,
-        )
-
-
-async def on_job_failure(ctx: dict) -> None:
-    """Last line of defence: a job killed by job_timeout never reaches the
-    pipeline's own except block, and the document would sit at `parsing` forever."""
-    document_id = (ctx.get("job_args") or [None])[0]
-    if not document_id:
-        return
+async def mark_failed(ctx: dict, document_id: str) -> None:
+    """Last line of defence, on its own session because the job's session is
+    already unwinding. Never overwrites a document that finished."""
     try:
         async with ctx["sessionmaker"]() as db:
-            document = await db.get(Document, uuid.UUID(str(document_id)))
-            if document is not None and document.status not in ("indexed", "failed"):
+            document = await db.get(Document, uuid.UUID(document_id))
+            if document is not None and document.status not in TERMINAL_STATUSES:
                 document.status = "failed"
                 document.error_message = USER_FACING_FAILURE
                 await db.commit()
     except Exception:
-        logger.exception("on_job_failure could not mark the document failed")
+        logger.exception(
+            "could not mark the document failed", extra={"extra_fields": {"document_id": document_id}}
+        )
+
+
+async def process_document(ctx: dict, document_id: str) -> None:
+    settings = ctx["settings"]
+    try:
+        async with ctx["sessionmaker"]() as db:
+            await run_pipeline(
+                db,
+                PgVectorStore(db),
+                ctx["llm_provider"],
+                get_chunking_strategy(settings),
+                document_id,
+            )
+    except BaseException:
+        # BaseException, and here rather than in a WorkerSettings hook: arq 0.26
+        # has no on_job_failure, and get_kwargs() silently DROPS any attribute
+        # that is not a Worker parameter - so a hook by that name would look
+        # configured and never run. job_timeout cancels this task, and
+        # CancelledError is not an Exception, so the pipeline's own handler never
+        # sees it and the document would sit at `parsing` forever.
+        # Shielded: the cleanup must survive the cancellation that caused it.
+        await asyncio.shield(mark_failed(ctx, document_id))
+        raise
 
 
 class WorkerSettings:
     functions = [process_document]
     on_startup = startup
     on_shutdown = shutdown
-    on_job_failure = on_job_failure
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     # Defaults are 300s / 5 tries. A long PDF gets killed mid-parse at 300s, and
-    # 5 tries multiplied the corpus before delete_by_document existed.
+    # 5 tries multiplied the corpus before the pipeline deleted first.
     job_timeout = 900
     max_tries = 2
     keep_result = 3600
@@ -7079,23 +7105,34 @@ class WorkerSettings:
 - [ ] **Step 3: Write `backend/tests/test_pipeline.py`**
 
 ```python
+import asyncio
+import inspect
+import uuid
+
 import pytest
 import pytest_asyncio
+from arq.worker import Worker
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError
 
+from app import worker as worker_module
+from app.core.config import get_settings
 from app.models.chunk import EMBEDDING_DIM, Chunk
 from app.models.collection import Collection
 from app.models.document import Document
 from app.models.user import User
+from app.rag import pipeline
 from app.rag.chunking.fixed import FixedChunking
-from app.rag.pipeline import process_document
+from app.rag.pipeline import USER_FACING_FAILURE, process_document
 from app.retrieval.vector_store import PgVectorStore
 
 
 class FakeLLMProvider:
     """Deterministic full-width vectors. A 3-dim vector into Vector(1536) fails
     with `expected 1536 dimensions, not 3` - which is exactly what revision 1's
-    pipeline test did, proving it had never been run."""
+    pipeline test did, proving it had never been run.
+
+    Also the reason no test in this file reaches the network."""
 
     def __init__(self):
         self.embed_calls = 0
@@ -7136,7 +7173,10 @@ async def document(db, tmp_path):
 
 async def test_process_document_indexes_chunks(db, document):
     await process_document(
-        db, PgVectorStore(db), FakeLLMProvider(), FixedChunking(chunk_size=100, overlap=10),
+        db,
+        PgVectorStore(db),
+        FakeLLMProvider(),
+        FixedChunking(chunk_size=100, overlap=10),
         str(document.id),
     )
 
@@ -7148,54 +7188,78 @@ async def test_process_document_indexes_chunks(db, document):
     assert len(chunks) > 1
     assert all(c.embedding is not None for c in chunks)
     assert all(len(c.embedding) == EMBEDDING_DIM for c in chunks)
+    # chunk_index is what the vector store upserts on; a gap or a repeat here
+    # means re-indexing would leave orphans behind.
+    assert sorted(c.chunk_index for c in chunks) == list(range(len(chunks)))
 
 
 async def test_reprocessing_is_idempotent(db, document):
     """arq retries and manual re-processing must not multiply the corpus."""
     strategy = FixedChunking(chunk_size=100, overlap=10)
     await process_document(db, PgVectorStore(db), FakeLLMProvider(), strategy, str(document.id))
-    first = len((await db.scalars(select(Chunk).where(Chunk.document_id == document.id))).all())
+    first = (await db.scalars(select(Chunk).where(Chunk.document_id == document.id))).all()
 
     await process_document(db, PgVectorStore(db), FakeLLMProvider(), strategy, str(document.id))
-    second = len((await db.scalars(select(Chunk).where(Chunk.document_id == document.id))).all())
+    second = (await db.scalars(select(Chunk).where(Chunk.document_id == document.id))).all()
 
-    assert first == second
+    assert len(first) == len(second)
+    assert sorted(c.chunk_index for c in second) == list(range(len(second)))
+
+    # Re-indexing the SAME text is not enough to prove it: upsert overwrites by
+    # (document_id, chunk_index), so an identical run lands on the same indexes
+    # whether or not the pipeline deletes first. Only a run that produces FEWER
+    # chunks exposes the stale tail a missing delete leaves behind.
+    await process_document(
+        db,
+        PgVectorStore(db),
+        FakeLLMProvider(),
+        FixedChunking(chunk_size=400, overlap=10),
+        str(document.id),
+    )
+    third = (await db.scalars(select(Chunk).where(Chunk.document_id == document.id))).all()
+    assert len(third) < len(second)
+    assert sorted(c.chunk_index for c in third) == list(range(len(third)))
 
 
-async def test_status_transitions_are_persisted(db, document):
+async def test_status_transitions_are_persisted(db, document, monkeypatch):
+    """Every stage's status has to be COMMITTED before that stage starts: the
+    Documents UI polls this column, and a status visible only inside the
+    pipeline's own transaction tells the user nothing."""
     seen: list[str] = []
+    real_set_status = pipeline._set_status
 
-    class RecordingStrategy(FixedChunking):
-        async def chunk(self, blocks, embed_fn):
-            await db.refresh(document)
-            seen.append(document.status)
-            return await super().chunk(blocks, embed_fn)
+    async def spy(session, doc, status):
+        await real_set_status(session, doc, status)
+        # A fresh SELECT after the commit, not the identity map: this asserts
+        # durability, not just that an attribute was assigned.
+        seen.append(await session.scalar(select(Document.status).where(Document.id == doc.id)))
 
-    class RecordingProvider(FakeLLMProvider):
-        async def embed(self, texts):
-            await db.refresh(document)
-            seen.append(document.status)
-            return await super().embed(texts)
+    monkeypatch.setattr(pipeline, "_set_status", spy)
 
     await process_document(
-        db, PgVectorStore(db), RecordingProvider(), RecordingStrategy(chunk_size=100, overlap=10),
+        db,
+        PgVectorStore(db),
+        FakeLLMProvider(),
+        FixedChunking(chunk_size=100, overlap=10),
         str(document.id),
     )
 
-    assert "parsing" in seen
-    assert "embedding" in seen
-    await db.refresh(document)
-    assert document.status == "indexed"
+    assert seen == ["parsing", "chunking", "embedding"]
+    assert await db.scalar(select(Document.status).where(Document.id == document.id)) == "indexed"
+
+
+async def test_a_missing_document_is_not_an_error(db):
+    """A job for a document deleted between enqueue and dequeue must not crash
+    the worker into a retry loop."""
+    await process_document(db, PgVectorStore(db), FakeLLMProvider(), FixedChunking(), str(uuid.uuid4()))
 
 
 async def test_parser_failure_marks_the_document_failed(db, document):
     document.storage_path = "/nonexistent/file.txt"
     await db.commit()
 
-    with pytest.raises(Exception):
-        await process_document(
-            db, PgVectorStore(db), FakeLLMProvider(), FixedChunking(), str(document.id)
-        )
+    with pytest.raises(FileNotFoundError):
+        await process_document(db, PgVectorStore(db), FakeLLMProvider(), FixedChunking(), str(document.id))
 
     await db.refresh(document)
     assert document.status == "failed"
@@ -7204,9 +7268,9 @@ async def test_parser_failure_marks_the_document_failed(db, document):
 
 async def test_database_failure_still_marks_the_document_failed(db, document):
     """Revision 1 only tested a pure-Python parser error, where the session is
-    clean. The realistic failure is a DB error at commit, which puts the session
-    into pending-rollback and made the old handler raise PendingRollbackError -
-    leaving the document stuck with no error_message."""
+    clean. The realistic failure is a DB error, which puts the session into
+    pending-rollback and made the old handler raise PendingRollbackError -
+    leaving the document stuck mid-pipeline with no error_message."""
 
     class OverlongSectionStrategy(FixedChunking):
         async def chunk(self, blocks, embed_fn):
@@ -7215,7 +7279,10 @@ async def test_database_failure_still_marks_the_document_failed(db, document):
                 candidate.section = "x" * 600  # section is String(500)
             return candidates
 
-    with pytest.raises(Exception):
+    # DBAPIError, not Exception: the point of this test is that a DATABASE error
+    # reaches the handler, and a plain Exception would also pass if the strategy
+    # merely raised a TypeError.
+    with pytest.raises(DBAPIError):
         await process_document(
             db,
             PgVectorStore(db),
@@ -7229,23 +7296,126 @@ async def test_database_failure_still_marks_the_document_failed(db, document):
     assert document.error_message
 
 
+async def test_a_failure_at_the_final_commit_still_marks_the_document_failed(db, document):
+    """The one the old test missed: the DB error lands on the pipeline's LAST
+    commit, so the failure handler runs against a session whose flush already
+    blew up. Every chunk is written by then; only the status update is left."""
+
+    class DirtyingStore(PgVectorStore):
+        """Lets the upsert succeed, then leaves an invalid pending change behind
+        so the next flush - the pipeline's final commit - is what fails."""
+
+        def __init__(self, db, document):
+            super().__init__(db)
+            self.document = document
+
+        async def upsert(self, items):
+            await super().upsert(items)
+            self.document.filename = "x" * 600  # filename is String(500)
+
+    with pytest.raises(DBAPIError):
+        await process_document(
+            db,
+            DirtyingStore(db, document),
+            FakeLLMProvider(),
+            FixedChunking(chunk_size=100, overlap=10),
+            str(document.id),
+        )
+
+    await db.refresh(document)
+    assert document.status == "failed"
+    assert document.error_message == USER_FACING_FAILURE
+    assert document.filename == "note.txt"
+
+
 async def test_error_message_never_contains_a_traceback(db, document):
     document.storage_path = "/nonexistent/file.txt"
     await db.commit()
-    with pytest.raises(Exception):
-        await process_document(
-            db, PgVectorStore(db), FakeLLMProvider(), FixedChunking(), str(document.id)
-        )
+    with pytest.raises(FileNotFoundError):
+        await process_document(db, PgVectorStore(db), FakeLLMProvider(), FixedChunking(), str(document.id))
     await db.refresh(document)
     # This column is rendered in the Documents UI; internals must not leak.
     assert "Traceback" not in document.error_message
     assert "/nonexistent" not in document.error_message
+    assert "sk-" not in document.error_message
+
+
+def test_worker_settings_declares_only_real_arq_parameters():
+    """arq builds the Worker with get_kwargs(), which SILENTLY DROPS every
+    attribute that is not a Worker parameter. arq 0.26 has no `on_job_failure`
+    hook, so a WorkerSettings that declares one looks configured, never runs,
+    and leaves a timed-out job's document at `parsing` forever."""
+    allowed = set(inspect.signature(Worker).parameters)
+    declared = {name for name in vars(worker_module.WorkerSettings) if not name.startswith("_")}
+    assert declared <= allowed, sorted(declared - allowed)
+
+
+def test_worker_bounds_job_timeout_and_retries():
+    settings = worker_module.WorkerSettings
+    # arq's defaults are 300s / 5 tries: a long PDF is killed mid-parse, and
+    # five tries used to append a fresh set of chunks each time.
+    assert settings.job_timeout > 300
+    assert settings.max_tries == 2
+
+
+async def test_a_cancelled_job_marks_the_document_failed(db, document, test_sessionmaker, monkeypatch):
+    """job_timeout cancels the job's task, so the pipeline's own `except
+    Exception` never runs. Without the worker-level handler the document sits at
+    `parsing` until someone notices."""
+
+    async def cancelled(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(worker_module, "run_pipeline", cancelled)
+    ctx = {
+        "settings": get_settings(),
+        "sessionmaker": test_sessionmaker,
+        "llm_provider": FakeLLMProvider(),
+    }
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker_module.process_document(ctx, str(document.id))
+
+    await db.refresh(document)
+    assert document.status == "failed"
+    assert document.error_message == USER_FACING_FAILURE
+
+
+async def test_the_worker_failure_handler_leaves_a_terminal_document_alone(db, document, test_sessionmaker):
+    """A late failure must not rewrite the outcome of a document that already
+    finished - re-queueing an indexed document and losing the worker mid-cleanup
+    would otherwise mark a perfectly good index `failed`."""
+    document.status = "indexed"
+    await db.commit()
+
+    await worker_module.mark_failed({"sessionmaker": test_sessionmaker}, str(document.id))
+
+    await db.refresh(document)
+    assert document.status == "indexed"
+    assert document.error_message is None
+
+
+async def test_worker_shutdown_disposes_its_resources():
+    closed: list[str] = []
+
+    class Recorder:
+        def __init__(self, name):
+            self.name = name
+
+        async def aclose(self):
+            closed.append(self.name)
+
+        async def dispose(self):
+            closed.append(self.name)
+
+    await worker_module.shutdown({"llm_provider": Recorder("provider"), "engine": Recorder("engine")})
+    assert sorted(closed) == ["engine", "provider"]
 ```
 
 - [ ] **Step 4: Run tests, expect PASS**
 
 Run: `pytest tests/test_pipeline.py -v` (Postgres running)
-Expected: all 6 tests PASS
+Expected: all 13 tests PASS
 
 - [ ] **Step 5: Commit**
 
