@@ -44,25 +44,41 @@ export default function RegisterPage() {
       >
         <h1 className="text-xl font-semibold">회원가입</h1>
         <p className="text-sm text-gray-500">첫 번째 계정은 관리자 권한을 갖습니다.</p>
-        <input
-          type="email"
-          required
-          autoComplete="email"
-          placeholder="이메일"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
-        />
-        <input
-          type="password"
-          required
-          minLength={8}
-          autoComplete="new-password"
-          placeholder="비밀번호 (8자 이상)"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
-        />
+        <div>
+          <label htmlFor="email" className="sr-only">
+            이메일
+          </label>
+          <input
+            id="email"
+            type="email"
+            required
+            autoComplete="email"
+            placeholder="이메일"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label htmlFor="password" className="sr-only">
+            비밀번호
+          </label>
+          <input
+            id="password"
+            type="password"
+            required
+            minLength={8}
+            // bcrypt caps at 72 BYTES; maxLength counts characters, so this only
+            // closes the ASCII path. Korean is 3 bytes/char - the backend guard
+            // in schemas/auth.py is still the authority.
+            maxLength={72}
+            autoComplete="new-password"
+            placeholder="비밀번호 (8자 이상)"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+          />
+        </div>
         <ErrorBanner message={error} />
         <button
           type="submit"

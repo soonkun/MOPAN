@@ -29,18 +29,26 @@ function redirectIfSessionGone(status: number): void {
   window.location.replace("/login");
 }
 
+const VALIDATION_FALLBACK = "입력한 내용을 다시 확인해 주세요.";
+const HANGUL = /[가-힣]/;
+
 /** FastAPI's `detail` is a string for an HTTPException but a LIST for a 422 -
  * the app's own handler returns {"detail": [{loc, msg, type}, ...]}. Reading
  * `.detail` straight into ApiError renders "[object Object]" in the banner,
- * which is exactly the case a user hits by typing a too-long password. */
+ * which is exactly the case a user hits by typing a too-long password.
+ *
+ * Pydantic's own `msg` is English ("Value error, password must be at most 72
+ * bytes"), so a raw join swaps [object Object] for English jargon in a Korean
+ * UI. Show a msg only when the backend wrote it in Korean; otherwise fall back. */
 function detailText(payload: unknown, fallback: string): string {
   const detail = (payload as { detail?: unknown } | null)?.detail;
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail)) {
     const messages = detail
       .map((item) => (item as { msg?: unknown })?.msg)
-      .filter((msg): msg is string => typeof msg === "string");
+      .filter((msg): msg is string => typeof msg === "string" && HANGUL.test(msg));
     if (messages.length > 0) return messages.join(", ");
+    return VALIDATION_FALLBACK;
   }
   return fallback;
 }
@@ -70,6 +78,14 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
     return undefined as T;
   }
   return (await response.json()) as T;
+}
+
+/** Where to land after login. `next` is attacker-supplied via the query string,
+ * so only a single-slash relative path is accepted - "//evil.com" and
+ * "https://evil.com" are both browser-valid redirect targets otherwise. */
+export function safeNextPath(raw: string | null, fallback = "/chat"): string {
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return fallback;
+  return raw;
 }
 
 export function errorMessage(err: unknown): string {

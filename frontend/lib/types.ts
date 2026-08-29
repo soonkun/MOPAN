@@ -60,8 +60,8 @@ export interface Citation {
   // none of them. See _citations_from in backend/app/chat/service.py.
   source_type: "rag" | "mcp";
   ref: string;
-  chunk_id: string;
-  document_id: string;
+  chunk_id: string | null;
+  document_id: string | null;
   filename: string | null;
   page: number | null;
   section: string | null;

@@ -597,7 +597,7 @@ services:
       migrate:
         condition: service_completed_successfully
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - uploaddata:/app/data/uploads
     healthcheck:
@@ -648,7 +648,7 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
 
 volumes:
   pgdata:
@@ -11371,18 +11371,21 @@ Two things `apiFetch` has to get right that are easy to leave out:
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "next": "14.2.35",
-    "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "next": "15.5.24",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
   },
   "devDependencies": {
-    "typescript": "5.6.2",
     "@types/node": "20.16.5",
-    "@types/react": "18.3.5",
-    "@types/react-dom": "18.3.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "autoprefixer": "10.4.20",
+    "postcss": "8.5.26",
     "tailwindcss": "3.4.11",
-    "postcss": "8.4.45",
-    "autoprefixer": "10.4.20"
+    "typescript": "5.6.2"
+  },
+  "overrides": {
+    "postcss": "8.5.26"
   }
 }
 ```
@@ -11540,8 +11543,8 @@ export interface Citation {
   // none of them. See _citations_from in backend/app/chat/service.py.
   source_type: "rag" | "mcp";
   ref: string;
-  chunk_id: string;
-  document_id: string;
+  chunk_id: string | null;
+  document_id: string | null;
   filename: string | null;
   page: number | null;
   section: string | null;
@@ -11607,18 +11610,26 @@ function redirectIfSessionGone(status: number): void {
   window.location.replace("/login");
 }
 
+const VALIDATION_FALLBACK = "입력한 내용을 다시 확인해 주세요.";
+const HANGUL = /[가-힣]/;
+
 /** FastAPI's `detail` is a string for an HTTPException but a LIST for a 422 -
  * the app's own handler returns {"detail": [{loc, msg, type}, ...]}. Reading
  * `.detail` straight into ApiError renders "[object Object]" in the banner,
- * which is exactly the case a user hits by typing a too-long password. */
+ * which is exactly the case a user hits by typing a too-long password.
+ *
+ * Pydantic's own `msg` is English ("Value error, password must be at most 72
+ * bytes"), so a raw join swaps [object Object] for English jargon in a Korean
+ * UI. Show a msg only when the backend wrote it in Korean; otherwise fall back. */
 function detailText(payload: unknown, fallback: string): string {
   const detail = (payload as { detail?: unknown } | null)?.detail;
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail)) {
     const messages = detail
       .map((item) => (item as { msg?: unknown })?.msg)
-      .filter((msg): msg is string => typeof msg === "string");
+      .filter((msg): msg is string => typeof msg === "string" && HANGUL.test(msg));
     if (messages.length > 0) return messages.join(", ");
+    return VALIDATION_FALLBACK;
   }
   return fallback;
 }
@@ -11648,6 +11659,14 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
     return undefined as T;
   }
   return (await response.json()) as T;
+}
+
+/** Where to land after login. `next` is attacker-supplied via the query string,
+ * so only a single-slash relative path is accepted - "//evil.com" and
+ * "https://evil.com" are both browser-valid redirect targets otherwise. */
+export function safeNextPath(raw: string | null, fallback = "/chat"): string {
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return fallback;
+  return raw;
 }
 
 export function errorMessage(err: unknown): string {
@@ -11713,7 +11732,13 @@ export function middleware(request: NextRequest) {
   // an unauthenticated visitor sees a functional-looking but empty shell.
   if (!request.cookies.get("mopan_session")) {
     const url = request.nextUrl.clone();
+    const target = pathname + request.nextUrl.search;
     url.pathname = "/login";
+    // clone() carries the original query string over; drop it so /login gets
+    // `next` alone rather than the target page's params leaking beside it.
+    url.search = "";
+    // Keep where they were headed so a deep link survives the login round trip.
+    url.searchParams.set("next", target);
     return NextResponse.redirect(url);
   }
   return NextResponse.next();
@@ -11787,7 +11812,7 @@ export default function RootPage() {
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { apiFetch, errorMessage } from "@/lib/api";
+import { apiFetch, errorMessage, safeNextPath } from "@/lib/api";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { User } from "@/lib/types";
 
@@ -11807,7 +11832,10 @@ export default function LoginPage() {
         method: "POST",
         body: JSON.stringify({ email, password }),
       });
-      router.push("/chat");
+      // Read at submit time rather than via useSearchParams, which would force
+      // a Suspense boundary on this page under Next 15's static rendering.
+      const next = new URLSearchParams(window.location.search).get("next");
+      router.push(safeNextPath(next));
       router.refresh();
     } catch (err) {
       setError(errorMessage(err));
@@ -11823,24 +11851,36 @@ export default function LoginPage() {
         className="w-full max-w-sm space-y-4 rounded border border-gray-200 p-8"
       >
         <h1 className="text-xl font-semibold">MOPAN</h1>
-        <input
-          type="email"
-          required
-          autoComplete="email"
-          placeholder="이메일"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
-        />
-        <input
-          type="password"
-          required
-          autoComplete="current-password"
-          placeholder="비밀번호"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
-        />
+        <div>
+          <label htmlFor="email" className="sr-only">
+            이메일
+          </label>
+          <input
+            id="email"
+            type="email"
+            required
+            autoComplete="email"
+            placeholder="이메일"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label htmlFor="password" className="sr-only">
+            비밀번호
+          </label>
+          <input
+            id="password"
+            type="password"
+            required
+            autoComplete="current-password"
+            placeholder="비밀번호"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+          />
+        </div>
         <ErrorBanner message={error} />
         <button
           type="submit"
@@ -11910,25 +11950,41 @@ export default function RegisterPage() {
       >
         <h1 className="text-xl font-semibold">회원가입</h1>
         <p className="text-sm text-gray-500">첫 번째 계정은 관리자 권한을 갖습니다.</p>
-        <input
-          type="email"
-          required
-          autoComplete="email"
-          placeholder="이메일"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
-        />
-        <input
-          type="password"
-          required
-          minLength={8}
-          autoComplete="new-password"
-          placeholder="비밀번호 (8자 이상)"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
-        />
+        <div>
+          <label htmlFor="email" className="sr-only">
+            이메일
+          </label>
+          <input
+            id="email"
+            type="email"
+            required
+            autoComplete="email"
+            placeholder="이메일"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label htmlFor="password" className="sr-only">
+            비밀번호
+          </label>
+          <input
+            id="password"
+            type="password"
+            required
+            minLength={8}
+            // bcrypt caps at 72 BYTES; maxLength counts characters, so this only
+            // closes the ASCII path. Korean is 3 bytes/char - the backend guard
+            // in schemas/auth.py is still the authority.
+            maxLength={72}
+            autoComplete="new-password"
+            placeholder="비밀번호 (8자 이상)"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+          />
+        </div>
         <ErrorBanner message={error} />
         <button
           type="submit"
@@ -12402,12 +12458,16 @@ export default function NewChatPage() {
 ```tsx
 import ChatWindow from "@/components/chat/ChatWindow";
 
-export default function ConversationPage({
+// Next 15 made `params` a Promise. A synchronous signature is a hard build
+// error here ("is missing the following properties from type 'Promise<any>'"),
+// not a silent break.
+export default async function ConversationPage({
   params,
 }: {
-  params: { conversationId: string };
+  params: Promise<{ conversationId: string }>;
 }) {
-  return <ChatWindow initialConversationId={params.conversationId} />;
+  const { conversationId } = await params;
+  return <ChatWindow initialConversationId={conversationId} />;
 }
 ```
 
@@ -12763,14 +12823,17 @@ export default function DocumentsPage() {
 ```tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { use, useEffect, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
 import ChunkViewer from "@/components/documents/ChunkViewer";
 import StructureViewer from "@/components/documents/StructureViewer";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { Block, Chunk, DocumentItem } from "@/lib/types";
 
-export default function DocumentDetailPage({ params }: { params: { id: string } }) {
+// Next 15 made `params` a Promise. A client component cannot await, so it
+// unwraps with React 19's `use()`. A synchronous signature is a build error.
+export default function DocumentDetailPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = use(params);
   const [document, setDocument] = useState<DocumentItem | null>(null);
   const [chunks, setChunks] = useState<Chunk[]>([]);
   const [blocks, setBlocks] = useState<Block[]>([]);
@@ -12778,9 +12841,9 @@ export default function DocumentDetailPage({ params }: { params: { id: string } 
 
   useEffect(() => {
     Promise.all([
-      apiFetch<DocumentItem>(`/api/documents/${params.id}`),
-      apiFetch<Chunk[]>(`/api/documents/${params.id}/chunks`),
-      apiFetch<Block[]>(`/api/documents/${params.id}/structure`).catch(() => [] as Block[]),
+      apiFetch<DocumentItem>(`/api/documents/${id}`),
+      apiFetch<Chunk[]>(`/api/documents/${id}/chunks`),
+      apiFetch<Block[]>(`/api/documents/${id}/structure`).catch(() => [] as Block[]),
     ])
       .then(([doc, chunkList, blockList]) => {
         setDocument(doc);
@@ -12788,7 +12851,7 @@ export default function DocumentDetailPage({ params }: { params: { id: string } 
         setBlocks(blockList);
       })
       .catch((err) => setError(errorMessage(err)));
-  }, [params.id]);
+  }, [id]);
 
   return (
     <div className="mx-auto max-w-6xl space-y-4 p-6">

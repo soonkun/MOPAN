@@ -12,7 +12,13 @@ export function middleware(request: NextRequest) {
   // an unauthenticated visitor sees a functional-looking but empty shell.
   if (!request.cookies.get("mopan_session")) {
     const url = request.nextUrl.clone();
+    const target = pathname + request.nextUrl.search;
     url.pathname = "/login";
+    // clone() carries the original query string over; drop it so /login gets
+    // `next` alone rather than the target page's params leaking beside it.
+    url.search = "";
+    // Keep where they were headed so a deep link survives the login round trip.
+    url.searchParams.set("next", target);
     return NextResponse.redirect(url);
   }
   return NextResponse.next();
