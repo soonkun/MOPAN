@@ -28,10 +28,19 @@ from app.models.document import Document
 # real answer on 'how' | 'does' alone. Korean lexemes are unknown to the english
 # dictionary, so they are kept, which is the wanted behaviour.
 #
-# The coalesce covers an all-stopword query ("how does it?"): the filtered
-# aggregate is NULL, so the unfiltered lexemes are used instead. When there are
-# no lexemes at all (punctuation, whitespace) both aggregates are NULL,
-# to_tsquery(NULL) is NULL and `content_tsv @@ NULL` is NULL - no rows, no error.
+# An all-stopword query ("how does it?") therefore filters down to nothing and
+# ABSTAINS - to_tsquery(NULL) is NULL and `content_tsv @@ NULL` is NULL, so no
+# rows, no error, and the dense half answers alone. That is deliberate: falling
+# back to the unfiltered lexemes was measured to retrieve 4 pure-noise chunks
+# with noise at rank 1, and at rrf_k=60 a sparse rank 1 (1/61) outscores every
+# dense hit from rank 6 down (1/66), so the fallback displaced a real answer.
+# It also cost a 482-heap-block scan at 20k rows, 9.9ms against 0.05ms.
+#
+# Korean function words get the same treatment from KOREAN_STOPWORDS, because
+# the english dictionary does not know them: without it '이 병은 어떻게
+# 방제합니까?' matched only chunks made of '이/그/것/어떻게' and put them at rank
+# 1, and 2 of 4 natural Korean questions were outranked by that noise. With it,
+# 4 of 4 rank the right chunk first and the josa-mismatch probes abstain.
 #
 # quote_literal is what keeps user text out of tsquery syntax: '|', '&', '!',
 # ':*', '(' and a bare quote all arrive as ordinary characters inside a quoted
@@ -39,20 +48,39 @@ from app.models.document import Document
 # string, and query_text is a bound parameter, so nothing user-supplied is ever
 # concatenated into SQL.
 #
-# ponytail: 'simple' is a whitespace tokenizer for Korean, so josa still defeats
-# it - a question asking about '역병이' does not match a document that wrote
-# '역병은', they are two unrelated tokens. Measured: 7 of 7 natural Korean
-# questions hit, because a question tends to reuse the document's own inflected
-# word - but the bare-noun probe '역병 토양' hit nothing against a document
-# reading '역병은 ... 토양과'. The dense half covers that case today; the fix is a
-# Korean analyzer (pg_bigm or mecab-ko) on a column of its own, which is a
-# migration and a slice of its own.
-_TS_QUERY = text("""to_tsquery('simple', coalesce(
+# ponytail: hand-listed Korean stopwords, because Postgres ships no Korean
+# dictionary and a .stop file would need container filesystem plumbing. It only
+# covers free-standing function words - josa are glued to the noun and cannot be
+# listed, so '역병이' still does not match a document that wrote '역병은': two
+# unrelated tokens to a whitespace tokenizer. That is a recall ceiling the dense
+# half covers, and the real fix is a Korean analyzer (mecab-ko or pg_bigm) on a
+# column of its own - a migration and a slice of its own. Grow this list only on
+# measured noise; if it passes ~40 entries, take the analyzer instead.
+KOREAN_STOPWORDS = (
+    "이",
+    "그",
+    "저",
+    "것",
+    "것을",
+    "것은",
+    "것이",
+    "이것",
+    "그것",
+    "무엇",
+    "무엇을",
+    "무엇입니까",
+    "어떻게",
+    "하는",
+    "방법은",
+    "및",
+    "또는",
+)
+
+_TS_QUERY = text(f"""to_tsquery('simple',
     (SELECT string_agg(quote_literal(lexeme), ' | ')
        FROM unnest(to_tsvector('simple', :query_text))
-      WHERE to_tsvector('english', lexeme) <> ''::tsvector),
-    (SELECT string_agg(quote_literal(lexeme), ' | ')
-       FROM unnest(to_tsvector('simple', :query_text)))))""")
+      WHERE to_tsvector('english', lexeme) <> ''::tsvector
+        AND lexeme NOT IN ({", ".join(f"'{w}'" for w in KOREAN_STOPWORDS)})))""")
 
 
 async def keyword_search(

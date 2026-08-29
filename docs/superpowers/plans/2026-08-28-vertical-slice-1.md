@@ -1645,7 +1645,11 @@ class Chunk(Base):
 
 Note on the `'simple'` text search configuration: it applies no stemming and strips no stopwords. That is deliberate — the primary corpus language is Korean, where English stemming would be actively wrong. **Task 15's keyword query must be built from `'simple'` lexemes on the query side too;** a different regconfig on the query side does not bypass the GIN index, it silently answers wrong — the column stores what `'simple'` produced (`'tomatoes'`, `'blighted'`) and an `'english'` query asks for stems (`'tomato'`, `'blight'`) that row never stored. Measured on a seeded corpus, `'english'` against this column hit 0 of 13 questions.
 
-The other half of that constraint is the *combining* operator, and it is the one that was got wrong. `plainto_tsquery` ANDs every surviving term, and `'simple'` drops no stop words, so `"How does tomato blight spread?"` asked for `'how' & 'does' & 'tomato' & 'blight' & 'spread'` and matched nothing — 1 of 13 questions retrieved anything at all, and the dense half silently covered for a dead sparse retriever. Task 15 therefore OR-joins the `'simple'` lexemes, dropping the ones the `english` dictionary treats as stop words — `'english'` as a stopword *oracle* only, never as the query config, so both sides still say `'simple'`. Without that filter recall is the same but ranking is not: `ts_rank` has no IDF, so a chunk repeating "How does this work?" outranks the real answer on `'how' | 'does'` alone. Measured: 12 of 13, correct chunk at rank 1 in 12, and 7 of 7 in Korean.
+The other half of that constraint is the *combining* operator, and it is the one that was got wrong. `plainto_tsquery` ANDs every surviving term, and `'simple'` drops no stop words, so `"How does tomato blight spread?"` asked for `'how' & 'does' & 'tomato' & 'blight' & 'spread'` and matched nothing — 1 of 13 questions retrieved anything at all, and the dense half silently covered for a dead sparse retriever. Task 15 therefore OR-joins the `'simple'` lexemes, dropping the ones the `english` dictionary treats as stop words — `'english'` as a stopword *oracle* only, never as the query config, so both sides still say `'simple'`. Without that filter recall is the same but ranking is not: `ts_rank` has no IDF, so a chunk repeating "How does this work?" outranks the real answer on `'how' | 'does'` alone. Korean function words need the same treatment from a hand-listed `KOREAN_STOPWORDS`, because the `english` dictionary cannot see them.
+
+Measured on a seeded 16-chunk corpus of 10 topical and 6 stop-word-noise chunks, 13 questions: 1 of 13 before, 12 of 13 after with the correct chunk at rank 1, and 4 of 4 Korean questions ranking the right chunk first once `KOREAN_STOPWORDS` is applied (2 of 4 without it — the noise chunks took rank 1). A reviewer's independent 20-chunk corpus measured 0 of 13 before and 13 of 13 after. These are properties of a corpus, not of the construction; the direction reproduces, the ratios do not.
+
+There is deliberately **no `coalesce` fallback** to the unfiltered lexemes when every lexeme is a stop word. Falling back was measured to retrieve pure-noise chunks at sparse rank 1, and at `rrf_k=60` a sparse rank 1 (1/61) outscores every dense hit from rank 6 down (1/66) — so with `retrieval_top_n=6` and `NoneReranker()` it displaces a real answer. It also cost a 482-heap-block scan at 20k rows, 9.9 ms against 0.05 ms. An all-stop-word query abstains and the dense half answers alone.
 
 The vector side has the symmetric trap. `ix_chunks_embedding` is built with `vector_cosine_ops`, so **only the `<=>` (cosine distance) operator can use it** — SQLAlchemy's `Chunk.embedding.cosine_distance(...)`. Writing `<->` (L2) or `<#>` (inner product), or the matching `l2_distance` / `max_inner_product` helpers, silently falls back to a sequential scan over every chunk. Neither trap raises an error; both just make retrieval quietly slow and, once the corpus is large enough, quietly wrong.
 
@@ -7934,10 +7938,19 @@ from app.models.document import Document
 # real answer on 'how' | 'does' alone. Korean lexemes are unknown to the english
 # dictionary, so they are kept, which is the wanted behaviour.
 #
-# The coalesce covers an all-stopword query ("how does it?"): the filtered
-# aggregate is NULL, so the unfiltered lexemes are used instead. When there are
-# no lexemes at all (punctuation, whitespace) both aggregates are NULL,
-# to_tsquery(NULL) is NULL and `content_tsv @@ NULL` is NULL - no rows, no error.
+# An all-stopword query ("how does it?") therefore filters down to nothing and
+# ABSTAINS - to_tsquery(NULL) is NULL and `content_tsv @@ NULL` is NULL, so no
+# rows, no error, and the dense half answers alone. That is deliberate: falling
+# back to the unfiltered lexemes was measured to retrieve 4 pure-noise chunks
+# with noise at rank 1, and at rrf_k=60 a sparse rank 1 (1/61) outscores every
+# dense hit from rank 6 down (1/66), so the fallback displaced a real answer.
+# It also cost a 482-heap-block scan at 20k rows, 9.9ms against 0.05ms.
+#
+# Korean function words get the same treatment from KOREAN_STOPWORDS, because
+# the english dictionary does not know them: without it '이 병은 어떻게
+# 방제합니까?' matched only chunks made of '이/그/것/어떻게' and put them at rank
+# 1, and 2 of 4 natural Korean questions were outranked by that noise. With it,
+# 4 of 4 rank the right chunk first and the josa-mismatch probes abstain.
 #
 # quote_literal is what keeps user text out of tsquery syntax: '|', '&', '!',
 # ':*', '(' and a bare quote all arrive as ordinary characters inside a quoted
@@ -7945,20 +7958,39 @@ from app.models.document import Document
 # string, and query_text is a bound parameter, so nothing user-supplied is ever
 # concatenated into SQL.
 #
-# ponytail: 'simple' is a whitespace tokenizer for Korean, so josa still defeats
-# it - a question asking about '역병이' does not match a document that wrote
-# '역병은', they are two unrelated tokens. Measured: 7 of 7 natural Korean
-# questions hit, because a question tends to reuse the document's own inflected
-# word - but the bare-noun probe '역병 토양' hit nothing against a document
-# reading '역병은 ... 토양과'. The dense half covers that case today; the fix is a
-# Korean analyzer (pg_bigm or mecab-ko) on a column of its own, which is a
-# migration and a slice of its own.
-_TS_QUERY = text("""to_tsquery('simple', coalesce(
+# ponytail: hand-listed Korean stopwords, because Postgres ships no Korean
+# dictionary and a .stop file would need container filesystem plumbing. It only
+# covers free-standing function words - josa are glued to the noun and cannot be
+# listed, so '역병이' still does not match a document that wrote '역병은': two
+# unrelated tokens to a whitespace tokenizer. That is a recall ceiling the dense
+# half covers, and the real fix is a Korean analyzer (mecab-ko or pg_bigm) on a
+# column of its own - a migration and a slice of its own. Grow this list only on
+# measured noise; if it passes ~40 entries, take the analyzer instead.
+KOREAN_STOPWORDS = (
+    "이",
+    "그",
+    "저",
+    "것",
+    "것을",
+    "것은",
+    "것이",
+    "이것",
+    "그것",
+    "무엇",
+    "무엇을",
+    "무엇입니까",
+    "어떻게",
+    "하는",
+    "방법은",
+    "및",
+    "또는",
+)
+
+_TS_QUERY = text(f"""to_tsquery('simple',
     (SELECT string_agg(quote_literal(lexeme), ' | ')
        FROM unnest(to_tsvector('simple', :query_text))
-      WHERE to_tsvector('english', lexeme) <> ''::tsvector),
-    (SELECT string_agg(quote_literal(lexeme), ' | ')
-       FROM unnest(to_tsvector('simple', :query_text)))))""")
+      WHERE to_tsvector('english', lexeme) <> ''::tsvector
+        AND lexeme NOT IN ({", ".join(f"'{w}'" for w in KOREAN_STOPWORDS)})))""")
 
 
 async def keyword_search(
@@ -8322,6 +8354,20 @@ async def corpus(db):
             chunk_metadata={},
             embedding=None,
         ),
+        # The same trap in Korean, which the english dictionary cannot see: these
+        # are free-standing function words, so only KOREAN_STOPWORDS keeps them out
+        # of the query. Shares no lexeme with any topical chunk above.
+        Chunk(
+            document_id=doc_a.id,
+            chunk_index=5,
+            content="이 것은 그 것이고 그 것은 이 것입니다. 어떻게 이 것을 하는 방법은.",
+            token_count=14,
+            char_count=38,
+            page=98,
+            section=None,
+            chunk_metadata={},
+            embedding=None,
+        ),
     ]
     db.add_all(chunks)
     await db.commit()
@@ -8442,6 +8488,34 @@ async def test_empty_corpus_returns_no_evidence(db):
 
 
 NO_LEXEMES = ["", "   ", "!!! ??? ---", "\n\t", "'''", ") ( ) ((( ", "\\", "'|'&'!'(:*)\\"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "how does it?",
+        "What is it that we should do about all of this?",
+        "이 것은 어떻게 하는 방법은 무엇입니까",
+    ],
+)
+async def test_a_query_of_only_stopwords_abstains_instead_of_retrieving_noise(db, corpus, query):
+    """Every lexeme here is a stopword, so the query filters down to nothing and the
+    sparse half contributes nothing - the dense half answers alone. The corpus holds
+    two chunks made only of these words, in English and Korean, so falling back to
+    the unfiltered lexemes would retrieve them: at rrf_k=60 a sparse rank 1 (1/61)
+    outscores every dense hit from rank 6 down (1/66), displacing a real answer with
+    pure noise. That is why there is no coalesce fallback."""
+    assert await keyword_search(db, query, 20) == []
+
+
+async def test_a_korean_question_outranks_the_korean_function_word_noise(db, corpus):
+    """'어떻게' and '이' are invisible to the english dictionary, so without
+    KOREAN_STOPWORDS this question matched the Korean noise chunk and ranked it
+    first. Korean is the platform's primary language; noise at sparse rank 1 there
+    is the failure this list exists to prevent."""
+    korean_chunk = next(c for c in corpus["chunks"] if c.content.startswith("토마토 역병은"))
+    results = await keyword_search(db, "역병은 어떻게 퍼집니까?", 20)
+    assert results[0] == str(korean_chunk.id)
 
 
 @pytest.mark.parametrize("query", NO_LEXEMES)

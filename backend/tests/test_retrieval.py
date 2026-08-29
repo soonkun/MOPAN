@@ -158,6 +158,20 @@ async def corpus(db):
             chunk_metadata={},
             embedding=None,
         ),
+        # The same trap in Korean, which the english dictionary cannot see: these
+        # are free-standing function words, so only KOREAN_STOPWORDS keeps them out
+        # of the query. Shares no lexeme with any topical chunk above.
+        Chunk(
+            document_id=doc_a.id,
+            chunk_index=5,
+            content="이 것은 그 것이고 그 것은 이 것입니다. 어떻게 이 것을 하는 방법은.",
+            token_count=14,
+            char_count=38,
+            page=98,
+            section=None,
+            chunk_metadata={},
+            embedding=None,
+        ),
     ]
     db.add_all(chunks)
     await db.commit()
@@ -278,6 +292,34 @@ async def test_empty_corpus_returns_no_evidence(db):
 
 
 NO_LEXEMES = ["", "   ", "!!! ??? ---", "\n\t", "'''", ") ( ) ((( ", "\\", "'|'&'!'(:*)\\"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "how does it?",
+        "What is it that we should do about all of this?",
+        "이 것은 어떻게 하는 방법은 무엇입니까",
+    ],
+)
+async def test_a_query_of_only_stopwords_abstains_instead_of_retrieving_noise(db, corpus, query):
+    """Every lexeme here is a stopword, so the query filters down to nothing and the
+    sparse half contributes nothing - the dense half answers alone. The corpus holds
+    two chunks made only of these words, in English and Korean, so falling back to
+    the unfiltered lexemes would retrieve them: at rrf_k=60 a sparse rank 1 (1/61)
+    outscores every dense hit from rank 6 down (1/66), displacing a real answer with
+    pure noise. That is why there is no coalesce fallback."""
+    assert await keyword_search(db, query, 20) == []
+
+
+async def test_a_korean_question_outranks_the_korean_function_word_noise(db, corpus):
+    """'어떻게' and '이' are invisible to the english dictionary, so without
+    KOREAN_STOPWORDS this question matched the Korean noise chunk and ranked it
+    first. Korean is the platform's primary language; noise at sparse rank 1 there
+    is the failure this list exists to prevent."""
+    korean_chunk = next(c for c in corpus["chunks"] if c.content.startswith("토마토 역병은"))
+    results = await keyword_search(db, "역병은 어떻게 퍼집니까?", 20)
+    assert results[0] == str(korean_chunk.id)
 
 
 @pytest.mark.parametrize("query", NO_LEXEMES)
