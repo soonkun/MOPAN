@@ -917,11 +917,19 @@ _ENCODING = tiktoken.get_encoding("cl100k_base")
 
 
 def count_tokens(text: str) -> int:
-    return len(_ENCODING.encode(text))
+    return len(encode_tokens(text))
 
 
 def encode_tokens(text: str) -> list[int]:
-    return _ENCODING.encode(text)
+    # disallowed_special=(): tiktoken defaults to disallowed_special="all", which
+    # raises ValueError on any text spelling out a special token - "<|endoftext|>"
+    # is ordinary prose in technical writing about LLMs, so this is at least as
+    # likely to be an accident as an attack. The default made the failure sticky:
+    # it breaks chunking at ingest, and once such a chunk is indexed every request
+    # that retrieves it 500s the same way. These functions measure length and slice
+    # text; they never build a model's input array, so there is nothing here for a
+    # special token to mean.
+    return _ENCODING.encode(text, disallowed_special=())
 
 
 def decode_tokens(token_ids: list[int]) -> str:
@@ -8482,14 +8490,19 @@ a block of their own.
             raise ValueError("ANSWER_CONTEXT_TOKEN_BUDGET must be >= 1")
 ```
 
-- [ ] **Step 0b: Modify `backend/tests/test_settings.py`** — cover the retrieval limit guard
+- [ ] **Step 0b: Modify `backend/tests/test_settings.py`** — cover the retrieval and budget guards
 
 ```python
-@pytest.mark.parametrize("field", ["retrieval_top_n", "retrieval_candidate_limit"])
+@pytest.mark.parametrize(
+    "field",
+    ["retrieval_top_n", "retrieval_candidate_limit", "answer_context_token_budget"],
+)
 @pytest.mark.parametrize("value", [0, -1])
 def test_non_positive_retrieval_limits_are_rejected(field, value):
-    """Neither knob raises at query time, it just returns less: top_n=-1 boots
-    cleanly and silently drops the last evidence item off every answer."""
+    """No knob here raises at query time, each just returns less: top_n=-1 boots
+    cleanly and silently drops the last evidence item off every answer, and a
+    non-positive context budget degrades into one below-the-floor log per request
+    forever."""
     with pytest.raises(ValueError, match=field.upper()):
         Settings(**{field: value})
 ```
@@ -8502,7 +8515,7 @@ import logging
 import pytest
 
 from app.chat.prompt import build_prompt, get_prompt, new_nonce, sanitize_history
-from app.core.tokens import count_tokens
+from app.core.tokens import count_tokens, decode_tokens, encode_tokens
 from app.retrieval.evidence import Evidence
 
 
@@ -8871,6 +8884,42 @@ async def test_truncating_multibyte_text_leaves_no_replacement_character():
 async def test_get_prompt_rejects_an_unknown_name():
     with pytest.raises(ValueError, match="unknown prompt"):
         await get_prompt("no_such_agent")
+
+
+# --- Special tokens ----------------------------------------------------------
+
+SPECIAL_TOKEN_TEXT = "The model stops at <|endoftext|> and resumes after it."
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["chunk content", "section heading", "question", "history"],
+)
+async def test_a_special_token_spelling_does_not_blow_up_the_token_counter(field):
+    """tiktoken's encode() defaults to disallowed_special="all", so "<|endoftext|>"
+    reaching count_tokens raises ValueError - an uncaught 500. The string is
+    ordinary prose in technical writing about LLMs, and once such a chunk is
+    indexed every request that retrieves it fails the same way, so the failure is
+    sticky rather than one bad request. All four routes into the counter are
+    attacker- or author-controlled; this exercises each of them."""
+    template = await get_prompt("answer_agent")
+    item = _evidence(SPECIAL_TOKEN_TEXT if field == "chunk content" else "benign body")
+    if field == "section heading":
+        item.metadata["section"] = SPECIAL_TOKEN_TEXT
+    question = SPECIAL_TOKEN_TEXT if field == "question" else "q"
+    history = [{"role": "user", "content": SPECIAL_TOKEN_TEXT}] if field == "history" else []
+
+    messages, used = build_prompt(question, history, [item], prompt=template, nonce="N", token_budget=4000)
+    assert messages[-1].content == question
+    assert len(used) == 1
+
+
+def test_count_tokens_treats_a_special_token_spelling_as_ordinary_text():
+    """The guard belongs in tokens.py, not at each call site: chunking counts
+    tokens at ingest too, so the same string breaks the pipeline before a query
+    ever reaches the prompt."""
+    assert count_tokens(SPECIAL_TOKEN_TEXT) > 1
+    assert decode_tokens(encode_tokens(SPECIAL_TOKEN_TEXT)) == SPECIAL_TOKEN_TEXT
 ```
 
 - [ ] **Step 2: Run tests, expect FAIL**

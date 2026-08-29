@@ -3,7 +3,7 @@ import logging
 import pytest
 
 from app.chat.prompt import build_prompt, get_prompt, new_nonce, sanitize_history
-from app.core.tokens import count_tokens
+from app.core.tokens import count_tokens, decode_tokens, encode_tokens
 from app.retrieval.evidence import Evidence
 
 
@@ -372,3 +372,39 @@ async def test_truncating_multibyte_text_leaves_no_replacement_character():
 async def test_get_prompt_rejects_an_unknown_name():
     with pytest.raises(ValueError, match="unknown prompt"):
         await get_prompt("no_such_agent")
+
+
+# --- Special tokens ----------------------------------------------------------
+
+SPECIAL_TOKEN_TEXT = "The model stops at <|endoftext|> and resumes after it."
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["chunk content", "section heading", "question", "history"],
+)
+async def test_a_special_token_spelling_does_not_blow_up_the_token_counter(field):
+    """tiktoken's encode() defaults to disallowed_special="all", so "<|endoftext|>"
+    reaching count_tokens raises ValueError - an uncaught 500. The string is
+    ordinary prose in technical writing about LLMs, and once such a chunk is
+    indexed every request that retrieves it fails the same way, so the failure is
+    sticky rather than one bad request. All four routes into the counter are
+    attacker- or author-controlled; this exercises each of them."""
+    template = await get_prompt("answer_agent")
+    item = _evidence(SPECIAL_TOKEN_TEXT if field == "chunk content" else "benign body")
+    if field == "section heading":
+        item.metadata["section"] = SPECIAL_TOKEN_TEXT
+    question = SPECIAL_TOKEN_TEXT if field == "question" else "q"
+    history = [{"role": "user", "content": SPECIAL_TOKEN_TEXT}] if field == "history" else []
+
+    messages, used = build_prompt(question, history, [item], prompt=template, nonce="N", token_budget=4000)
+    assert messages[-1].content == question
+    assert len(used) == 1
+
+
+def test_count_tokens_treats_a_special_token_spelling_as_ordinary_text():
+    """The guard belongs in tokens.py, not at each call site: chunking counts
+    tokens at ingest too, so the same string breaks the pipeline before a query
+    ever reaches the prompt."""
+    assert count_tokens(SPECIAL_TOKEN_TEXT) > 1
+    assert decode_tokens(encode_tokens(SPECIAL_TOKEN_TEXT)) == SPECIAL_TOKEN_TEXT
