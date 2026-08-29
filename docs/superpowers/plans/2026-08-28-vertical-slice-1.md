@@ -7543,13 +7543,36 @@ git commit -m "feat: idempotent RAG pipeline and arq worker with owned resources
 - Test: `backend/tests/test_rrf.py`
 
 **Interfaces:**
-- Produces: `def reciprocal_rank_fusion(rankings: list[list[str]], k: int = 60) -> list[tuple[str, float]]` — each inner list is an ordered list of ids (best first); returns `(id, fused_score)` sorted by score descending.
+- Produces: `def reciprocal_rank_fusion(rankings: list[list[str]], *, k: int) -> list[tuple[str, float]]` — each inner list is an ordered list of ids (best first); returns `(id, fused_score)` sorted by score descending, ties broken by first appearance.
 
-RRF is a pure function, not an LLM call and not a model. This task is unchanged from revision 1 because both reviews called it correct; it is repeated verbatim so the plan stays self-contained.
+RRF is a pure function, not an LLM call and not a model. The formula and its
+tests are unchanged from revision 1 because both reviews called them correct.
+Revision 2 changes three things, all found by pushing adversarial input at it:
+
+1. **`k` is a required keyword argument, not `k: int = 60`.** The default
+   duplicated `Settings.rrf_k`'s 60 in a place no operator can reach, and the
+   two could drift apart silently. Every call site already passes `k=` (Task 15
+   passes `k=rrf_k`), so nothing else changes.
+2. **`k < 0` raises `ValueError`.** `rrf_k` is admin-configurable, so a negative
+   value reaches this function from `Settings`: `k=-1` is `ZeroDivisionError` at
+   rank 1, and any `k<0` flips the sign of the leading ranks and inverts the
+   ranking. `k=0` stays legal - rank starts at 1, so there is no division by
+   zero, and it is the most top-heavy setting an admin can dial in.
+3. **An id repeated inside one ranking counts once.** A ranking has each id once;
+   summing both positions would let one retriever's bug inflate its own candidate
+   above every honest one. `dict.fromkeys` de-duplicates per ranking while
+   keeping order, so an id appearing in two different rankings still stacks.
+
+Tie-breaking is first appearance, which `sorted`'s stability gives for free over
+insertion-ordered dicts: the ranking passed first wins a tie, and the order never
+depends on hash order. Irreproducible ordering here shows up much later as
+flaky citations.
 
 - [ ] **Step 1: Write `backend/tests/test_rrf.py`**
 
 ```python
+import pytest
+
 from app.retrieval.rrf import reciprocal_rank_fusion
 
 
@@ -7559,6 +7582,9 @@ def test_rrf_favors_id_ranked_high_in_both_lists():
 
 
 def test_rrf_score_matches_formula():
+    # Pins the arithmetic itself - 1 / (k + rank), rank starting at 1 - not just
+    # that the favoured id sorts first. A wrong constant or a 0-based rank passes
+    # every ordering assertion in this file and fails only here.
     fused = dict(reciprocal_rank_fusion([["a", "b"]], k=60))
     assert fused["a"] == 1 / (60 + 1)
     assert fused["b"] == 1 / (60 + 2)
@@ -7584,6 +7610,86 @@ def test_rrf_k_changes_the_score_but_not_the_order():
 def test_rrf_empty_rankings_returns_empty_list():
     assert reciprocal_rank_fusion([], k=60) == []
     assert reciprocal_rank_fusion([[], []], k=60) == []
+
+
+def test_rrf_an_empty_ranking_beside_a_full_one_contributes_nothing():
+    # An empty list is what a keyword search returns for a query with no lexical
+    # match. It must not shift the other ranking's ranks or its scores.
+    assert reciprocal_rank_fusion([[], ["a", "b"]], k=60) == reciprocal_rank_fusion([["a", "b"]], k=60)
+
+
+def test_rrf_counts_a_duplicated_id_once_per_ranking():
+    # A ranking is a ranking: an id repeated inside one list is malformed input,
+    # and summing both positions would let a buggy retriever inflate its own
+    # candidate past everything else. First occurrence wins, and the duplicate
+    # does not consume a rank slot - "c" is third, not fourth.
+    fused = dict(reciprocal_rank_fusion([["a", "b", "a", "c"]], k=60))
+    assert fused["a"] == 1 / 61
+    assert fused["b"] == 1 / 62
+    assert fused["c"] == 1 / 63
+
+
+def test_rrf_counts_an_id_once_per_ranking_but_once_in_each():
+    # De-duplication is per ranking, not global: appearing in both lists is the
+    # whole point of fusion and must still stack.
+    fused = dict(reciprocal_rank_fusion([["a", "a"], ["a"]], k=60))
+    assert fused["a"] == 2 / 61
+
+
+def test_rrf_k_zero_is_pure_reciprocal_rank():
+    # k=0 is legal, not a division by zero, because rank starts at 1. It is the
+    # maximally top-heavy setting an admin can dial in.
+    fused = dict(reciprocal_rank_fusion([["a", "b"]], k=0))
+    assert fused["a"] == 1.0
+    assert fused["b"] == 0.5
+
+
+def test_rrf_rejects_a_negative_k():
+    # rrf_k is admin-configurable, so a negative value reaches this function from
+    # Settings. k=-1 would be ZeroDivisionError at rank 1 and any k<0 flips the
+    # sign of the leading ranks - a nonsense ranking rather than a loud failure.
+    with pytest.raises(ValueError, match="k"):
+        reciprocal_rank_fusion([["a"]], k=-1)
+
+
+def test_rrf_breaks_ties_by_first_appearance():
+    # Symmetric rankings tie exactly. Ties resolve to the order the ids were
+    # first seen - so the ranking passed first wins - and never to dict/hash
+    # order, which would make retrieval irreproducible across runs.
+    fused = reciprocal_rank_fusion([["a", "b"], ["b", "a"]], k=60)
+    assert fused[0][1] == fused[1][1]
+    assert [id_ for id_, _ in fused] == ["a", "b"]
+    swapped = reciprocal_rank_fusion([["b", "a"], ["a", "b"]], k=60)
+    assert [id_ for id_, _ in swapped] == ["b", "a"]
+
+
+def test_rrf_is_deterministic_across_repeated_calls():
+    rankings = [[f"id-{n}" for n in range(50)], [f"id-{n}" for n in range(49, -1, -1)]]
+    first = reciprocal_rank_fusion(rankings, k=60)
+    assert all(reciprocal_rank_fusion(rankings, k=60) == first for _ in range(5))
+
+
+def test_rrf_accumulates_over_many_rankings():
+    # Float addition, so exact equality is not promised past the trivial cases
+    # above; what must hold is that every ranking still adds and none is lost.
+    ten = dict(reciprocal_rank_fusion([["a"]] * 10, k=60))["a"]
+    nine = dict(reciprocal_rank_fusion([["a"]] * 9, k=60))["a"]
+    assert ten == pytest.approx(10 / 61)
+    assert ten > nine
+
+
+def test_rrf_handles_a_long_ranking_in_full_descending_order():
+    ranking = [f"id-{n}" for n in range(1000)]
+    fused = reciprocal_rank_fusion([ranking], k=60)
+    assert len(fused) == 1000
+    assert [id_ for id_, _ in fused] == ranking
+    assert fused[-1][1] == 1 / (60 + 1000)
+
+
+def test_rrf_does_not_mutate_its_input():
+    rankings = [["a", "b"], ["b", "a"]]
+    reciprocal_rank_fusion(rankings, k=60)
+    assert rankings == [["a", "b"], ["b", "a"]]
 ```
 
 - [ ] **Step 2: Run test, expect FAIL**
@@ -7594,13 +7700,31 @@ def test_rrf_empty_rankings_returns_empty_list():
 from collections import defaultdict
 
 
-def reciprocal_rank_fusion(rankings: list[list[str]], k: int = 60) -> list[tuple[str, float]]:
+def reciprocal_rank_fusion(rankings: list[list[str]], *, k: int) -> list[tuple[str, float]]:
     """Reciprocal Rank Fusion: score(id) = sum over rankings of 1 / (k + rank),
-    with rank starting at 1. A pure function - no model, no LLM, no I/O."""
-    scores: dict[str, float] = defaultdict(float)
+    with rank starting at 1. A pure function - no model, no LLM, no I/O.
 
+    `rankings` is one ordered list of ids per retriever, best first; the same id
+    in several lists is the point, and its contributions stack. `k` is required
+    rather than defaulted, so the value can only come from `Settings.rrf_k` and
+    cannot silently drift from it. k=0 is legal (pure reciprocal rank); k<0 is
+    not a ranking parameter at all and is rejected rather than dividing by zero
+    at rank -k.
+
+    Ties are broken by first appearance, which the stable sort gives for free:
+    the earlier ranking wins, and the order never depends on hash order.
+    """
+    if k < 0:
+        raise ValueError(f"rrf k must be >= 0, got {k}")
+
+    scores: dict[str, float] = defaultdict(float)
     for ranking in rankings:
-        for position, item_id in enumerate(ranking, start=1):
+        # dict.fromkeys de-duplicates while keeping order. An id repeated within
+        # one ranking is malformed input - a list of ranks has each id once - and
+        # counting both positions would let one retriever's bug inflate its own
+        # candidate above every honest one. Per ranking, so an id in two lists
+        # still scores twice.
+        for position, item_id in enumerate(dict.fromkeys(ranking), start=1):
             scores[item_id] += 1 / (k + position)
 
     return sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
@@ -7609,7 +7733,7 @@ def reciprocal_rank_fusion(rankings: list[list[str]], k: int = 60) -> list[tuple
 - [ ] **Step 4: Run tests, expect PASS**
 
 Run: `pytest tests/test_rrf.py -v`
-Expected: all 6 tests PASS
+Expected: all 16 tests PASS
 
 - [ ] **Step 5: Commit**
 
