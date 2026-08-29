@@ -107,11 +107,18 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
+      # A BUILD arg, not `environment`. Measured: `next build` evaluates
+      # next.config.js rewrites() once and bakes the destination into
+      # .next/routes-manifest.json, and `next start` ignores the variable
+      # afterwards. Under `environment:` this looked configured and did nothing,
+      # so the container proxied /api/* to its own empty port 8000 and every
+      # request failed - the same trap NEXT_PUBLIC_API_BASE_URL set, one layer
+      # down. Changing it requires a rebuild, not a restart.
+      args:
+        API_INTERNAL_URL: http://backend:8000
     restart: unless-stopped
     # No env_file here on purpose: the frontend container has no business holding
     # OPENAI_API_KEY, POSTGRES_PASSWORD, or DATABASE_URL.
-    environment:
-      API_INTERNAL_URL: http://backend:8000
     depends_on:
       backend:
         condition: service_healthy

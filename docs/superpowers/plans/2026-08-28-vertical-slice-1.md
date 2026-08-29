@@ -328,6 +328,8 @@ node_modules/
 .next/
 data/uploads/*
 !data/uploads/.gitkeep
+next-env.d.ts
+*.tsbuildinfo
 ```
 
 - [ ] **Step 6: Create `.gitattributes`**
@@ -454,7 +456,12 @@ ANSWER_CONTEXT_TOKEN_BUDGET=6000
 UPLOAD_DIR=./data/uploads
 MAX_UPLOAD_SIZE_MB=50
 
-# Where the Next.js server proxies /api/* to. Compose sets this to http://backend:8000.
+# Where the Next.js server proxies /api/* to. Read at `next build` time only -
+# next build bakes rewrites() into .next/routes-manifest.json and next start
+# ignores the variable - so this file does NOT configure it. Compose passes
+# http://backend:8000 as a build arg (see docker-compose.yml). Outside Docker
+# the next.config.js default of http://localhost:8000 already applies; override
+# it by exporting the variable before `npm run build`, not before `npm start`.
 API_INTERNAL_URL=http://localhost:8000
 ```
 
@@ -495,6 +502,12 @@ CMD ["arq", "app.worker.WorkerSettings"]
 ```dockerfile
 FROM node:20-slim
 WORKDIR /app
+# Build ARG, not a runtime ENV: `next build` resolves next.config.js rewrites()
+# into .next/routes-manifest.json as a literal, and `next start` never re-reads
+# the variable. It has to be present for the RUN npm run build below or the
+# image proxies /api/* to its own empty port 8000.
+ARG API_INTERNAL_URL=http://backend:8000
+ENV API_INTERNAL_URL=${API_INTERNAL_URL}
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci || npm install
 COPY frontend .
@@ -619,11 +632,18 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
+      # A BUILD arg, not `environment`. Measured: `next build` evaluates
+      # next.config.js rewrites() once and bakes the destination into
+      # .next/routes-manifest.json, and `next start` ignores the variable
+      # afterwards. Under `environment:` this looked configured and did nothing,
+      # so the container proxied /api/* to its own empty port 8000 and every
+      # request failed - the same trap NEXT_PUBLIC_API_BASE_URL set, one layer
+      # down. Changing it requires a rebuild, not a restart.
+      args:
+        API_INTERNAL_URL: http://backend:8000
     restart: unless-stopped
     # No env_file here on purpose: the frontend container has no business holding
     # OPENAI_API_KEY, POSTGRES_PASSWORD, or DATABASE_URL.
-    environment:
-      API_INTERNAL_URL: http://backend:8000
     depends_on:
       backend:
         condition: service_healthy
@@ -11323,11 +11343,19 @@ git commit -m "fix: OR-join simple lexemes so the sparse retriever answers real 
 - Create: `frontend/components/ui/ErrorBanner.tsx`
 
 **Interfaces:**
-- Produces: `apiFetch<T>(path, options?) -> Promise<T>` (same-origin relative paths, `credentials: "include"`, JSON `Content-Type` **only for string bodies**), `streamChat(body, onEvent) -> Promise<void>` (SSE reader), `ApiError`.
+- Produces: `apiFetch<T>(path, options?) -> Promise<T>` (same-origin relative paths, `credentials: "include"`, JSON `Content-Type` **only for string bodies**, a 401 outside `/login` and `/register` sends the browser to `/login`), `streamChat(body, onEvent) -> Promise<void>` (SSE reader), `ApiError`.
 - Produces: TS types `User, Collection, DocumentItem, Chunk, Block, Citation, Conversation, Message, ChatEvent`.
 - Produces: `middleware.ts` redirecting unauthenticated visitors to `/login`; `/` redirecting to `/chat`.
 
-**The single-origin decision.** The browser talks only to the Next.js origin; `next.config.js` `rewrites()` proxies `/api/*` to the backend. That one change removes four separate blockers at once: CORS never fires, `SameSite=Lax` cookies are correct (same site, not cross-site), no API URL is baked into the client bundle at build time, and Cloudflare Tunnel needs **one** tunnel on port 3000 instead of two random `trycloudflare` hostnames.
+Two things `apiFetch` has to get right that are easy to leave out:
+1. **A 401 must navigate, not just throw.** `middleware.ts` checks only that the cookie *exists*; the backend decides whether it is valid. When a session dies server-side — revoked from another tab, dropped by a Redis restart — the cookie is still there, middleware lets the page render, and every request then throws. Without the redirect the user is stuck on a working-looking but permanently empty shell. It must not fire on `/login` or `/register`, where a 401 means "wrong password" and belongs in the banner.
+2. **FastAPI's `detail` is not always a string.** `HTTPException` gives a string; a 422 gives a **list** of `{loc, msg, type}` — the app's own validation handler returns `{"detail": [...]}`. Reading `.detail` straight into `ApiError` renders `[object Object]` in the error banner, which is what a user typing an over-72-byte password would actually see.
+
+**The single-origin decision.** The browser talks only to the Next.js origin; `next.config.js` `rewrites()` proxies `/api/*` to the backend. That one change removes four separate blockers at once: CORS never fires, `SameSite=Lax` cookies are correct (same site, not cross-site), no API URL reaches the client bundle at all, and Cloudflare Tunnel needs **one** tunnel on port 3000 instead of two random `trycloudflare` hostnames.
+
+**`API_INTERNAL_URL` is a BUILD-time value, and this was measured.** `next build` evaluates `rewrites()` once and writes the resolved destination into `.next/routes-manifest.json` as a literal string; `next start` serves from that manifest and never re-reads the variable. A server started with `API_INTERNAL_URL=http://127.0.0.1:8123` still proxied to `http://localhost:8000`. Compose originally supplied it under `environment:`, which therefore did nothing — the frontend container would have proxied `/api/*` to its own empty port 8000 and every request would have failed, which is the exact shape of the `NEXT_PUBLIC_API_BASE_URL` trap this design was written to remove, one layer further down. `frontend/Dockerfile` takes it as an `ARG` and `docker-compose.yml` passes it under `build.args`. Changing it needs a rebuild, not a restart.
+
+**SSE survives the rewrite.** Verified against a throwaway event-stream server behind the proxy: four frames emitted one second apart arrived one second apart through Next, `Transfer-Encoding: chunked`, identical timing to hitting the origin directly. Task 22's chat page does not need a bypass.
 
 - [ ] **Step 1: Write `frontend/package.json`**
 
@@ -11340,11 +11368,10 @@ git commit -m "fix: OR-join simple lexemes so the sparse retriever answers real 
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "next": "14.2.13",
+    "next": "14.2.35",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },
@@ -11396,8 +11423,19 @@ module.exports = {
   // Same-origin API proxy. The browser only ever calls /api/* on this origin, so:
   //  - CORS never applies
   //  - SameSite=Lax session cookies are sent normally, including behind a tunnel
-  //  - no API URL is inlined into the client bundle at build time
+  //  - no backend URL reaches the client bundle at all
   //  - one Cloudflare Tunnel on :3000 exposes the whole app
+  //
+  // API_INTERNAL_URL is read at BUILD time, not at run time, and this was
+  // measured: `next build` evaluates rewrites() once and writes the resolved
+  // destination as a literal string into .next/routes-manifest.json, which is
+  // what `next start` serves from. Setting the variable in the environment of
+  // the running server changes nothing - a server started with
+  // API_INTERNAL_URL=http://127.0.0.1:8123 still proxied to localhost:8000.
+  // So frontend/Dockerfile takes it as an ARG and docker-compose.yml passes it
+  // under build.args. Putting it back under compose `environment:` would be the
+  // same silent failure NEXT_PUBLIC_API_BASE_URL had, one layer down: the
+  // container would proxy to its own empty port 8000 and every call would fail.
   async rewrites() {
     const backend = process.env.API_INTERNAL_URL || "http://localhost:8000";
     return [{ source: "/api/:path*", destination: `${backend}/api/:path*` }];
@@ -11497,6 +11535,11 @@ export interface Block {
 
 export interface Citation {
   index: number;
+  // source_type and ref are the only two fields every citation carries - the
+  // five below come from Evidence.metadata and a Slice 2/3 MCP citation has
+  // none of them. See _citations_from in backend/app/chat/service.py.
+  source_type: "rag" | "mcp";
+  ref: string;
   chunk_id: string;
   document_id: string;
   filename: string | null;
@@ -11539,6 +11582,10 @@ import type { ChatEvent } from "@/lib/types";
 // rewrites(). Nothing about the backend location is baked into this bundle.
 const API_BASE_URL = "";
 
+// Kept in step with middleware.ts. A 401 on these pages is "wrong password",
+// not "your session is gone", and belongs in the error banner.
+const PUBLIC_PATHS = ["/login", "/register"];
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -11547,6 +11594,39 @@ export class ApiError extends Error {
     super(message);
     this.name = "ApiError";
   }
+}
+
+/** A 401 anywhere but the auth pages means the session is gone - expired in
+ * Redis, revoked from another tab, or lost to a server restart - while
+ * middleware still saw the cookie and let the page render. Without this the
+ * user is left staring at a functional-looking but permanently empty shell
+ * with no way back. `replace`, not `href`, so Back does not bounce into it. */
+function redirectIfSessionGone(status: number): void {
+  if (status !== 401 || typeof window === "undefined") return;
+  if (PUBLIC_PATHS.some((p) => window.location.pathname.startsWith(p))) return;
+  window.location.replace("/login");
+}
+
+/** FastAPI's `detail` is a string for an HTTPException but a LIST for a 422 -
+ * the app's own handler returns {"detail": [{loc, msg, type}, ...]}. Reading
+ * `.detail` straight into ApiError renders "[object Object]" in the banner,
+ * which is exactly the case a user hits by typing a too-long password. */
+function detailText(payload: unknown, fallback: string): string {
+  const detail = (payload as { detail?: unknown } | null)?.detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => (item as { msg?: unknown })?.msg)
+      .filter((msg): msg is string => typeof msg === "string");
+    if (messages.length > 0) return messages.join(", ");
+  }
+  return fallback;
+}
+
+async function failure(response: Response): Promise<ApiError> {
+  redirectIfSessionGone(response.status);
+  const payload = await response.json().catch(() => null);
+  return new ApiError(response.status, detailText(payload, response.statusText));
 }
 
 export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -11562,8 +11642,7 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
   });
 
   if (!response.ok) {
-    const detail = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new ApiError(response.status, detail.detail ?? response.statusText);
+    throw await failure(response);
   }
   if (response.status === 204) {
     return undefined as T;
@@ -11590,8 +11669,7 @@ export async function streamChat(
   });
 
   if (!response.ok || !response.body) {
-    const detail = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new ApiError(response.status, detail.detail ?? response.statusText);
+    throw await failure(response);
   }
 
   const reader = response.body.getReader();
@@ -11642,6 +11720,9 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
+  // `api` MUST stay excluded: middleware runs before next.config.js rewrites, so
+  // matching /api/* here would answer every proxied API call with a redirect to
+  // the login HTML page instead of forwarding it to the backend.
   matcher: ["/((?!api|_next/static|_next/image|favicon.ico).*)"],
 };
 ```
@@ -11684,8 +11765,15 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 ```tsx
 import { redirect } from "next/navigation";
 
-// Without this, http://localhost:3000/ - the URL the README tells you to open -
-// is a 404.
+// force-dynamic is not optional here. Statically prerendered, this page answers
+// 307 with NO Location header at all: the redirect is encoded in the RSC payload
+// as NEXT_REDIRECT and only runs once client JS boots, so curl, `curl -L`, the
+// Task 24 smoke test and any health check see a dead 307 carrying an error
+// shell. Rendered per request, Next emits a real 307 + Location: /chat.
+export const dynamic = "force-dynamic";
+
+// Without this page, http://localhost:3000/ - the URL the README tells you to
+// open - is a 404.
 export default function RootPage() {
   redirect("/chat");
 }
@@ -11862,12 +11950,15 @@ export default function RegisterPage() {
 
 - [ ] **Step 12: Verify the frontend builds**
 
-Run (from `frontend/`): `npm install && npm run build`
-Expected: build completes with no TypeScript errors. Commit `package-lock.json` so the Docker image can use `npm ci`.
+Run (from `frontend/`): `npm install && npm run build && npm run typecheck`
+Expected: build completes with no TypeScript errors. Commit `package-lock.json` so the Docker image can use `npm ci`. `typecheck` must run **after** `build`, which is what generates `next-env.d.ts` and `.next/types`.
+
+There is no frontend test runner in Slice 1 and none is added here; the production build plus `tsc --noEmit` is the whole check. `next lint` is deliberately absent from `package.json`: no eslint is installed, so the script would only open an interactive configuration prompt and hang.
 
 - [ ] **Step 13: Commit**
 
 ```bash
+git add .gitignore .env.example docker-compose.yml frontend/Dockerfile
 git add frontend/package.json frontend/package-lock.json frontend/tsconfig.json frontend/next.config.js frontend/tailwind.config.ts frontend/postcss.config.js frontend/middleware.ts frontend/app frontend/lib frontend/components/ui
 git commit -m "feat: frontend scaffold, same-origin api proxy, login/register"
 ```

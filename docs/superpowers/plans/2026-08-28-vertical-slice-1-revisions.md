@@ -87,7 +87,14 @@ justified below, marked **NOT APPLIED**).
 - **C9 — Cloudflare Tunnel impossible.** Adopted the single-origin rewrite:
   `next.config.js` `rewrites()` proxies `/api/*` to `API_INTERNAL_URL`,
   `lib/api.ts` uses `API_BASE_URL = ""`. CORS never fires, `SameSite=Lax` is
-  correct, nothing is baked at build time, one tunnel on :3000 exposes the app.
+  correct, nothing reaches the **client bundle**, one tunnel on :3000 exposes
+  the app. Corrected during Task 20: this originally read "nothing is baked at
+  build time", which is false of the **server** half and the overstatement hid a
+  live bug. `next build` evaluates `rewrites()` once and writes the resolved
+  destination into `.next/routes-manifest.json`; `next start` never re-reads
+  `API_INTERNAL_URL`. Compose supplied it under `environment:` — measured to do
+  nothing, leaving the container proxying to its own empty port 8000. It is now
+  a Docker `ARG` passed under `build.args`.
   `cors_origins` still moved into `Settings` as a fallback for direct backend
   access.
 - **C10 — admin never enforced, open registration.** `require_admin` gates

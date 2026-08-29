@@ -1,0 +1,9 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Flat, bordered, high-contrast. No gradients, no glow, no glassmorphism,
+   no oversized radii, no decorative animation. */
+body {
+  @apply bg-white text-gray-900 antialiased;
+}

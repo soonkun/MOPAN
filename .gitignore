@@ -12,3 +12,5 @@ node_modules/
 .next/
 data/uploads/*
 !data/uploads/.gitkeep
+next-env.d.ts
+*.tsbuildinfo
