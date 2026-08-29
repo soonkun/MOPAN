@@ -13,7 +13,11 @@ def reciprocal_rank_fusion(rankings: list[list[str]], *, k: int) -> list[tuple[s
     at rank -k.
 
     Ties are broken by first appearance, which the stable sort gives for free:
-    the earlier ranking wins, and the order never depends on hash order.
+    the earlier ranking wins, and the order never depends on hash order. That
+    holds exactly while a fused score is a sum of at most two terms, which is
+    what Slice 1 passes; with three or more rankings the same addends can arrive
+    in a different order per id and land 1 ulp apart, so nominally equal scores
+    stop comparing equal. Still deterministic, just no longer a tie.
     """
     if k < 0:
         raise ValueError(f"rrf k must be >= 0, got {k}")

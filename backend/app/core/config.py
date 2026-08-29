@@ -102,6 +102,12 @@ class Settings(BaseSettings):
             raise ValueError(f"EMBEDDING_BATCH_SIZE must satisfy 1 <= value <= {EMBEDDING_MAX_BATCH_SIZE}")
         if self.embedding_batch_chars < 1:
             raise ValueError("EMBEDDING_BATCH_CHARS must be at least 1")
+        # reciprocal_rank_fusion rejects k < 0 (ZeroDivisionError at rank -k, and
+        # negative scores that invert the ranking before it gets there). Checking
+        # it here turns an operator's typo into a boot failure instead of a 500 on
+        # the first query that reaches fusion.
+        if self.rrf_k < 0:
+            raise ValueError("RRF_K must be >= 0")
         return self
 
 

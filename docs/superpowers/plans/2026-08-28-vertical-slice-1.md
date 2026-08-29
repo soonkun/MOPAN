@@ -5724,6 +5724,19 @@ Both sibling validators have a test; without one here, deleting the threshold
 check fails nothing. Append beside `test_out_of_range_max_chunk_tokens_is_rejected`:
 
 ```python
+@pytest.mark.parametrize("value", [-1, -60])
+def test_negative_rrf_k_is_rejected(value):
+    # reciprocal_rank_fusion raises on k < 0. Without this guard the typo boots
+    # fine and surfaces as a 500 on the first query that reaches fusion.
+    with pytest.raises(ValueError, match="RRF_K"):
+        Settings(rrf_k=value)
+
+
+def test_rrf_k_zero_is_accepted():
+    # k=0 is pure reciprocal rank, the most top-heavy legal setting.
+    assert Settings(rrf_k=0).rrf_k == 0
+
+
 @pytest.mark.parametrize("value", [1.5, -1.01])
 def test_out_of_range_similarity_threshold_is_rejected(value):
     # Cosine similarity is bounded to [-1, 1]. Outside it the semantic strategy
@@ -6370,6 +6383,12 @@ and append to the model validator, after the `SEMANTIC_SIMILARITY_THRESHOLD` che
             raise ValueError(f"EMBEDDING_BATCH_SIZE must satisfy 1 <= value <= {EMBEDDING_MAX_BATCH_SIZE}")
         if self.embedding_batch_chars < 1:
             raise ValueError("EMBEDDING_BATCH_CHARS must be at least 1")
+        # reciprocal_rank_fusion rejects k < 0 (ZeroDivisionError at rank -k, and
+        # negative scores that invert the ranking before it gets there). Checking
+        # it here turns an operator's typo into a boot failure instead of a 500 on
+        # the first query that reaches fusion.
+        if self.rrf_k < 0:
+            raise ValueError("RRF_K must be >= 0")
 ```
 
 - [ ] **Step 6: Modify `backend/tests/test_settings.py`** — cover the new validators
@@ -7712,7 +7731,11 @@ def reciprocal_rank_fusion(rankings: list[list[str]], *, k: int) -> list[tuple[s
     at rank -k.
 
     Ties are broken by first appearance, which the stable sort gives for free:
-    the earlier ranking wins, and the order never depends on hash order.
+    the earlier ranking wins, and the order never depends on hash order. That
+    holds exactly while a fused score is a sum of at most two terms, which is
+    what Slice 1 passes; with three or more rankings the same addends can arrive
+    in a different order per id and land 1 ulp apart, so nominally equal scores
+    stop comparing equal. Still deterministic, just no longer a tie.
     """
     if k < 0:
         raise ValueError(f"rrf k must be >= 0, got {k}")

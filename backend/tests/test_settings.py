@@ -108,6 +108,19 @@ def test_out_of_range_embedding_batch_chars_is_rejected(value):
         Settings(embedding_batch_chars=value)
 
 
+@pytest.mark.parametrize("value", [-1, -60])
+def test_negative_rrf_k_is_rejected(value):
+    # reciprocal_rank_fusion raises on k < 0. Without this guard the typo boots
+    # fine and surfaces as a 500 on the first query that reaches fusion.
+    with pytest.raises(ValueError, match="RRF_K"):
+        Settings(rrf_k=value)
+
+
+def test_rrf_k_zero_is_accepted():
+    # k=0 is pure reciprocal rank, the most top-heavy legal setting.
+    assert Settings(rrf_k=0).rrf_k == 0
+
+
 @pytest.mark.parametrize("value", [1.5, -1.01])
 def test_out_of_range_similarity_threshold_is_rejected(value):
     # Cosine similarity is bounded to [-1, 1]. Outside it the semantic strategy
