@@ -263,12 +263,53 @@ def _cancelling_ctx(test_sessionmaker, job_try):
     }
 
 
+async def test_a_timed_out_job_is_marked_failed_on_the_first_try(
+    db, document, test_sessionmaker, monkeypatch
+):
+    """A hung pipeline must not depend on job_try. asyncio.wait_for turns arq's
+    job_timeout cancellation into TimeoutError, which is NOT in arq's retry set
+    (Retry/RetryJob/CancelledError), so arq finishes the job at job_try == 1 and
+    it never reaches max_tries - a job_try-gated handler would leave the document
+    at `parsing` forever. PIPELINE_TIMEOUT fires first precisely so this arrives
+    as a TimeoutError we can tell apart from a shutdown."""
+
+    async def hangs(*args, **kwargs):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(worker_module, "run_pipeline", hangs)
+    monkeypatch.setattr(worker_module, "PIPELINE_TIMEOUT", 0.05)
+
+    with pytest.raises(TimeoutError):
+        await worker_module.process_document(_cancelling_ctx(test_sessionmaker, 1), str(document.id))
+
+    await db.refresh(document)
+    assert document.status == "failed"
+    assert document.error_message == USER_FACING_FAILURE
+
+
+async def test_a_non_cancellation_failure_is_marked_on_any_try(db, document, test_sessionmaker, monkeypatch):
+    """arq retries only Retry/RetryJob/CancelledError. Anything else is finished
+    on the spot, so gating the mark on job_try would strand every escape that is
+    not a shutdown - including a raise from the pipeline's own failure handler,
+    which runs on a session whose connection may already be gone."""
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("connection is gone")
+
+    monkeypatch.setattr(worker_module, "run_pipeline", boom)
+
+    with pytest.raises(RuntimeError):
+        await worker_module.process_document(_cancelling_ctx(test_sessionmaker, 1), str(document.id))
+
+    await db.refresh(document)
+    assert document.status == "failed"
+
+
 async def test_a_cancelled_job_marks_the_document_failed_on_the_last_try(
     db, document, test_sessionmaker, monkeypatch
 ):
-    """job_timeout cancels the job's task, so the pipeline's own `except
-    Exception` never runs. Without the worker-level handler the document sits at
-    `parsing` until someone notices."""
+    """SIGTERM on the final try has no retry left to carry the document, so the
+    worker records it rather than leaving it mid-pipeline."""
 
     async def cancelled(*args, **kwargs):
         raise asyncio.CancelledError
@@ -302,7 +343,9 @@ async def test_a_cancelled_job_stays_recoverable_before_the_last_try(
         await worker_module.process_document(_cancelling_ctx(test_sessionmaker, 1), str(document.id))
 
     await db.refresh(document)
-    assert document.status != "failed"
+    # The exact status, not just "not failed": a negative assertion passes on
+    # any unexpected state, including one the retry could not resume from.
+    assert document.status == "uploaded"
     assert document.error_message is None
 
 

@@ -16,6 +16,12 @@ from app.retrieval.vector_store import PgVectorStore
 
 logger = logging.getLogger("mopan.worker")
 
+# Our own deadline, deliberately below arq's job_timeout so it always wins. A
+# hung pipeline then raises TimeoutError here instead of arq cancelling the
+# task, which leaves CancelledError meaning exactly one thing - SIGTERM - and
+# that is what makes job_try a sound discriminator in process_document.
+PIPELINE_TIMEOUT = 870
+
 
 async def startup(ctx: dict) -> None:
     """The worker owns its resources exactly like the API's lifespan does. An
@@ -73,28 +79,34 @@ async def mark_failed(ctx: dict, document_id: str) -> None:
 async def process_document(ctx: dict, document_id: str) -> None:
     settings = ctx["settings"]
     try:
-        async with ctx["sessionmaker"]() as db:
-            await run_pipeline(
-                db,
-                PgVectorStore(db),
-                ctx["llm_provider"],
-                get_chunking_strategy(settings),
-                document_id,
-            )
-    except BaseException:
+        async with asyncio.timeout(PIPELINE_TIMEOUT):
+            async with ctx["sessionmaker"]() as db:
+                await run_pipeline(
+                    db,
+                    PgVectorStore(db),
+                    ctx["llm_provider"],
+                    get_chunking_strategy(settings),
+                    document_id,
+                )
+    except BaseException as exc:
         # BaseException, and here rather than in a WorkerSettings hook: arq 0.26
         # has no on_job_failure, and get_kwargs() silently DROPS any attribute
         # that is not a Worker parameter - so a hook by that name would look
-        # configured and never run. job_timeout cancels this task, and
-        # CancelledError is not an Exception, so the pipeline's own handler never
-        # sees it and the document would sit at `parsing` forever.
+        # configured and never run.
         #
-        # Only on the last try: arq cancels in-flight jobs on SIGTERM too, so an
-        # unconditional mark would tell every user mid-deploy that their file was
-        # bad. retry_jobs defaults to True, so a non-final try is re-queued and
-        # the document is only briefly stale.
+        # arq retries only Retry/RetryJob/CancelledError. Everything else -
+        # including the TimeoutError from PIPELINE_TIMEOUT above - is finished on
+        # the spot, so this is the document's last chance to be recorded and the
+        # mark is unconditional.
+        #
+        # CancelledError therefore means SIGTERM, which arq DOES re-queue.
+        # Marking those failed would tell every user mid-deploy that their file
+        # was bad; the retry carries the document instead. On the last try there
+        # is no retry left, so mark it. Default to max_tries so a missing
+        # job_try fails safe rather than silently disabling the handler.
         # Shielded: the cleanup must survive the cancellation that caused it.
-        if ctx.get("job_try", 1) >= WorkerSettings.max_tries:
+        shutdown = isinstance(exc, asyncio.CancelledError)
+        if not shutdown or ctx.get("job_try", WorkerSettings.max_tries) >= WorkerSettings.max_tries:
             await asyncio.shield(mark_failed(ctx, document_id))
         raise
 
@@ -105,8 +117,10 @@ class WorkerSettings:
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     # Defaults are 300s / 5 tries. A long PDF gets killed mid-parse at 300s, and
-    # 5 tries multiplied the corpus before the pipeline deleted first.
-    job_timeout = 900
+    # 5 tries multiplied the corpus before the pipeline deleted first. The
+    # margin over PIPELINE_TIMEOUT keeps arq's cancellation unreachable, so a
+    # hung job is ours to mark rather than arq's to silently finish.
+    job_timeout = PIPELINE_TIMEOUT + 30
     max_tries = 2
     keep_result = 3600
     # ponytail: a SIGKILL/OOM leaves the document at `parsing` with no try left
