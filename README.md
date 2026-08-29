@@ -1,6 +1,8 @@
 # MOPAN
 
-MOPAN is the **base system** of a general-purpose RAG · MCP · LLM · Agent platform — not a chatbot for one domain. Users register and combine their own RAG collections, MCP servers, LLMs and agents, and a Super Agent decides per question which of them to use. The name is the Korean 모판, the seedling tray: one base, transplanted into many fields.
+**Modular Orchestration Platform for Agent Nexus** — and, read in Korean, 모판: the seedling tray a rice farmer raises one crop in and transplants into any number of different fields. The two readings say the same thing from opposite ends. One base, many fields.
+
+MOPAN is the **base system** of a general-purpose RAG · MCP · LLM · Agent platform — not a chatbot for one domain. Users register and combine their own RAG collections, MCP servers, LLMs and agents, and a Super Agent decides per question which of them to use.
 
 **Slice 1, this repository's current state, delivers one complete vertical path:** login → document ingestion → semantic chunking → embedding → hybrid retrieval → RRF fusion → a cited answer. Everything is behind an interface (`VectorStore`, `Parser`, `ChunkingStrategy`, `Reranker`, `LLMProvider`) so the later slices add implementations rather than rewrite this one.
 
