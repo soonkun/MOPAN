@@ -9791,12 +9791,13 @@ git commit -m "feat: split chat into retrieve() and answer() over an Evidence ab
 
 **Interfaces:**
 - Consumes: `retrieve`/`answer`/`load_history`/`persist_turn` (Task 17), `get_owned_conversation` (Task 5), `PgVectorStore` (Task 12), `NoneReranker` (Task 15).
-- Produces: routes `POST /api/chat` (**SSE**: `status` → `citations` → `done`), `POST /api/search`, `GET /api/conversations`, `GET /api/conversations/{id}/messages` (**owner-only, 404 otherwise**), `DELETE /api/conversations/{id}`.
+- Produces: routes `POST /api/chat` (**SSE**: `status` → `citations` → `done`; **404 before the stream** for a conversation id that is not the caller's), `POST /api/search`, `GET /api/conversations`, `GET /api/conversations/{id}/messages` (**owner-only, 404 otherwise**), `DELETE /api/conversations/{id}` (**same**).
 - Produces: `get_llm_provider(request) -> LLMProvider` reading `request.app.state.llm_provider`.
 
-Two shape decisions:
+Three shape decisions:
 - **SSE from day one.** Slice 3 must show execution status progressively ("문서 검색 → 진단 → 결과 종합"); a single JSON response cannot. Slice 1 emits only `status: searching` → `status: answering` → `citations` → `done`, and reserves the `token` event type. The frontend change is small now and free later.
-- **The DB session is committed before the LLM call.** Holding a transaction across a 5–20 second network call exhausts the pool at ~15 concurrent chats and blocks uploads and status polling.
+- **The DB session is committed before the LLM call.** Holding a transaction across a 5–20 second network call exhausts the pool at ~15 concurrent chats and blocks uploads and status polling. Each phase gets its own short session, and none of them is the request's own auth session.
+- **The conversation is resolved before the stream starts.** An ownership failure raised inside the generator cannot produce a status code — the status line is already on the wire — so it would arrive as a 200 carrying an `error` frame, and `/api/chat` would be the one route where the 404-not-403 rule does not hold. Resolving first keeps the 404, and Task 20's `streamChat()` already checks `response.ok` before reading the body.
 
 - [ ] **Step 1: Write `backend/app/schemas/chat.py`**
 
@@ -9861,11 +9862,13 @@ class SearchResponse(BaseModel):
 
 - [ ] **Step 3: Modify `backend/app/main.py`** — own the LLM provider in the lifespan
 
-Inside `lifespan`, after the arq pool:
+Inside `lifespan`, beside the arq pool:
 
 ```python
+    from app.documents.service import make_arq_pool
     from app.llm.openai_provider import OpenAIProvider
 
+    app.state.arq_pool = await make_arq_pool(settings)
     # One provider for the whole process. Building an AsyncOpenAI per request
     # creates a fresh httpx pool and TLS handshake every time and never closes it.
     app.state.llm_provider = OpenAIProvider(
@@ -9878,20 +9881,23 @@ Inside `lifespan`, after the arq pool:
         batch_chars=settings.embedding_batch_chars,
         embedding_dim=settings.embedding_dim,
     )
-```
-
-and in `finally:`, before the arq pool close:
-
-```python
+    try:
+        yield
+    finally:
         await app.state.llm_provider.aclose()
+        await app.state.arq_pool.aclose()
 ```
 
 and mount the router before `return app`:
 
 ```python
+    from app.auth.router import router as auth_router
     from app.chat.router import router as chat_router
+    from app.documents.router import router as documents_router
 
+    app.include_router(auth_router)
     app.include_router(chat_router)
+    app.include_router(documents_router)
 ```
 
 - [ ] **Step 4: Write `backend/app/chat/router.py`**
@@ -9942,6 +9948,7 @@ def _sse(payload: dict) -> str:
 async def chat(
     payload: ChatRequest,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
     llm_provider: LLMProvider = Depends(get_llm_provider),
     sessionmaker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
     settings: Settings = Depends(get_app_settings),
@@ -9949,26 +9956,40 @@ async def chat(
     """Server-Sent Events. Slice 1 emits status -> citations -> done; the `token`
     event type is reserved, and Slice 3 will add per-step execution status here
     without changing the contract."""
+    # Resolved BEFORE the response starts. Once StreamingResponse begins the status
+    # line is already on the wire, so nothing raised inside the generator can set
+    # one: an unowned conversation id would degrade from 404 to a 200 carrying an
+    # error frame. The frontend's streamChat() reads response.ok first and expects
+    # exactly this.
+    if payload.conversation_id is None:
+        conversation = Conversation(user_id=user.id, title=payload.message[:80])
+        db.add(conversation)
+        # No refresh: `id` is a client-side default populated at flush, and
+        # expire_on_commit=False leaves it readable after the commit and the close.
+        await db.commit()
+    else:
+        conversation = await get_owned_conversation(db, payload.conversation_id, user)
+    history = await load_history(db, conversation)
+    # `db` is not touched again below, and it must not be: since FastAPI 0.106 a
+    # yield-dependency's exit code runs BEFORE the response body is sent, so this
+    # session is already closed by the time the generator runs. Using it there
+    # would either fail or - if the version's behaviour ever moves back - hold
+    # get_current_user's autobegun transaction open across the whole LLM round
+    # trip, which is exactly the pool exhaustion the phases below avoid. Measured,
+    # not assumed: test_no_connection_is_idle_in_transaction_across_the_llm_call
+    # reads pg_stat_activity from a second connection at that moment.
 
     async def stream() -> AsyncIterator[str]:
         try:
-            # Phase 1: short DB session for conversation + history + retrieval.
+            # Phase 1: a short session for retrieval. Every session lives inside an
+            # `async with`, so a client disconnect - which reaches this generator as
+            # GeneratorExit/CancelledError at a yield - still returns the connection.
             yield _sse({"type": "status", "status": "searching"})
             retrieval_started = time.perf_counter()
-            async with sessionmaker() as db:
-                if payload.conversation_id is None:
-                    conversation = Conversation(user_id=user.id, title=payload.message[:80])
-                    db.add(conversation)
-                    await db.commit()
-                    await db.refresh(conversation)
-                else:
-                    conversation = await get_owned_conversation(db, payload.conversation_id, user)
-
-                conversation_id = conversation.id
-                history = await load_history(db, conversation)
+            async with sessionmaker() as retrieval_db:
                 evidence = await retrieve(
-                    db,
-                    PgVectorStore(db),
+                    retrieval_db,
+                    PgVectorStore(retrieval_db),
                     llm_provider,
                     NoneReranker(),
                     payload.message,
@@ -9979,25 +10000,26 @@ async def chat(
 
             # Phase 2: no DB session held across the LLM round trip.
             yield _sse({"type": "status", "status": "answering"})
-            chat_answer = await answer(
-                llm_provider, payload.message, history, evidence, settings=settings
-            )
+            chat_answer = await answer(llm_provider, payload.message, history, evidence, settings=settings)
 
-            # Phase 3: a fresh short session to persist the turn.
-            async with sessionmaker() as db:
-                conversation = await db.get(Conversation, conversation_id)
-                await persist_turn(db, conversation, payload.message, chat_answer, retrieval_ms)
+            # Phase 3: a fresh short session to persist the turn. `conversation` is
+            # the ownership-checked object from above - detached, not expired - so
+            # nothing here re-reads it by bare id.
+            async with sessionmaker() as persist_db:
+                await persist_turn(persist_db, conversation, payload.message, chat_answer, retrieval_ms)
 
             yield _sse({"type": "citations", "citations": chat_answer.citations})
             yield _sse(
                 {
                     "type": "done",
-                    "conversation_id": str(conversation_id),
+                    "conversation_id": str(conversation.id),
                     "content": chat_answer.content,
                     "citations": chat_answer.citations,
                 }
             )
         except LLMError:
+            # The traceback goes to the log, never into the stream: the detail a
+            # provider raises can quote the prompt back.
             logger.exception("chat failed at the LLM call")
             yield _sse({"type": "error", "detail": "답변 생성에 실패했습니다. 잠시 후 다시 시도해 주세요."})
         except Exception:
@@ -10020,9 +10042,10 @@ async def search(
     settings: Settings = Depends(get_app_settings),
 ):
     """Retrieval on its own, so search quality can be inspected without going
-    through the chat model."""
-    effective = settings if payload.top_n is None else settings.model_copy(
-        update={"retrieval_top_n": payload.top_n}
+    through the chat model. Same corpus and the same collection scoping as
+    /api/chat - it reaches nothing chat could not already answer from."""
+    effective = (
+        settings if payload.top_n is None else settings.model_copy(update={"retrieval_top_n": payload.top_n})
     )
     evidence = await retrieve(
         db,
@@ -10054,9 +10077,7 @@ async def list_conversations(
     db: AsyncSession = Depends(get_db_session),
 ):
     result = await db.scalars(
-        select(Conversation)
-        .where(Conversation.user_id == user.id)
-        .order_by(Conversation.updated_at.desc())
+        select(Conversation).where(Conversation.user_id == user.id).order_by(Conversation.updated_at.desc())
     )
     return list(result)
 
@@ -10071,9 +10092,7 @@ async def list_messages(
     # the caller-discipline pattern load_history/persist_turn exist to remove.
     conversation = await get_owned_conversation(db, conversation_id, user)
     result = await db.scalars(
-        select(Message)
-        .where(Message.conversation_id == conversation.id)
-        .order_by(Message.created_at)
+        select(Message).where(Message.conversation_id == conversation.id).order_by(Message.created_at)
     )
     return list(result)
 
@@ -10096,43 +10115,60 @@ import json
 import uuid
 from unittest.mock import AsyncMock
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select, text
 
-from app.llm.base import ChatResult
+from app.core.config import Settings
+from app.llm.base import ChatResult, LLMError
 from app.models.chunk import EMBEDDING_DIM
+from app.models.message import Message
+from app.models.user import User
+
+IDLE_IN_TRANSACTION = text(
+    "SELECT count(*) FROM pg_stat_activity "
+    "WHERE datname = current_database() AND state = 'idle in transaction'"
+)
 
 
 def vec(*leading: float) -> list[float]:
     return list(leading) + [0.0] * (EMBEDDING_DIM - len(leading))
 
 
-def parse_sse(text: str) -> list[dict]:
-    return [
-        json.loads(line[len("data: ") :])
-        for line in text.splitlines()
-        if line.startswith("data: ")
-    ]
-
-
-@pytest_asyncio.fixture
-def fake_llm(app):
+def make_fake_llm() -> AsyncMock:
     provider = AsyncMock()
     provider.embed = AsyncMock(return_value=[vec(1.0)])
     provider.chat = AsyncMock(
         return_value=ChatResult(content="Here is the answer.", usage={"total_tokens": 42}, model="gpt-4o")
     )
+    return provider
+
+
+def parse_sse(text_body: str) -> list[dict]:
+    return [json.loads(line[len("data: ") :]) for line in text_body.splitlines() if line.startswith("data: ")]
+
+
+@pytest.fixture
+def fake_llm(app):
+    provider = make_fake_llm()
     app.state.llm_provider = provider
     return provider
 
 
 @pytest_asyncio.fixture
 async def logged_in(client, fake_llm):
-    await client.post(
-        "/api/auth/register", json={"email": "chat@example.com", "password": "pw123456"}
-    )
+    await client.post("/api/auth/register", json={"email": "chat@example.com", "password": "pw123456"})
     await client.post("/api/auth/login", json={"email": "chat@example.com", "password": "pw123456"})
     return client
+
+
+async def start_conversation(client, message: str = "hello") -> str:
+    response = await client.post("/api/chat", json={"message": message})
+    return parse_sse(response.text)[-1]["conversation_id"]
+
+
+# --- The SSE contract --------------------------------------------------------
 
 
 async def test_chat_streams_status_then_done(logged_in):
@@ -10149,17 +10185,19 @@ async def test_chat_streams_status_then_done(logged_in):
     assert uuid.UUID(events[-1]["conversation_id"])
 
 
-async def test_chat_requires_auth(client):
-    assert (await client.post("/api/chat", json={"message": "hi"})).status_code == 401
+async def test_the_stream_carries_nothing_the_client_did_not_ask_for(logged_in):
+    """Status and sources are visible; the prompt, the evidence fence and any
+    reasoning the model was told not to produce are not."""
+    response = await logged_in.post("/api/chat", json={"message": "What is MOPAN?"})
+
+    events = parse_sse(response.text)
+    assert {e["type"] for e in events} <= {"status", "token", "citations", "done", "error"}
+    assert "<<EVIDENCE" not in response.text
+    assert "You are MOPAN's assistant" not in response.text
 
 
 async def test_chat_persists_the_turn_with_trace_fields(logged_in, db):
-    from sqlalchemy import select
-
-    from app.models.message import Message
-
-    response = await logged_in.post("/api/chat", json={"message": "hello"})
-    conversation_id = parse_sse(response.text)[-1]["conversation_id"]
+    conversation_id = await start_conversation(logged_in)
 
     rows = (
         await db.scalars(
@@ -10178,11 +10216,8 @@ async def test_chat_persists_the_turn_with_trace_fields(logged_in, db):
 
 
 async def test_message_order_is_stable_across_turns(logged_in):
-    first = await logged_in.post("/api/chat", json={"message": "first question"})
-    conversation_id = parse_sse(first.text)[-1]["conversation_id"]
-    await logged_in.post(
-        "/api/chat", json={"conversation_id": conversation_id, "message": "second question"}
-    )
+    conversation_id = await start_conversation(logged_in, "first question")
+    await logged_in.post("/api/chat", json={"conversation_id": conversation_id, "message": "second question"})
 
     messages = (await logged_in.get(f"/api/conversations/{conversation_id}/messages")).json()
     assert [m["role"] for m in messages] == ["user", "assistant", "user", "assistant"]
@@ -10190,54 +10225,140 @@ async def test_message_order_is_stable_across_turns(logged_in):
 
 
 async def test_conversations_list_is_ordered_by_recent_use(logged_in):
-    first = parse_sse((await logged_in.post("/api/chat", json={"message": "old"})).text)[-1]
-    second = parse_sse((await logged_in.post("/api/chat", json={"message": "new"})).text)[-1]
-    await logged_in.post(
-        "/api/chat", json={"conversation_id": first["conversation_id"], "message": "revived"}
-    )
+    first = await start_conversation(logged_in, "old")
+    second = await start_conversation(logged_in, "new")
+    await logged_in.post("/api/chat", json={"conversation_id": first, "message": "revived"})
 
     conversations = (await logged_in.get("/api/conversations")).json()
-    assert conversations[0]["id"] == first["conversation_id"]
-    assert conversations[1]["id"] == second["conversation_id"]
+    assert conversations[0]["id"] == first
+    assert conversations[1]["id"] == second
 
 
-async def test_another_users_conversation_returns_404_not_403(logged_in, app, fake_llm):
+# --- Authentication and authorization ----------------------------------------
+
+
+async def test_chat_requires_auth(client):
+    assert (await client.post("/api/chat", json={"message": "hi"})).status_code == 401
+
+
+async def test_search_requires_auth(client):
+    assert (await client.post("/api/search", json={"query": "x"})).status_code == 401
+
+
+async def test_every_conversation_route_requires_auth(client):
+    conversation_id = uuid.uuid4()
+    assert (await client.get("/api/conversations")).status_code == 401
+    assert (await client.get(f"/api/conversations/{conversation_id}/messages")).status_code == 401
+    assert (await client.delete(f"/api/conversations/{conversation_id}")).status_code == 401
+
+
+async def test_another_users_conversation_is_404_on_every_route(logged_in, app, fake_llm):
     """404, not 403: a 403 would confirm the conversation id exists."""
-    response = await logged_in.post("/api/chat", json={"message": "private"})
-    conversation_id = parse_sse(response.text)[-1]["conversation_id"]
+    conversation_id = await start_conversation(logged_in, "private")
 
-    await logged_in.post(
-        "/api/auth/register", json={"email": "other@example.com", "password": "pw123456"}
-    )
+    await logged_in.post("/api/auth/register", json={"email": "other@example.com", "password": "pw123456"})
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as other:
-        await other.post(
-            "/api/auth/login", json={"email": "other@example.com", "password": "pw123456"}
-        )
-        assert (
-            await other.get(f"/api/conversations/{conversation_id}/messages")
-        ).status_code == 404
-        posted = await other.post(
-            "/api/chat", json={"conversation_id": conversation_id, "message": "hijack"}
-        )
-        assert parse_sse(posted.text)[-1]["type"] == "error"
+        await other.post("/api/auth/login", json={"email": "other@example.com", "password": "pw123456"})
+        assert (await other.get(f"/api/conversations/{conversation_id}/messages")).status_code == 404
+        assert (await other.delete(f"/api/conversations/{conversation_id}")).status_code == 404
+        # 404 rather than a 200 carrying an error frame: the ownership check runs
+        # before the response starts, so the status code is still ours to set.
+        posted = await other.post("/api/chat", json={"conversation_id": conversation_id, "message": "hijack"})
+        assert posted.status_code == 404
+        assert (await other.get("/api/conversations")).json() == []
 
 
-async def test_chat_with_an_unknown_conversation_id_errors_cleanly(logged_in):
-    response = await logged_in.post(
-        "/api/chat", json={"conversation_id": str(uuid.uuid4()), "message": "hi"}
-    )
-    assert parse_sse(response.text)[-1]["type"] == "error"
+async def test_chat_with_an_unknown_conversation_id_is_404(logged_in):
+    """Indistinguishable from someone else's id, which is the point."""
+    response = await logged_in.post("/api/chat", json={"conversation_id": str(uuid.uuid4()), "message": "hi"})
+    assert response.status_code == 404
 
 
-async def test_llm_failure_is_reported_as_an_error_event(logged_in, fake_llm):
-    from app.llm.base import LLMError
+async def test_deleting_a_conversation_takes_its_messages_with_it(logged_in, db):
+    conversation_id = await start_conversation(logged_in)
 
+    assert (await logged_in.delete(f"/api/conversations/{conversation_id}")).status_code == 204
+
+    assert (await logged_in.get("/api/conversations")).json() == []
+    assert (await logged_in.get(f"/api/conversations/{conversation_id}/messages")).status_code == 404
+    rows = (
+        await db.scalars(select(Message).where(Message.conversation_id == uuid.UUID(conversation_id)))
+    ).all()
+    assert rows == []
+
+
+# --- Failure and disconnection -----------------------------------------------
+
+
+async def test_llm_failure_is_reported_as_an_error_event(logged_in, fake_llm, db):
     fake_llm.chat = AsyncMock(side_effect=LLMError("boom"))
     response = await logged_in.post("/api/chat", json={"message": "hi"})
+
     last = parse_sse(response.text)[-1]
     assert last["type"] == "error"
     assert "boom" not in last["detail"]  # internals never reach the client
+    assert "Traceback" not in response.text
+    # The conversation exists and is empty rather than half-written.
+    conversation_id = (await logged_in.get("/api/conversations")).json()[0]["id"]
+    assert (await logged_in.get(f"/api/conversations/{conversation_id}/messages")).json() == []
+
+
+async def test_no_connection_is_idle_in_transaction_across_the_llm_call(logged_in, fake_llm, test_engine):
+    """Nothing may sit idle-in-transaction across the LLM round trip: not a
+    session the generator opens (each is its own `async with`), and not the
+    request's own auth session, whose SELECT in get_current_user autobegan one.
+    Instrumented at the server rather than reasoned about - pg_stat_activity read
+    from a second connection at the moment chat() is entered - because what saves
+    the auth session is a FastAPI lifecycle detail (since 0.106 a yield-dependency
+    exits before the response body is sent), and a version bump could move it."""
+    observed = {}
+
+    async def spy_chat(messages, **kwargs):
+        async with test_engine.connect() as probe:
+            observed["idle_in_transaction"] = await probe.scalar(IDLE_IN_TRANSACTION)
+        return ChatResult(content="ok", usage={"total_tokens": 1}, model="gpt-4o")
+
+    fake_llm.chat = spy_chat
+    response = await logged_in.post("/api/chat", json={"message": "hi"})
+
+    assert parse_sse(response.text)[-1]["type"] == "done"
+    assert observed["idle_in_transaction"] == 0
+
+
+async def test_a_client_disconnect_mid_stream_leaves_no_connection_and_no_half_turn(
+    db, test_sessionmaker, test_engine
+):
+    """Closing the generator is exactly what Starlette does to it when the client
+    goes away. Every session lives inside an `async with`, so the connection goes
+    back whatever happens, and nothing is persisted before the LLM call."""
+    from app.chat.router import chat
+    from app.schemas.chat import ChatRequest
+
+    user = User(email="disconnect@example.com", password_hash="x", role="user")
+    db.add(user)
+    await db.commit()
+
+    response = await chat(
+        payload=ChatRequest(message="hi"),
+        user=user,
+        db=db,
+        llm_provider=make_fake_llm(),
+        sessionmaker=test_sessionmaker,
+        settings=Settings(),
+    )
+    events = response.body_iterator
+    assert "searching" in await events.__anext__()
+    assert "answering" in await events.__anext__()
+    await events.aclose()
+
+    await db.close()
+    async with test_engine.connect() as probe:
+        assert await probe.scalar(IDLE_IN_TRANSACTION) == 0
+    assert (await db.scalars(select(Message))).all() == []
+
+
+# --- Search ------------------------------------------------------------------
 
 
 async def test_search_endpoint_returns_evidence(logged_in):
@@ -10247,14 +10368,35 @@ async def test_search_endpoint_returns_evidence(logged_in):
     assert isinstance(response.json()["results"], list)
 
 
-async def test_search_requires_auth(client):
-    assert (await client.post("/api/search", json={"query": "x"})).status_code == 401
+async def test_search_top_n_is_bounded(logged_in):
+    assert (await logged_in.post("/api/search", json={"query": "x", "top_n": 0})).status_code == 422
+    assert (await logged_in.post("/api/search", json={"query": "x", "top_n": 51})).status_code == 422
+
+
+async def test_search_passes_its_collection_scope_to_retrieval(logged_in, monkeypatch):
+    """Collection scoping is not decoration: without it /api/search answers from
+    the whole corpus while /api/chat answers from the requested collections."""
+    seen = {}
+
+    async def spy_retrieve(db, vector_store, llm_provider, reranker, question, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr("app.chat.router.retrieve", spy_retrieve)
+    collection_id = str(uuid.uuid4())
+    response = await logged_in.post(
+        "/api/search", json={"query": "x", "collection_ids": [collection_id], "top_n": 3}
+    )
+
+    assert response.status_code == 200
+    assert [str(c) for c in seen["collection_ids"]] == [collection_id]
+    assert seen["settings"].retrieval_top_n == 3
 ```
 
 - [ ] **Step 6: Run tests, expect PASS**
 
 Run: `pytest tests/test_chat.py -v` (Postgres running)
-Expected: all 10 tests PASS
+Expected: all 17 tests PASS
 
 - [ ] **Step 7: Commit**
 

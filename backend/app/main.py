@@ -41,11 +41,25 @@ async def lifespan(app: FastAPI):
     app.state.redis = make_redis(settings)
 
     from app.documents.service import make_arq_pool
+    from app.llm.openai_provider import OpenAIProvider
 
     app.state.arq_pool = await make_arq_pool(settings)
+    # One provider for the whole process. Building an AsyncOpenAI per request
+    # creates a fresh httpx pool and TLS handshake every time and never closes it.
+    app.state.llm_provider = OpenAIProvider(
+        api_key=settings.openai_api_key,
+        embedding_model=settings.embedding_model,
+        answer_model=settings.answer_model,
+        timeout=settings.llm_timeout_seconds,
+        max_retries=settings.llm_max_retries,
+        batch_size=settings.embedding_batch_size,
+        batch_chars=settings.embedding_batch_chars,
+        embedding_dim=settings.embedding_dim,
+    )
     try:
         yield
     finally:
+        await app.state.llm_provider.aclose()
         await app.state.arq_pool.aclose()
         await app.state.redis.aclose()
         await app.state.engine.dispose()
@@ -105,9 +119,11 @@ def create_app() -> FastAPI:
         return {"status": "ready"}
 
     from app.auth.router import router as auth_router
+    from app.chat.router import router as chat_router
     from app.documents.router import router as documents_router
 
     app.include_router(auth_router)
+    app.include_router(chat_router)
     app.include_router(documents_router)
 
     return app
