@@ -7827,6 +7827,9 @@ def chunk_to_evidence(chunk: RetrievedChunk) -> Evidence:
         source_type="rag",
         ref=f"chunk:{chunk.chunk_id}",
         content=chunk.content,
+        # `is not None`, not truthiness: 0.0 is a legitimate cross-encoder verdict
+        # ("this candidate is irrelevant"), and falling back to the RRF score there
+        # would silently overrule the reranker on exactly the candidate it rejected.
         score=chunk.rerank_score if chunk.rerank_score is not None else chunk.rrf_score,
         metadata={
             "chunk_id": chunk.chunk_id,
@@ -7860,16 +7863,43 @@ async def keyword_search(
     limit: int,
     collection_ids: list[uuid.UUID] | None = None,
 ) -> list[str]:
-    # 'simple' MUST match the regconfig in the generated content_tsv column
-    # (see the migration). A different config silently bypasses the GIN index.
+    """The sparse half of hybrid retrieval: ordered chunk ids, best first.
+
+    Returns ids, not rows, so it is symmetric with `VectorStore.search` and
+    nothing ORM-shaped or Postgres-shaped reaches the fusion stage.
+    """
+    # 'simple' MUST match the regconfig in the generated content_tsv column (see
+    # app/models/chunk.py). The failure mode is worse than a slow query and was
+    # measured, not assumed: the index still gets used, it just answers wrong.
+    # content_tsv stores what 'simple' produced ('tomatoes', 'blighted'), while
+    # plainto_tsquery('english', ...) asks for the stems ('tomato', 'blight'),
+    # which that row never stored - a silent false negative on every inflected
+    # word, with a healthy-looking Bitmap Index Scan in the plan.
     ts_query = func.plainto_tsquery("simple", query_text)
-    query = select(Chunk.id).where(Chunk.content_tsv.op("@@")(ts_query))
-    if collection_ids:
+    # is_comparison=True types the result as boolean; without it the expression
+    # inherits TSVECTOR and only happens to render correctly in a WHERE clause.
+    query = select(Chunk.id).where(Chunk.content_tsv.op("@@", is_comparison=True)(ts_query))
+    if collection_ids is not None:
+        # `is not None`, not truthiness: an empty list means "scoped to no
+        # collection" and must return nothing, exactly as in PgVectorStore.search.
+        # Reading [] as unscoped would widen a Slice 3 Super Agent query from zero
+        # collections to every collection in the system.
         query = query.join(Document, Document.id == Chunk.document_id).where(
             Document.collection_id.in_(collection_ids)
         )
-    query = query.order_by(func.ts_rank(Chunk.content_tsv, ts_query).desc()).limit(limit)
+    # ts_rank is not indexable and never filters - the @@ predicate does that, and
+    # ts_rank only orders the rows the index already returned. Tie-broken by id
+    # because ts_rank scores two chunks carrying the same lexemes at the same
+    # positions identically, and Postgres may return those in any order; an
+    # unstable sparse ranking would make RRF's own tie-break non-reproducible.
+    query = query.order_by(func.ts_rank(Chunk.content_tsv, ts_query).desc(), Chunk.id).limit(limit)
 
+    # ponytail: a GIN index defaults to fastupdate=on, so the rows a bulk ingest
+    # just wrote sit in the pending list and the planner costs the index high
+    # enough to pick a Seq Scan instead - measured at 20k rows, 3.9ms vs 0.02ms,
+    # until VACUUM flushed it. Autovacuum fixes it on its own and Slice 1's
+    # corpora are small; if first-query latency after a large ingest ever
+    # matters, VACUUM chunks at the end of the pipeline or set fastupdate=off.
     result = await db.scalars(query)
     return [str(chunk_id) for chunk_id in result]
 ```
@@ -7892,7 +7922,12 @@ class Reranker(ABC):
 
 
 class NoneReranker(Reranker):
-    """Slice 1 default: keeps the RRF-fused order as-is."""
+    """Slice 1 default: keeps the RRF-fused order as-is.
+
+    It deliberately leaves `rerank_score` at None rather than copying the RRF
+    score into it. A trace that shows a reranker score is claiming a reranker
+    ran; "no reranker" has to stay distinguishable from "the reranker agreed".
+    """
 
     async def rerank(self, query: str, candidates: list[RetrievedChunk]) -> list[RetrievedChunk]:
         return candidates
@@ -7922,6 +7957,7 @@ logger = logging.getLogger("mopan.retrieval")
 
 
 async def _load_chunks(db: AsyncSession, chunk_ids: list[str]) -> dict[str, tuple[Chunk, str]]:
+    """Private on purpose: Chunk is an ORM model and must not leave this module."""
     rows = (
         await db.execute(
             select(Chunk, Document.filename)
@@ -7930,6 +7966,18 @@ async def _load_chunks(db: AsyncSession, chunk_ids: list[str]) -> dict[str, tupl
         )
     ).all()
     return {str(chunk.id): (chunk, filename) for chunk, filename in rows}
+
+
+def _ranks(ids: list[str]) -> dict[str, int]:
+    """1-based rank per id, first occurrence winning.
+
+    `dict.fromkeys` is not decoration: reciprocal_rank_fusion de-duplicates a
+    ranking the same way and scores the FIRST occurrence. A plain enumerate()
+    would record the LAST one, so a malformed retriever - the only way a
+    duplicate arrives - would put a rank in the trace that does not explain the
+    score printed beside it.
+    """
+    return {chunk_id: rank for rank, chunk_id in enumerate(dict.fromkeys(ids), start=1)}
 
 
 async def hybrid_search(
@@ -7944,29 +7992,34 @@ async def hybrid_search(
     candidate_limit: int,
     collection_ids: list[uuid.UUID] | None = None,
 ) -> list[Evidence]:
-    """Query -> (dense + sparse) -> RRF -> rerank -> top-N -> Evidence."""
+    """Query -> (dense + sparse) -> RRF -> rerank -> top-N -> Evidence.
+
+    RRF and the reranker are separate, separately configurable stages: RRF is
+    arithmetic over two rank lists, the reranker is a model. Swapping in a
+    cross-encoder means passing a different `Reranker`; nothing here changes.
+    """
     started = time.perf_counter()
+    # Embedding first, before the first DB statement, so the session has no
+    # transaction open across this network call.
     [query_embedding] = await llm_provider.embed([query])
 
     vector_hits = await vector_store.search(query_embedding, candidate_limit, collection_ids)
     vector_ids = [hit.chunk_id for hit in vector_hits]
     keyword_ids = await keyword_search(db, query, candidate_limit, collection_ids)
 
-    fused = reciprocal_rank_fusion([vector_ids, keyword_ids], k=rrf_k)
-    if not fused:
-        return []
+    fused = reciprocal_rank_fusion([vector_ids, keyword_ids], k=rrf_k)[:candidate_limit]
+    vector_rank = _ranks(vector_ids)
+    keyword_rank = _ranks(keyword_ids)
 
-    vector_rank = {cid: i + 1 for i, cid in enumerate(vector_ids)}
-    keyword_rank = {cid: i + 1 for i, cid in enumerate(keyword_ids)}
-
-    # Rerank the whole candidate set, THEN truncate. Truncating first would make
-    # the reranker structurally unable to promote anything.
-    candidate_ids = [chunk_id for chunk_id, _ in fused[:candidate_limit]]
-    loaded = await _load_chunks(db, candidate_ids)
+    # The union of two candidate_limit-long lists can be twice candidate_limit,
+    # so the slice above is a real cap on what the reranker is asked to score.
+    loaded = await _load_chunks(db, [chunk_id for chunk_id, _ in fused]) if fused else {}
 
     candidates: list[RetrievedChunk] = []
-    for chunk_id, score in fused[:candidate_limit]:
+    for chunk_id, score in fused:
         entry = loaded.get(chunk_id)
+        # A chunk deleted between the two retrievals and this load. Skip it
+        # rather than fabricate an Evidence with no content.
         if entry is None:
             continue
         chunk, filename = entry
@@ -7984,6 +8037,9 @@ async def hybrid_search(
             )
         )
 
+    # Rerank the whole candidate set, THEN truncate. Truncating first would make
+    # the reranker structurally unable to promote anything - it would only ever
+    # reorder rows that were already going to be used.
     reranked = await reranker.rerank(query, candidates)
     selected = reranked[:top_n]
 
@@ -8002,16 +8058,20 @@ async def hybrid_search(
 - [ ] **Step 5: Write `backend/tests/test_retrieval.py`**
 
 ```python
+import uuid
+
+import pytest
 import pytest_asyncio
 
 from app.models.chunk import EMBEDDING_DIM, Chunk
 from app.models.collection import Collection
 from app.models.document import Document
 from app.models.user import User
-from app.retrieval.evidence import RetrievedChunk
+from app.retrieval.evidence import RetrievedChunk, chunk_to_evidence
+from app.retrieval.keyword_search import keyword_search
 from app.retrieval.reranker import NoneReranker, Reranker
 from app.retrieval.service import hybrid_search
-from app.retrieval.vector_store import PgVectorStore
+from app.retrieval.vector_store import PgVectorStore, ScoredId, VectorStore
 
 
 def vec(*leading: float) -> list[float]:
@@ -8037,6 +8097,24 @@ class ReverseReranker(Reranker):
         return reversed_candidates
 
 
+class DuplicatingVectorStore(VectorStore):
+    """A retriever whose output is malformed: the same id twice. RRF de-duplicates
+    per ranking and scores the FIRST occurrence, so the rank the service records
+    has to agree with it - see test_a_duplicate_from_a_retriever_ranks_and_scores_first."""
+
+    def __init__(self, chunk_ids: list[str]):
+        self.chunk_ids = chunk_ids
+
+    async def search(self, embedding, limit, collection_ids=None):
+        return [ScoredId(chunk_id=cid, score=1.0) for cid in self.chunk_ids][:limit]
+
+    async def upsert(self, items):
+        raise NotImplementedError
+
+    async def delete_by_document(self, document_id):
+        raise NotImplementedError
+
+
 @pytest_asyncio.fixture
 async def corpus(db):
     user = User(email="retrieval@example.com", password_hash="x", role="admin")
@@ -8049,8 +8127,13 @@ async def corpus(db):
 
     def _doc(collection, name):
         return Document(
-            collection_id=collection.id, filename=name, file_type="txt", size_bytes=1,
-            storage_path="x", status="indexed", uploaded_by=user.id,
+            collection_id=collection.id,
+            filename=name,
+            file_type="txt",
+            size_bytes=1,
+            storage_path="x",
+            status="indexed",
+            uploaded_by=user.id,
         )
 
     doc_a = _doc(collection_a, "연구보고서 A.pdf")
@@ -8058,36 +8141,66 @@ async def corpus(db):
     db.add_all([doc_a, doc_b])
     await db.flush()
 
-    db.add_all(
-        [
-            Chunk(
-                document_id=doc_a.id, chunk_index=0, content="tomato blight treatment guide",
-                token_count=5, char_count=29, page=32, section="방제",
-                chunk_metadata={}, embedding=vec(1.0, 0.0, 0.0),
-            ),
-            Chunk(
-                document_id=doc_a.id, chunk_index=1, content="unrelated financial report notes",
-                token_count=5, char_count=32, page=2, section=None,
-                chunk_metadata={}, embedding=vec(0.0, 1.0, 0.0),
-            ),
-            Chunk(
-                document_id=doc_b.id, chunk_index=0, content="tomato blight in another collection",
-                token_count=6, char_count=35, page=1, section=None,
-                chunk_metadata={}, embedding=vec(1.0, 0.0, 0.0),
-            ),
-        ]
-    )
+    chunks = [
+        Chunk(
+            document_id=doc_a.id,
+            chunk_index=0,
+            content="tomato blight treatment guide",
+            token_count=5,
+            char_count=29,
+            page=32,
+            section="방제",
+            chunk_metadata={},
+            embedding=vec(1.0, 0.0, 0.0),
+        ),
+        Chunk(
+            document_id=doc_a.id,
+            chunk_index=1,
+            content="unrelated financial report notes",
+            token_count=5,
+            char_count=32,
+            page=2,
+            section=None,
+            chunk_metadata={},
+            embedding=vec(0.0, 1.0, 0.0),
+        ),
+        Chunk(
+            document_id=doc_b.id,
+            chunk_index=0,
+            content="tomato blight in another collection",
+            token_count=6,
+            char_count=35,
+            page=1,
+            section=None,
+            chunk_metadata={},
+            embedding=vec(1.0, 0.0, 0.0),
+        ),
+        # No embedding: reachable by the keyword retriever only. Its content shares
+        # no lexeme with "tomato blight", so it stays invisible to every other test.
+        Chunk(
+            document_id=doc_a.id,
+            chunk_index=2,
+            content="durian ripeness sampling protocol",
+            token_count=5,
+            char_count=33,
+            page=7,
+            section=None,
+            chunk_metadata={},
+            embedding=None,
+        ),
+    ]
+    db.add_all(chunks)
     await db.commit()
-    return {"a": collection_a, "b": collection_b}
+    return {"a": collection_a, "b": collection_b, "chunks": chunks}
 
 
 async def _search(db, corpus, **kwargs):
     return await hybrid_search(
         db,
-        PgVectorStore(db),
+        kwargs.pop("vector_store", None) or PgVectorStore(db),
         FakeLLMProvider(vec(1.0, 0.0, 0.0)),
         kwargs.pop("reranker", NoneReranker()),
-        "tomato blight",
+        kwargs.pop("query", "tomato blight"),
         top_n=kwargs.pop("top_n", 5),
         rrf_k=60,
         candidate_limit=20,
@@ -8124,6 +8237,14 @@ async def test_collection_filter_excludes_other_collections(db, corpus):
     assert all(e.metadata["filename"] == "연구보고서 A.pdf" for e in evidence)
 
 
+async def test_an_empty_collection_id_list_scopes_to_nothing(db, corpus):
+    """`[]` means "no collection", not "every collection" - in BOTH retrievers.
+    Reading it as unscoped would widen a Slice 3 Super Agent query from zero
+    collections to the whole corpus."""
+    assert await _search(db, corpus, collection_ids=[]) == []
+    assert await keyword_search(db, "tomato blight", 20, collection_ids=[]) == []
+
+
 async def test_reranker_can_promote_a_candidate_past_the_top_n_cut(db, corpus):
     """Proves the reranker runs BEFORE truncation: with top_n=1 a reversing
     reranker must be able to change which single chunk survives."""
@@ -8132,26 +8253,115 @@ async def test_reranker_can_promote_a_candidate_past_the_top_n_cut(db, corpus):
 
     assert default[0].ref != reversed_result[0].ref
     assert reversed_result[0].metadata["rerank_score"] is not None
+    # The promoted chunk is the one RRF ranked LAST, so it could only survive
+    # top_n=1 if the whole candidate set reached the reranker.
+    ranked = await _search(db, corpus, top_n=20)
+    assert reversed_result[0].ref == ranked[-1].ref
+
+
+async def test_a_chunk_only_one_retriever_found_is_still_fused(db, corpus):
+    """The keyword-only chunk has no embedding, so the vector retriever cannot
+    see it; the fusion is a union, not an intersection."""
+    evidence = await _search(db, corpus, query="durian ripeness")
+    keyword_only = [e for e in evidence if e.content.startswith("durian")]
+    assert len(keyword_only) == 1
+    assert keyword_only[0].metadata["vector_rank"] is None
+    assert keyword_only[0].metadata["keyword_rank"] == 1
+
+
+async def test_a_query_no_keyword_can_match_still_returns_vector_evidence(db, corpus):
+    """One retriever returning nothing must not break fusion."""
+    assert await keyword_search(db, "zzzznomatch", 20) == []
+    evidence = await _search(db, corpus, query="zzzznomatch")
+    assert evidence
+    assert all(e.metadata["keyword_rank"] is None for e in evidence)
+    assert evidence[0].metadata["vector_rank"] == 1
+
+
+async def test_a_duplicate_from_a_retriever_ranks_and_scores_first(db, corpus):
+    """RRF de-duplicates per ranking and scores the first occurrence. The rank the
+    service records must agree: recording the last occurrence would put a rank in
+    the trace that no longer explains the score beside it."""
+    chunk_ids = [str(c.id) for c in corpus["chunks"]]
+    duplicating = DuplicatingVectorStore([chunk_ids[0], chunk_ids[1], chunk_ids[0]])
+    evidence = await _search(db, corpus, query="zzzznomatch", vector_store=duplicating)
+
+    by_id = {e.metadata["chunk_id"]: e.metadata for e in evidence}
+    assert by_id[chunk_ids[0]]["vector_rank"] == 1
+    assert by_id[chunk_ids[0]]["rrf_score"] == 1 / 61
+    assert by_id[chunk_ids[1]]["vector_rank"] == 2
+    assert by_id[chunk_ids[1]]["rrf_score"] == 1 / 62
 
 
 async def test_empty_corpus_returns_no_evidence(db):
     evidence = await hybrid_search(
-        db, PgVectorStore(db), FakeLLMProvider(vec(1.0)), NoneReranker(),
-        "anything", top_n=5, rrf_k=60, candidate_limit=20,
+        db,
+        PgVectorStore(db),
+        FakeLLMProvider(vec(1.0)),
+        NoneReranker(),
+        "anything",
+        top_n=5,
+        rrf_k=60,
+        candidate_limit=20,
     )
     assert evidence == []
+
+
+@pytest.mark.parametrize("query", ["", "   ", "!!! ??? ---", "\n\t"])
+async def test_keyword_search_survives_a_query_with_no_lexemes(db, corpus, query):
+    """plainto_tsquery reduces these to an empty tsquery, which matches nothing.
+    A crash here would 500 on a user pasting punctuation into the search box."""
+    assert await keyword_search(db, query, 20) == []
+
+
+async def test_keyword_search_scopes_to_the_named_collections(db, corpus):
+    scoped = await keyword_search(db, "tomato blight", 20, collection_ids=[corpus["b"].id])
+    assert scoped == [str(corpus["chunks"][2].id)]
+
+
+async def test_keyword_search_respects_its_limit(db, corpus):
+    assert len(await keyword_search(db, "tomato blight", 1)) == 1
 
 
 def test_retrieved_chunk_defaults_are_explicit():
     chunk = RetrievedChunk(chunk_id="c", document_id="d", filename="f.pdf", content="x")
     assert chunk.rerank_score is None
     assert chunk.rrf_score == 0.0
+
+
+def test_evidence_score_prefers_the_reranker_and_falls_back_to_rrf():
+    chunk = RetrievedChunk(chunk_id="c", document_id="d", filename="f.pdf", content="x")
+    chunk.rrf_score = 0.5
+    assert chunk_to_evidence(chunk).score == 0.5
+    # 0.0 is a legitimate reranker verdict and must not fall back to the RRF score.
+    chunk.rerank_score = 0.0
+    assert chunk_to_evidence(chunk).score == 0.0
+
+
+def test_evidence_keeps_every_stage_score_in_metadata():
+    """Slice 5's Conversation Trace enumerates retrieval rank, RRF score and
+    reranker score separately; they must not collapse into one number."""
+    chunk = RetrievedChunk(
+        chunk_id=str(uuid.uuid4()),
+        document_id=str(uuid.uuid4()),
+        filename="f.pdf",
+        content="x",
+        vector_rank=3,
+        keyword_rank=1,
+        rrf_score=0.03,
+        rerank_score=0.9,
+    )
+    metadata = chunk_to_evidence(chunk).metadata
+    assert metadata["vector_rank"] == 3
+    assert metadata["keyword_rank"] == 1
+    assert metadata["rrf_score"] == 0.03
+    assert metadata["rerank_score"] == 0.9
 ```
 
 - [ ] **Step 6: Run tests, expect PASS**
 
 Run: `pytest tests/test_retrieval.py -v` (Postgres running)
-Expected: all 7 tests PASS
+Expected: all 19 tests PASS
 
 - [ ] **Step 7: Commit**
 
