@@ -10114,12 +10114,14 @@ async def delete_conversation(
 ```python
 import json
 import uuid
+from contextlib import contextmanager
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 
 from app.core.config import Settings
 from app.llm.base import ChatResult, LLMError
@@ -10128,9 +10130,34 @@ from app.models.message import Message
 from app.models.user import User
 
 IDLE_IN_TRANSACTION = text(
-    "SELECT count(*) FROM pg_stat_activity "
-    "WHERE datname = current_database() AND state = 'idle in transaction'"
+    "SELECT count(*) FROM pg_stat_activity WHERE pid = ANY(:pids) AND state = 'idle in transaction'"
 )
+
+
+@contextmanager
+def recorded_backend_pids(engine):
+    """Every Postgres backend the block's connections open.
+
+    Scoped to those pids rather than counting the whole database: a database-wide
+    count is only exact while nothing else holds a connection to mopan_test, which
+    is a property of how the suite happens to be run, not of the code under test.
+    NullPool means one backend per session, so this is exactly the set of
+    connections the block created - the probe's own included, and it is never
+    idle-in-transaction while it is running the probe query.
+    """
+    pids: list[int] = []
+
+    def _record(dbapi_connection, _record_) -> None:
+        pids.append(dbapi_connection.driver_connection.get_server_pid())
+
+    event.listen(engine.sync_engine, "connect", _record)
+    try:
+        yield pids
+    finally:
+        event.remove(engine.sync_engine, "connect", _record)
+    # `pid = ANY('{}')` matches nothing, so a block that opened no connection at
+    # all would make every probe inside it pass without measuring anything.
+    assert pids, "no backend was opened inside the block; the probe would be vacuous"
 
 
 def vec(*leading: float) -> list[float]:
@@ -10315,13 +10342,15 @@ async def test_no_connection_is_idle_in_transaction_across_the_llm_call(logged_i
     exits before the response body is sent), and a version bump could move it."""
     observed = {}
 
-    async def spy_chat(messages, **kwargs):
-        async with test_engine.connect() as probe:
-            observed["idle_in_transaction"] = await probe.scalar(IDLE_IN_TRANSACTION)
-        return ChatResult(content="ok", usage={"total_tokens": 1}, model="gpt-4o")
+    with recorded_backend_pids(test_engine) as pids:
 
-    fake_llm.chat = spy_chat
-    response = await logged_in.post("/api/chat", json={"message": "hi"})
+        async def spy_chat(messages, **kwargs):
+            async with test_engine.connect() as probe:
+                observed["idle_in_transaction"] = await probe.scalar(IDLE_IN_TRANSACTION, {"pids": pids})
+            return ChatResult(content="ok", usage={"total_tokens": 1}, model="gpt-4o")
+
+        fake_llm.chat = spy_chat
+        response = await logged_in.post("/api/chat", json={"message": "hi"})
 
     assert parse_sse(response.text)[-1]["type"] == "done"
     assert observed["idle_in_transaction"] == 0
@@ -10336,37 +10365,110 @@ async def test_a_client_disconnect_mid_stream_leaves_no_connection_and_no_half_t
     from app.chat.router import chat
     from app.schemas.chat import ChatRequest
 
-    user = User(email="disconnect@example.com", password_hash="x", role="user")
-    db.add(user)
-    await db.commit()
+    with recorded_backend_pids(test_engine) as pids:
+        user = User(email="disconnect@example.com", password_hash="x", role="user")
+        db.add(user)
+        await db.commit()
 
-    response = await chat(
-        payload=ChatRequest(message="hi"),
-        user=user,
-        db=db,
-        llm_provider=make_fake_llm(),
-        sessionmaker=test_sessionmaker,
-        settings=Settings(),
-    )
-    events = response.body_iterator
-    assert "searching" in await events.__anext__()
-    assert "answering" in await events.__anext__()
-    await events.aclose()
+        response = await chat(
+            payload=ChatRequest(message="hi"),
+            user=user,
+            db=db,
+            llm_provider=make_fake_llm(),
+            sessionmaker=test_sessionmaker,
+            settings=Settings(),
+        )
+        events = response.body_iterator
+        assert "searching" in await events.__anext__()
+        assert "answering" in await events.__anext__()
+        await events.aclose()
 
-    await db.close()
-    async with test_engine.connect() as probe:
-        assert await probe.scalar(IDLE_IN_TRANSACTION) == 0
+        await db.close()
+        async with test_engine.connect() as probe:
+            assert await probe.scalar(IDLE_IN_TRANSACTION, {"pids": pids}) == 0
     assert (await db.scalars(select(Message))).all() == []
+
+
+async def test_a_real_client_disconnect_stops_the_stream(app, logged_in, fake_llm, db):
+    """One layer above the test above, which closes the generator itself and so
+    only proves the generator survives being closed. Here the CLIENT goes away and
+    Starlette is what stops the stream. httpx's ASGITransport cannot express that -
+    it runs the app to completion before it hands back a response - so the app is
+    driven as raw ASGI: `receive` reports the disconnect the moment the "answering"
+    frame is on the wire, which is exactly when the generator is parked in an LLM
+    call that will never return. That the call below terminates at all IS the
+    assertion; without the teardown it hangs until fail_after fires.
+
+    "answering" and not the first frame on purpose: retrieval is finished by then,
+    so the cancellation lands in the LLM call rather than in an asyncpg query, and
+    tearing a query down mid-flight logs an "unexpected connection_lost()" future
+    exception that nothing here can retrieve."""
+
+    async def never_answers(messages, **kwargs):
+        await anyio.sleep_forever()
+
+    fake_llm.chat = never_answers
+
+    body = json.dumps({"message": "hi"}).encode()
+    cookie = "; ".join(f"{k}={v}" for k, v in logged_in.cookies.items()).encode()
+    chunks: list[bytes] = []
+    streaming = anyio.Event()
+    request_sent = False
+
+    async def receive() -> dict:
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        await streaming.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message) -> None:
+        if message["type"] == "http.response.body":
+            chunks.append(message["body"])
+            if b"answering" in message["body"]:
+                streaming.set()
+
+    with anyio.fail_after(10):
+        await app(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/api/chat",
+                "raw_path": b"/api/chat",
+                "root_path": "",
+                "query_string": b"",
+                "server": ("test", 80),
+                "client": ("test", 12345),
+                "headers": [
+                    (b"host", b"test"),
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                    (b"cookie", cookie),
+                ],
+            },
+            receive,
+            send,
+        )
+
+    assert b"answering" in b"".join(chunks)
+    assert b"done" not in b"".join(chunks)  # the stream was cut short, not finished
+    assert (await db.scalars(select(Message))).all() == []  # and no half turn was written
 
 
 # --- Search ------------------------------------------------------------------
 
 
 async def test_search_endpoint_returns_evidence(logged_in):
+    """Shape and emptiness, against an empty corpus - `results` must be exactly
+    empty, not merely a list. That a real hit comes back from a real indexed
+    document is tests/test_end_to_end.py's job."""
     response = await logged_in.post("/api/search", json={"query": "tomato"})
     assert response.status_code == 200
-    assert response.json()["query"] == "tomato"
-    assert isinstance(response.json()["results"], list)
+    assert response.json() == {"query": "tomato", "results": []}
 
 
 async def test_search_top_n_is_bounded(logged_in):
@@ -10397,7 +10499,7 @@ async def test_search_passes_its_collection_scope_to_retrieval(logged_in, monkey
 - [ ] **Step 6: Run tests, expect PASS**
 
 Run: `pytest tests/test_chat.py -v` (Postgres running)
-Expected: all 17 tests PASS
+Expected: all 18 tests PASS
 
 - [ ] **Step 7: Commit**
 
@@ -10412,160 +10514,241 @@ git commit -m "feat: SSE chat endpoint, search endpoint, and owner-scoped conver
 
 **Files:**
 - Test: `backend/tests/test_end_to_end.py`
+- Modify: `backend/tests/test_chat.py` — the three items carried out of the Task 18 review (Step 1 below). The block under Task 18 Step 5 is the current file.
 
 **Interfaces:** None new. This task proves the slice actually works.
 
 Revision 1 had no test that an ingested document is retrievable or that a citation is ever produced: the chat tests ran against an empty chunks table with the provider fully mocked, so `evidence` was always `[]`. The only end-to-end verification was a manual browser click-through. This is that missing test.
 
-- [ ] **Step 1: Write `backend/tests/test_end_to_end.py`**
+Three things the obvious version of this test cannot do, and they shape the one below:
+
+- **The fixture has to be a PDF.** `TextParser` never sets `Block.page`, so a `.md` upload can only ever produce a citation whose `page` is `None` — and the worked example this slice is measured against is `[연구보고서 A, p.32]`. A markdown fixture proves the filename half of provenance and silently skips the page half. `_write_pdf` from `tests/test_parsers.py` writes it, so the bytes pypdf reads are real ones. The filename stays non-ASCII: it has to survive multipart, the database, retrieval metadata and the SSE frame.
+- **The chunking strategy is pinned, not read from the operator's `.env`.** Under `CHUNKING_STRATEGY=fixed` this small document is a single chunk, and a corpus holding one topic cannot show that retrieval picked the right one — every relevance assertion would be passing on a corpus with no wrong answer in it. Same reason `chunk_count` is asserted to be exactly 2.
+- **Each half of hybrid retrieval is pinned on its own.** `vector_rank` and `keyword_rank` ride along in the evidence metadata; asserting only that the right chunk came back lets either retriever be dead while the other covers for it. That assertion also constrains the query: `content_tsv` and `plainto_tsquery` both use the `simple` config, which neither stems nor drops stop words, and `plainto_tsquery` ANDs whatever survives — so a natural-language "How does tomato blight spread?" matches nothing at all on the sparse side, and only the dense half would have been under test.
+
+- [ ] **Step 1: Land the three items carried out of the Task 18 review in `backend/tests/test_chat.py`**
+
+- `test_search_endpoint_returns_evidence` asserted `isinstance(results, list)` against an empty corpus, so it could not fail however `/api/search` behaved. It asserts the whole response body is `{"query": ..., "results": []}` now; the real-hit case is Step 2's job.
+- The disconnect test `aclose()`s the generator itself, which proves the generator is safe when closed but not that Starlette ever closes it. A second test drives the app as raw ASGI — httpx's `ASGITransport` runs the app to completion before it returns a response, so it cannot express a mid-stream disconnect — with a `receive()` that reports `http.disconnect` once the `answering` frame is on the wire, while the LLM call is parked and will never return. That the call terminates at all is the assertion. `answering` and not the first frame on purpose: retrieval is finished by then, so the cancellation lands in the LLM call rather than in an asyncpg query, and tearing a query down mid-flight logs an unretrievable `connection_lost()` future exception.
+- Both idle-in-transaction probes counted database-wide, which is exact only while nothing else holds a connection to `mopan_test` — a property of how the suite is run, not of the code. They are narrowed to the backend pids the block actually opened, the narrowing `test_retrieve_holds_no_transaction_across_the_embedding_call` already used. `pid = ANY('{}')` matches nothing, so the helper refuses an empty pid list rather than passing vacuously.
+
+- [ ] **Step 2: Write `backend/tests/test_end_to_end.py`**
 
 ```python
 """The slice's acceptance test: ingest a document, then prove it is retrievable,
-reaches the prompt, and produces a citation with real provenance."""
-from unittest.mock import AsyncMock
+reaches the prompt, and produces a citation with real provenance.
+
+Every other test in this suite verifies one layer against fakes and fixtures. This
+one drives the whole path over HTTP - upload, the real worker pipeline, retrieval,
+the answer, the citation and the click-through - against real indexed rows. The
+only thing faked is the OpenAI SDK boundary, and it is faked deterministically so
+retrieval order is a property of the code and not of luck.
+"""
+
+from types import SimpleNamespace
 
 import pytest_asyncio
+from test_chat import parse_sse
+from test_parsers import _write_pdf
 
 from app.llm.base import ChatResult
 from app.models.chunk import EMBEDDING_DIM
+from app.rag.chunking import get_chunking_strategy
 from app.rag.pipeline import process_document
 from app.retrieval.vector_store import PgVectorStore
 
-DOCUMENT_TEXT = """# 토마토 역병 방제
-
-토마토 역병은 감염된 토양과 튀는 물을 통해 퍼진다. 재배자는 윤작을 하고 잔재물을 제거해야 한다.
-
-# 재무 보고
-
-이 절은 전혀 관련이 없는 재무 내용을 담고 있다. 분기 매출은 전년 대비 증가했다.
-"""
+# A PDF, not the .md the rest of the suite uploads: markdown has no pages, and
+# `page` is half of what a citation has to carry. The worked example the slice is
+# measured against is "[연구보고서 A, p.32]", so the filename is non-ASCII too -
+# it travels through multipart, the database, retrieval metadata and the SSE frame.
+FILENAME = "연구보고서 A.pdf"
+PAGES = [
+    [
+        "QUARTERLY FINANCIAL REPORT",
+        "Revenue rose against the previous year and the outlook is stable.",
+    ],
+    [
+        "TOMATO BLIGHT CONTROL",
+        "Tomato blight spreads through infected soil and splashing water.",
+        "Growers should rotate crops and remove crop debris.",
+    ],
+]
+# Every token of the query has to appear in the chunk verbatim for the sparse half
+# to fire at all: content_tsv and plainto_tsquery both use the 'simple' config, which
+# neither stems nor drops stop words, and plainto_tsquery ANDs what is left. "How
+# does tomato blight spread?" retrieves nothing from the sparse retriever - 'how',
+# 'does' and the unstemmed 'spread' are absent - and the dense half silently covers
+# for it. The keyword_rank assertion below is what exposed that.
+QUESTION = "tomato blight spreads"
+ANSWER = "역병은 감염된 토양과 튀는 물로 퍼집니다 [1]."
 
 
 class DeterministicProvider:
-    """Topic-keyed unit vectors, so retrieval is exact and the test is not flaky."""
+    """Topic-keyed vectors, so retrieval is exact and the ordering below is not
+    luck. Never reaches the network."""
 
     def __init__(self):
-        self.chat = AsyncMock(
-            return_value=ChatResult(
-                content="역병은 감염된 토양과 물로 퍼집니다 [1].",
-                usage={"total_tokens": 30},
-                model="gpt-4o",
-            )
-        )
         self.prompts: list = []
 
     def _vector(self, text: str) -> list[float]:
-        blight = 1.0 if ("역병" in text or "토마토" in text) else 0.0
-        finance = 1.0 if ("재무" in text or "매출" in text) else 0.0
-        return [blight, finance] + [0.0] * (EMBEDDING_DIM - 2)
+        lowered = text.casefold()
+        blight = 1.0 if ("blight" in lowered or "tomato" in lowered) else 0.0
+        finance = 1.0 if ("revenue" in lowered or "financial" in lowered) else 0.0
+        # The constant tail keeps every vector non-zero. pgvector's cosine distance
+        # to an all-zero vector is NaN, which sorts wherever it likes - so a chunk
+        # matching neither topic would make the ranking unreproducible instead of
+        # simply last.
+        return [blight, finance, 0.5] + [0.0] * (EMBEDDING_DIM - 3)
 
-    async def embed(self, texts):
-        return [self._vector(t) for t in texts]
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        return [self._vector(text) for text in texts]
+
+    async def chat(self, messages, **kwargs) -> ChatResult:
+        self.prompts.append(messages)
+        return ChatResult(content=ANSWER, usage={"total_tokens": 30}, model="gpt-4o")
 
 
 @pytest_asyncio.fixture
 async def provider(app):
     instance = DeterministicProvider()
-
-    async def _capture(messages, **kwargs):
-        instance.prompts.append(messages)
-        return instance.chat.return_value
-
-    instance.chat = AsyncMock(side_effect=_capture)
-    instance.chat.return_value = ChatResult(
-        content="역병은 감염된 토양과 물로 퍼집니다 [1].",
-        usage={"total_tokens": 30},
-        model="gpt-4o",
-    )
     app.state.llm_provider = instance
-    app.state.arq_pool = AsyncMock()
     return instance
 
 
-async def test_uploaded_document_becomes_a_cited_answer(client, app, db, provider, tmp_path):
-    import json
-
-    from app.rag.chunking import get_chunking_strategy
-    from app.models.document import Document
-    import uuid as _uuid
-
-    # 1. Bootstrap admin + collection
-    await client.post(
-        "/api/auth/register", json={"email": "admin@example.com", "password": "pw123456"}
-    )
-    await client.post(
-        "/api/auth/login", json={"email": "admin@example.com", "password": "pw123456"}
-    )
+@pytest_asyncio.fixture
+async def corpus(client, app, db, provider, tmp_path):
+    """Register (the first account bootstraps admin and the default collection),
+    create a second collection, upload a real PDF and index it with the worker's
+    own entry point."""
+    await client.post("/api/auth/register", json={"email": "admin@example.com", "password": "pw123456"})
+    await client.post("/api/auth/login", json={"email": "admin@example.com", "password": "pw123456"})
     collection_id = (await client.post("/api/collections", json={"name": "농업"})).json()["id"]
 
-    # 2. Upload
+    path = tmp_path / "report.pdf"
+    _write_pdf(path, PAGES)
     upload = await client.post(
         "/api/documents",
         data={"collection_id": collection_id},
-        files={"file": ("연구보고서 A.md", DOCUMENT_TEXT.encode("utf-8"), "text/markdown")},
+        files={"file": (FILENAME, path.read_bytes(), "application/pdf")},
     )
     assert upload.status_code == 202
+    assert upload.json()["status"] == "uploaded"
     document_id = upload.json()["id"]
 
-    # 3. Run the worker pipeline inline with the deterministic provider
-    settings = app.state.settings
-    await process_document(
-        db, PgVectorStore(db), provider, get_chunking_strategy(settings), document_id
+    # process_document is what the arq worker calls, run inline on the file the
+    # upload actually stored. The strategy is pinned rather than read from the
+    # operator's .env: under "fixed" this small document is one chunk, and a corpus
+    # with only one topic in it cannot show that retrieval picked the right one.
+    settings = app.state.settings.model_copy(update={"chunking_strategy": "semantic"})
+    await process_document(db, PgVectorStore(db), provider, get_chunking_strategy(settings), document_id)
+
+    collections = (await client.get("/api/collections")).json()
+    return SimpleNamespace(
+        document_id=document_id,
+        collection_id=collection_id,
+        other_collection_id=next(c["id"] for c in collections if c["id"] != collection_id),
     )
-    document = await db.get(Document, _uuid.UUID(document_id))
-    await db.refresh(document)
-    assert document.status == "indexed"
 
-    listed = (await client.get(f"/api/documents/{document_id}")).json()
-    assert listed["chunk_count"] > 0
+
+async def test_an_uploaded_document_becomes_a_cited_answer(client, provider, corpus):
+    listed = (await client.get(f"/api/documents/{corpus.document_id}")).json()
     assert listed["status"] == "indexed"
+    assert listed["filename"] == FILENAME
+    # One chunk per section. At 1 the two topics have merged, and every relevance
+    # assertion below would be passing on a corpus that holds no wrong answer.
+    assert listed["chunk_count"] == 2
 
-    # 4. Retrieval alone finds the right chunk
-    search = (await client.post("/api/search", json={"query": "토마토 역병"})).json()
+    # Retrieval alone finds the right chunk, with its provenance attached.
+    search = (await client.post("/api/search", json={"query": QUESTION})).json()
     assert search["results"], "an indexed document must be retrievable"
-    assert "역병" in search["results"][0]["content"]
+    top = search["results"][0]
+    assert "Tomato blight spreads" in top["content"]
+    assert top["metadata"]["filename"] == FILENAME
+    assert top["metadata"]["page"] == 2
+    # Both halves of hybrid retrieval have to have found it. Without this the dense
+    # and sparse paths cover for each other and either one could be dead.
+    assert (top["metadata"]["vector_rank"], top["metadata"]["keyword_rank"]) == (1, 1)
 
-    # 5. Chat produces an answer with a real citation
-    response = await client.post("/api/chat", json={"message": "토마토 역병은 어떻게 퍼지나요?"})
-    events = [
-        json.loads(line[len("data: ") :])
-        for line in response.text.splitlines()
-        if line.startswith("data: ")
-    ]
-    done = events[-1]
+    # And the answer carries a citation that resolves to that chunk.
+    response = await client.post("/api/chat", json={"message": QUESTION})
+    done = parse_sse(response.text)[-1]
     assert done["type"] == "done"
+    assert done["content"] == ANSWER
     assert done["citations"], "an answer citing [1] must carry a citation"
 
     citation = done["citations"][0]
-    assert citation["filename"] == "연구보고서 A.md"
-    assert citation["chunk_id"]
-    assert citation["snippet"]
+    assert citation["filename"] == FILENAME
+    assert citation["page"] == 2
+    assert citation["section"] == "TOMATO BLIGHT CONTROL"
+    assert "Tomato blight spreads" in citation["snippet"]
 
-    # 6. The evidence actually reached the prompt, in its own fenced message
-    prompt_messages = provider.prompts[-1]
-    evidence_message = next(m for m in prompt_messages if "EVIDENCE" in m.content)
-    assert "역병" in evidence_message.content
-    assert prompt_messages[-1].content == "토마토 역병은 어떻게 퍼지나요?"
+    # The evidence reached the model, fenced, with the question still last.
+    messages = provider.prompts[-1]
+    fenced = [message for message in messages if "EVIDENCE" in message.content]
+    assert fenced, "the retrieved evidence never reached the prompt"
+    assert "Tomato blight spreads" in fenced[0].content
+    assert "p.2" in fenced[0].content  # the label the citation is drawn from
+    assert messages[-1].content == QUESTION
 
-    # 7. The cited chunk is fetchable for click-through
+    # Click-through: the cited chunk id is fetchable and holds the cited text.
     chunk = await client.get(f"/api/chunks/{citation['chunk_id']}")
     assert chunk.status_code == 200
-    assert chunk.json()["content"]
+    assert "Tomato blight spreads" in chunk.json()["content"]
+    assert chunk.json()["page"] == 2
+
+
+async def test_collection_scoping_filters_against_a_real_corpus(client, provider, corpus):
+    """Both empty cases have been default-open bugs here - once in the vector path,
+    once in the sparse one - and an empty corpus cannot tell a scope that filters
+    from one that is ignored."""
+    body = {"query": QUESTION}
+    scoped = (await client.post("/api/search", json=body | {"collection_ids": [corpus.collection_id]})).json()
+    assert len(scoped["results"]) == 2
+
+    elsewhere = await client.post("/api/search", json=body | {"collection_ids": [corpus.other_collection_id]})
+    assert elsewhere.json()["results"] == []
+
+    nowhere = await client.post("/api/search", json=body | {"collection_ids": []})
+    assert nowhere.json()["results"] == []
+
+    # Same scope on the chat path, where it is the citations that have to vanish -
+    # and the evidence must never have reached the prompt in the first place.
+    response = await client.post(
+        "/api/chat", json={"message": QUESTION, "collection_ids": [corpus.other_collection_id]}
+    )
+    assert parse_sse(response.text)[-1]["citations"] == []
+    assert not any("EVIDENCE" in message.content for message in provider.prompts[-1])
+
+
+async def test_the_answer_stream_carries_no_prompt_and_no_uncited_evidence(client, corpus):
+    response = await client.post("/api/chat", json={"message": QUESTION})
+
+    assert {event["type"] for event in parse_sse(response.text)} <= {"status", "citations", "done"}
+    assert "<<EVIDENCE" not in response.text
+    assert "You are MOPAN's assistant" not in response.text
+    # The financial chunk was retrieved and shown to the model as [2], but the
+    # answer never cited it, so it is not the client's to see.
+    assert "Revenue rose" not in response.text
 ```
 
-- [ ] **Step 2: Run the test, expect PASS**
+- [ ] **Step 3: Run the test, expect PASS**
 
 Run: `pytest tests/test_end_to_end.py -v` (Postgres running)
-Expected: PASS
+Expected: 3 tests PASS.
 
-- [ ] **Step 3: Run the whole backend suite**
+A green end-to-end test that cannot fail is worse than none, so prove it can. Break one thing upstream at a time and re-run: return `[]` from `PgVectorStore.search`, return `[]` from `keyword_search`, clear every `candidate.embedding` before the upsert, drop `page` from the citation dict in `_citations_from`, start its `enumerate` at 0, drop `page_number` in `PdfParser`, read `if collection_ids:` instead of `is not None` in each of the two retrievers in turn, never append the fenced evidence message in `build_prompt`, and leave `document.status` short of `"indexed"`. All ten must fail the test.
 
-Run: `pytest -v` then `ruff check .`
-Expected: every test across all 18 files PASSES and the linter is clean.
+- [ ] **Step 4: Run the whole backend suite**
 
-- [ ] **Step 4: Commit**
+Run: `pytest -v`, then `ruff check .` and `ruff format --check .`
+Expected: every test across all 19 test files PASSES and the linter is clean.
+
+- [ ] **Step 5: Commit**
 
 ```bash
+git add backend/tests/test_chat.py
+git commit -m "test: land the three carried Task 18 review items"
+
 git add backend/tests/test_end_to_end.py
 git commit -m "test: end-to-end ingest -> retrieve -> cited answer"
 ```
