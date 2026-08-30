@@ -221,6 +221,74 @@ export interface TraceEvidence {
   included: boolean;
 }
 
+/** One step of a Super Agent plan, in GET /api/messages/{id}/trace and in the
+ * `step` SSE frames the chat streams while the plan runs.
+ *
+ * `state` is the field worth reading: `done`, `failed` (recorded, and the plan
+ * carried on), `skipped` (the human declined it), `timeout` (the plan's wall
+ * clock ran out first), or `running` while it is in flight. */
+export interface PlanStep {
+  id: string;
+  kind: "rag" | "tool";
+  label: string;
+  state: "running" | "done" | "failed" | "skipped" | "timeout";
+  query?: string | null;
+  collections?: string[];
+  tool?: string | null;
+  risk_level?: string | null;
+  arguments?: Record<string, unknown> | null;
+  depends_on?: string[];
+  evidence_count: number;
+  ms: number;
+  /** The Korean sentence that goes with a non-`done` state. It is `detail` on
+   * the SSE frame and `error` in the stored trace; both are optional here. */
+  detail?: string | null;
+  error?: string | null;
+}
+
+/** The plan behind an answer, or the record that there was not one. Null for
+ * every answer from the direct RAG path, which is still the default.
+ *
+ * `refused` is set when the planner produced something the executor would not
+ * run - a tool it invented, a collection outside the question's scope, a ceiling
+ * exceeded. The answer then came from the direct path, and this is the sentence
+ * that says why. */
+export interface TracePlan {
+  steps: PlanStep[];
+  step_count: number;
+  tool_step_count: number;
+  timed_out: boolean;
+  elapsed_ms: number;
+  fell_back_to_direct_rag: boolean;
+  refused: string | null;
+  budget_seconds: number | null;
+  max_steps: number | null;
+  max_tool_calls: number | null;
+  approval_risk_level: string | null;
+}
+
+/** The `approval_required` SSE frame. A plan paused on a tool whose risk level
+ * is at or above ORCHESTRATOR_APPROVAL_RISK_LEVEL; nothing has been answered and
+ * the tool has NOT been called.
+ *
+ * The token is opaque, single-use and owner-checked, and it is answered with a
+ * SECOND request to POST /api/chat/approve rather than on this stream - SSE is
+ * one-way, and a generator held open across the pause would die with the
+ * connection at exactly the moment a user is most likely to walk away. */
+export interface ApprovalRequest {
+  approval_token: string;
+  expires_in: number;
+  conversation_id: string;
+  step: {
+    id: string;
+    label: string;
+    server: string;
+    tool: string;
+    risk_level: McpRiskLevel;
+    arguments: Record<string, unknown>;
+  };
+}
+
 export interface TraceRetrieval {
   top_n: number | null;
   candidate_limit: number | null;
@@ -247,6 +315,9 @@ export interface MessageTrace {
   has_trace: boolean;
   retrieval: TraceRetrieval;
   evidence: TraceEvidence[];
+  /** Null on the direct RAG path, which is still the default. `messages.trace`
+   * is JSONB, so Slice 3 needed no migration to add this. */
+  plan: TracePlan | null;
 }
 
 /** One row of GET /api/settings. `env_value` is what removing the override would
@@ -295,12 +366,21 @@ export interface Message {
   created_at: string;
 }
 
-/** SSE payloads from POST /api/chat. `token` is reserved for Slice 3. */
+/** SSE payloads from POST /api/chat and POST /api/chat/approve. `token` is
+ * still reserved - nothing emits it. */
 export type ChatEvent =
   // "calling_tool" is emitted only when the turn carried tool_calls, and always
   // before "searching": the MCP round trip happens first so the user sees the
-  // slow, visible thing they asked for happening.
-  | { type: "status"; status: "searching" | "answering" | "calling_tool" }
+  // slow, visible thing they asked for happening. "planning" is Slice 3's, and
+  // "searching" then appears only when the plan produced no evidence and the
+  // direct RAG path answered instead.
+  | { type: "status"; status: "searching" | "answering" | "calling_tool" | "planning" }
+  // One per plan step, twice: `running` when it starts, and its final state when
+  // it ends. This is the "문서 검색 → 진단 → 결과 종합" the requirement asked for.
+  | ({ type: "step" } & PlanStep)
+  // TERMINAL, like `done` and `error`: the plan stopped, nothing was answered,
+  // and the client replies with POST /api/chat/approve.
+  | ({ type: "approval_required" } & ApprovalRequest)
   | { type: "token"; text: string }
   | { type: "citations"; citations: Citation[] }
   | {

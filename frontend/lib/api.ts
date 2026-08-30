@@ -192,11 +192,42 @@ export async function streamChat(
      * refused with a Korean 4xx BEFORE the conversation is created - so it
      * arrives here as a rejected fetch, not as an error frame inside a 200. */
     tool_calls?: { tool_id: string; arguments: Record<string, unknown> }[];
+    /** Slice 3's Super Agent, opt-in per question the way `model` is. Off means
+     * the Slice 1 direct RAG path, which is still the default. */
+    orchestrator?: boolean;
   },
   onEvent: (event: ChatEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}/api/chat`, {
+  return postStream("/api/chat", body, onEvent, signal);
+}
+
+/** Answers the `approval_required` frame: the SECOND request that resumes a plan
+ * paused on a high-risk tool.
+ *
+ * A second request rather than a reply on the open stream, because SSE is
+ * one-way and because a generator held open across the pause dies with the
+ * connection - and the pause is exactly when a user reloads or walks away. The
+ * token is single-use server-side, so a double-clicked 승인 approves once and the
+ * replay is a Korean 404. */
+export async function approveChat(
+  body: { approval_token: string; approved: boolean },
+  onEvent: (event: ChatEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  return postStream("/api/chat/approve", body, onEvent, signal);
+}
+
+/** The shared SSE reader. One implementation, because a resumed plan has to end
+ * exactly the way a fresh one does - same `done` frame, same truncation check -
+ * and two copies would have diverged on the first fix. */
+async function postStream(
+  path: string,
+  body: unknown,
+  onEvent: (event: ChatEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
@@ -225,7 +256,13 @@ export async function streamChat(
       if (!line) continue;
       try {
         const event = JSON.parse(line.slice("data: ".length)) as ChatEvent;
-        if (event.type === "done" || event.type === "error") terminated = true;
+        // `approval_required` ends the stream as surely as `done` does: the plan
+        // stopped and no answer is coming until a human replies. Without it here
+        // a paused plan would raise STREAM_TRUNCATED and put a red banner over
+        // the question the user is being asked.
+        if (event.type === "done" || event.type === "error" || event.type === "approval_required") {
+          terminated = true;
+        }
         onEvent(event);
       } catch {
         // Ignore a malformed frame rather than killing the whole stream.

@@ -26,6 +26,7 @@ PLANS = [
     "docs/superpowers/plans/2026-08-30-prompt-admin.md",
     "docs/superpowers/plans/2026-08-30-slice-5-observability.md",
     "docs/superpowers/plans/2026-08-30-slice-2-mcp.md",
+    "docs/superpowers/plans/2026-08-30-slice-3-orchestrator.md",
 ]
 
 missing = [p for p in PLANS if not (REPO / p).exists()]

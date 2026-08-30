@@ -2,22 +2,27 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { apiFetch, errorMessage, streamChat } from "@/lib/api";
+import { apiFetch, approveChat, errorMessage, streamChat } from "@/lib/api";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import Composer, {
   ATTACHMENT_EXTENSIONS,
   type PendingAttachment,
 } from "@/components/chat/Composer";
 import MessageBubble from "@/components/chat/MessageBubble";
+import PlanProgress from "@/components/chat/PlanProgress";
 import type {
   AnswerModel,
+  ApprovalRequest,
   Attachment,
+  ChatEvent,
   McpToolOption,
   Message,
   PendingToolCall,
+  PlanStep,
 } from "@/lib/types";
 
 const STATUS_LABEL: Record<string, string> = {
+  planning: "실행 계획 세우는 중…",
   calling_tool: "도구 호출 중…",
   searching: "문서 검색 중…",
   answering: "답변 생성 중…",
@@ -36,6 +41,13 @@ const MAX_ATTACHMENT_MB = 10;
 // home for it, and a browser that refuses to store it just starts on the
 // default every time.
 const MODEL_STORAGE_KEY = "mopan.answer-model";
+
+// Whether the Super Agent plans the next question. Remembered the same way and
+// for the same reason as the model, and OFF by default: the direct RAG path is
+// the default until the orchestrator measures better on the eval set, and a
+// browser that refuses to store this starts on the default every time - which is
+// the safe direction.
+const ORCHESTRATOR_STORAGE_KEY = "mopan.orchestrator";
 
 // §8: 3-4 chips that fill the composer when clicked. Deliberately about
 // documents and not about the corpus that happens to be loaded - this is a
@@ -92,6 +104,15 @@ export default function ChatWindow({
   // `model` at all, which the server reads as its own default - so the picker
   // failing to load costs the user the choice, never the answer.
   const [model, setModel] = useState("");
+  // Slice 3, opt-in per question. False on the server too, so a client that
+  // never sends the flag gets the Slice 1 path unchanged.
+  const [orchestrator, setOrchestrator] = useState(false);
+  // The plan, as it runs. Keyed by step id and updated in place, because each
+  // step arrives twice - `running`, then its final state.
+  const [steps, setSteps] = useState<PlanStep[]>([]);
+  // Set by the terminal `approval_required` frame. While it is non-null the plan
+  // is paused, the tool has NOT been called, and nothing has been answered.
+  const [approval, setApproval] = useState<(ApprovalRequest & { pendingId: string }) | null>(null);
   const [dragging, setDragging] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -169,6 +190,16 @@ export default function ChatWindow({
     apiFetch<McpToolOption[]>("/api/mcp/tools")
       .then(setTools)
       .catch(() => setTools([]));
+    // Read HERE and not in a useState initialiser, for the same two reasons the
+    // model is: this component is server-rendered, where `window` does not
+    // exist, and reading during render would hydrate a different value than the
+    // server emitted.
+    try {
+      setOrchestrator(localStorage.getItem(ORCHESTRATOR_STORAGE_KEY) === "true");
+    } catch {
+      // Private mode, or site data blocked. The default is off, which is where
+      // this already is.
+    }
   }, []);
 
   useEffect(() => {
@@ -278,68 +309,47 @@ export default function ChatWindow({
     }
   }
 
-  async function handleSend() {
-    if (!input.trim() || sending) return;
-    if (attachments.some((a) => a.status === "uploading")) {
-      setError("첨부파일 업로드가 끝난 뒤에 보내 주세요.");
-      return;
-    }
-
-    const question = input;
-    const sent = attachments.filter((a) => a.attachment !== null).map((a) => a.attachment!);
-    const calls = toolCall ? [toolCall] : [];
-    const pendingId = `temp-${Date.now()}`;
+  /** One streamed turn, from either endpoint.
+   *
+   * `start` is `streamChat` for a new question and `approveChat` for the second
+   * half of a plan that paused. Everything after the request is identical - the
+   * same frames, the same `done` handling, the same abort and truncation rules -
+   * and two copies of it would have diverged on the first fix. */
+  async function run(
+    question: string,
+    pendingId: string,
+    start: (onEvent: (event: ChatEvent) => void, signal: AbortSignal) => Promise<void>,
+  ) {
     const controller = new AbortController();
     abortRef.current = controller;
     stoppedRef.current = false;
-    setInput("");
-    // Cleared here rather than on `done`: these rows are claimed by the send,
-    // so leaving the chips up would offer a 삭제 that now answers 409
-    // 이미 전송된 첨부파일은 삭제할 수 없습니다.
-    setAttachments([]);
-    // Cleared with the attachments and for the same reason: the call belongs to
-    // the turn that was just sent, and leaving the chip up would silently run
-    // the tool again on the next question.
-    setToolCall(null);
     setError(null);
     setAnnouncement("");
+    // The pause is over the moment a new stream starts, whichever way it ends.
+    setApproval(null);
     setSending(true);
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: pendingId,
-        role: "user",
-        content: question,
-        citations: [],
-        attachments: sent,
-        model: null,
-        feedback: null,
-        created_at: new Date().toISOString(),
-      },
-    ]);
 
     try {
       let newConversationId: string | null = null;
-      // Neither `token` nor `citations` gets a branch, both deliberately: Slice 1's
-      // answer() is a single non-streaming llm_provider.chat() call so `token` is
-      // never emitted at all (it is Slice 3's), and the `citations` frame carries
-      // the identical array that `done` carries one frame later.
-      await streamChat(
-        {
-          conversation_id: conversationId,
-          message: question,
-          attachment_ids: sent.map((a) => a.id),
-          ...(calls.length
-            ? { tool_calls: calls.map((c) => ({ tool_id: c.tool.id, arguments: c.arguments })) }
-            : {}),
-          // Omitted, not sent empty, while the list is still loading: the
-          // backend reads an absent `model` as ANSWER_MODEL and an unknown one
-          // as a 400.
-          ...(model ? { model } : {}),
-        },
-        (event) => {
+      // Neither `token` nor `citations` gets a branch, both deliberately:
+      // answer() is a single non-streaming llm_provider.chat() call so `token`
+      // is never emitted at all, and the `citations` frame carries the identical
+      // array that `done` carries one frame later.
+      await start((event) => {
           if (event.type === "status") {
             setStatus(STATUS_LABEL[event.status] ?? null);
+          } else if (event.type === "step") {
+            // Upsert: every step arrives twice, `running` then its final state.
+            setSteps((prev) => {
+              const next = prev.filter((s) => s.id !== event.id);
+              return [...next, event];
+            });
+          } else if (event.type === "approval_required") {
+            // TERMINAL. The plan stopped, the tool has not run and no answer is
+            // coming until this is answered - so the question bubble stays on
+            // screen and the card below the transcript takes over.
+            setApproval({ ...event, pendingId });
+            setNotice(`${event.step.tool} 도구 실행 승인이 필요합니다.`);
           } else if (event.type === "error") {
             setError(event.detail);
             // Take the question back off screen with it. An `error` frame means
@@ -353,6 +363,13 @@ export default function ChatWindow({
           } else if (event.type === "done") {
             newConversationId = event.conversation_id;
             setAnnouncement(event.content);
+            // The plan goes when the answer arrives, exactly as the status line
+            // does. It is rendered after the transcript, so leaving it up put
+            // "문서 검색: …" UNDER the answer it produced - seen in a screenshot,
+            // not in the markup - and it would then sit there through the next
+            // question. The permanent record is the 추적 dialog, which shows the
+            // plan with each step's timing and result.
+            setSteps([]);
             setMessages((prev) => [
               ...prev,
               {
@@ -374,9 +391,7 @@ export default function ChatWindow({
               },
             ]);
           }
-        },
-        controller.signal,
-      );
+      }, controller.signal);
 
       if (!conversationId && newConversationId) {
         setConversationId(newConversationId);
@@ -430,6 +445,95 @@ export default function ChatWindow({
     } finally {
       setStatus(null);
       setSending(false);
+    }
+  }
+
+  async function handleSend() {
+    if (!input.trim() || sending) return;
+    if (attachments.some((a) => a.status === "uploading")) {
+      setError("첨부파일 업로드가 끝난 뒤에 보내 주세요.");
+      return;
+    }
+
+    const question = input;
+    const sent = attachments.filter((a) => a.attachment !== null).map((a) => a.attachment!);
+    const calls = toolCall ? [toolCall] : [];
+    const pendingId = `temp-${Date.now()}`;
+    setInput("");
+    // Cleared here rather than on `done`: these rows are claimed by the send,
+    // so leaving the chips up would offer a 삭제 that now answers 409
+    // 이미 전송된 첨부파일은 삭제할 수 없습니다.
+    setAttachments([]);
+    // Cleared with the attachments and for the same reason: the call belongs to
+    // the turn that was just sent, and leaving the chip up would silently run
+    // the tool again on the next question.
+    setToolCall(null);
+    // The previous turn's plan, not this one's. Cleared on SEND rather than in
+    // run(), so the steps of a paused plan survive the approval round trip and
+    // the user can still read what has already happened while deciding.
+    setSteps([]);
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: pendingId,
+        role: "user",
+        content: question,
+        citations: [],
+        attachments: sent,
+        model: null,
+        feedback: null,
+        created_at: new Date().toISOString(),
+      },
+    ]);
+
+    await run(question, pendingId, (onEvent, signal) =>
+      streamChat(
+        {
+          conversation_id: conversationId,
+          message: question,
+          attachment_ids: sent.map((a) => a.id),
+          ...(calls.length
+            ? { tool_calls: calls.map((c) => ({ tool_id: c.tool.id, arguments: c.arguments })) }
+            : {}),
+          // Omitted, not sent empty, while the list is still loading: the
+          // backend reads an absent `model` as ANSWER_MODEL and an unknown one
+          // as a 400.
+          ...(model ? { model } : {}),
+          // Omitted when off, so a turn that does not want a plan sends exactly
+          // the body Slice 1 sent.
+          ...(orchestrator ? { orchestrator: true } : {}),
+        },
+        onEvent,
+        signal,
+      ),
+    );
+  }
+
+  /** 승인 / 거부 on a paused plan. The second request, carrying the token.
+   *
+   * `approved: false` is not "cancel" - the plan continues without that step and
+   * still answers from whatever else it finds, which is the same rule a failed
+   * step follows. The token is single-use server-side, so a double click is a
+   * Korean 404 rather than a second call to the tool. */
+  async function decide(approved: boolean) {
+    if (!approval || sending) return;
+    const { approval_token, pendingId, step } = approval;
+    setNotice(approved ? `${step.tool} 실행을 승인했습니다.` : `${step.tool} 실행을 거부했습니다.`);
+    await run(
+      messages.find((m) => m.id === pendingId)?.content ?? "",
+      pendingId,
+      (onEvent, signal) => approveChat({ approval_token, approved }, onEvent, signal),
+    );
+  }
+
+  function chooseOrchestrator(value: boolean) {
+    setOrchestrator(value);
+    setNotice(value ? "슈퍼 에이전트를 켰습니다." : "슈퍼 에이전트를 껐습니다.");
+    try {
+      localStorage.setItem(ORCHESTRATOR_STORAGE_KEY, String(value));
+    } catch {
+      // Same as the model: the choice applies to this session and just will not
+      // survive a reload.
     }
   }
 
@@ -527,6 +631,16 @@ export default function ChatWindow({
           {messages.map((m) => (
             <MessageBubble key={m.id} message={m} onNotify={setNotice} />
           ))}
+          {/* The plan as it runs, and the one question it stops to ask. Its own
+              component because ChatWindow is long enough already and because
+              neither half needs anything from this file but its props. */}
+          <PlanProgress
+            steps={steps}
+            approval={approval}
+            sending={sending}
+            onDecide={(approved) => void decide(approved)}
+          />
+
           {/* aria-live, because this line is the only feedback between pressing
               전송 and the answer landing, and it is never focused. The sparkle
               is the streaming indicator - the one looping animation in the app
@@ -589,6 +703,8 @@ export default function ChatWindow({
             setNotice(`${call.tool.name} 도구를 이번 질문에 사용합니다.`);
           }}
           onToolRemove={() => setToolCall(null)}
+          orchestrator={orchestrator}
+          onOrchestratorChange={chooseOrchestrator}
         />
       </div>
     </div>

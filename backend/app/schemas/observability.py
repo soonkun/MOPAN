@@ -70,6 +70,53 @@ class TraceRetrieval(BaseModel):
     included_count: int = 0
 
 
+class TracePlanStep(BaseModel):
+    """One step of a Super Agent plan, as it actually ran.
+
+    `state` is the field worth reading: `done`, `failed` (recorded and the plan
+    carried on), `skipped` (the human refused it), or `timeout` (the plan's wall
+    clock ran out before it started). `error` carries the Korean sentence that
+    goes with the last three.
+    """
+
+    id: str
+    kind: str
+    label: str
+    state: str
+    query: str | None = None
+    collections: list[str] = Field(default_factory=list)
+    tool: str | None = None
+    risk_level: str | None = None
+    arguments: dict | None = None
+    depends_on: list[str] = Field(default_factory=list)
+    evidence_count: int = 0
+    ms: int = 0
+    error: str | None = None
+
+
+class TracePlan(BaseModel):
+    """The plan behind an answer, or the record that there was not one.
+
+    Absent entirely on the direct RAG path - the orchestrator is opt-in, and most
+    answers have no plan. Present with `steps: []` and `refused` set when the
+    planner produced something the executor would not run, which is the case this
+    screen exists to explain: the answer came from the direct path and the reason
+    is a sentence, not a shrug.
+    """
+
+    steps: list[TracePlanStep] = Field(default_factory=list)
+    step_count: int = 0
+    tool_step_count: int = 0
+    timed_out: bool = False
+    elapsed_ms: int = 0
+    fell_back_to_direct_rag: bool = False
+    refused: str | None = None
+    budget_seconds: float | None = None
+    max_steps: int | None = None
+    max_tool_calls: int | None = None
+    approval_risk_level: str | None = None
+
+
 class TraceResponse(BaseModel):
     message_id: uuid.UUID
     conversation_id: uuid.UUID
@@ -88,6 +135,10 @@ class TraceResponse(BaseModel):
     has_trace: bool = False
     retrieval: TraceRetrieval = Field(default_factory=TraceRetrieval)
     evidence: list[TraceEvidence] = Field(default_factory=list)
+    # None for every answer from the direct RAG path, which is still the default.
+    # build_trace reserved this key and the column is JSONB, so Slice 3 needed no
+    # migration to fill it.
+    plan: TracePlan | None = None
 
 
 class SettingResponse(BaseModel):

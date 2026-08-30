@@ -90,6 +90,10 @@ async def get_trace(
         has_trace=bool(trace.get("evidence") is not None),
         retrieval=trace.get("retrieval") or {},
         evidence=trace.get("evidence") or [],
+        # None, not {}: "this answer had no plan" and "this answer had an empty
+        # plan" are different facts and the screen says different things about
+        # them. The direct path writes no key at all.
+        plan=trace.get("plan"),
     )
 
 

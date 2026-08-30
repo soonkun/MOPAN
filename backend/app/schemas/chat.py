@@ -45,6 +45,37 @@ class ChatRequest(BaseModel):
     # reasons attachment_ids' is: it is operator configuration, and a
     # Field(max_length=...) would freeze it at import time and answer in English.
     tool_calls: list[ToolCallRequest] | None = None
+    # Slice 3's Super Agent, OPT-IN and defaulting to off, chosen per question
+    # the way `model` is. The direct RAG path of Slice 1 stays the default until
+    # the orchestrator measures better on scripts/eval_questions_ko.json: a
+    # planner is a new failure mode, and making it mandatory on day one would put
+    # two systems under every regression.
+    #
+    # It composes with everything above rather than replacing it: attachments
+    # still ride the turn, and a tool the USER picked in `tool_calls` still runs
+    # before the plan does. The planner decides what ELSE to reach for.
+    orchestrator: bool = False
+
+
+class ApprovalDecision(BaseModel):
+    """Body of POST /api/chat/approve - the second request that resumes a plan
+    paused on a high-risk step.
+
+    A TOKEN AND A SECOND REQUEST, not a generator held open across the pause.
+    The reasoning is in app/orchestrator/approval.py; the short version is that a
+    held-open generator dies with the connection, and the pause is exactly when a
+    user walks away. The token is opaque, single-use and owner-checked.
+
+    There is no `message` here and no `conversation_id`: both are in the stored
+    payload, and accepting either from the client would let a replay attach an
+    approved tool call to a different question.
+    """
+
+    approval_token: str = Field(min_length=1, max_length=200)
+    # False is not "cancel the answer" - it is "run the rest of the plan without
+    # this step". The question is still worth answering from whatever else the
+    # plan finds, which is the same rule a failed step follows.
+    approved: bool
 
 
 class AttachmentResponse(BaseModel):

@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { ApiError, streamChat } from "./api.ts";
+import { ApiError, approveChat, streamChat } from "./api.ts";
 import type { ChatEvent } from "./types.ts";
 
 const TRUNCATED = "답변을 끝까지 받지 못했습니다. 다시 시도해 주세요.";
@@ -95,6 +95,50 @@ test("an error frame is terminal too - the caller already showed it", async () =
     events.map((e) => e.type),
     ["error"],
   );
+});
+
+test("approval_required is terminal - a paused plan is not a truncated stream", async () => {
+  // Without this frame in the terminal set, a plan that stops to ask a human
+  // reaches the end of the body having emitted no `done`, and the caller gets
+  // 답변을 끝까지 받지 못했습니다 in a red banner over the question it is being
+  // asked about.
+  stubFetch(
+    sse(
+      { type: "step", id: "s1", state: "done" },
+      { type: "approval_required", approval_token: "t", expires_in: 900, step: {} },
+    ),
+  );
+  const { events, onEvent } = collect();
+
+  await streamChat({ ...ASK, orchestrator: true }, onEvent);
+
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ["step", "approval_required"],
+  );
+});
+
+test("approveChat posts the token to /api/chat/approve and reads the same stream", async () => {
+  let url: unknown = null;
+  let body: unknown = null;
+  const inner = stubFetch(sse({ type: "done", conversation_id: "c1", content: "답변", citations: [] }));
+  const wrapped = globalThis.fetch;
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    url = input;
+    body = init?.body;
+    return wrapped(input as string, init);
+  }) as unknown as typeof fetch;
+  const { events, onEvent } = collect();
+
+  await approveChat({ approval_token: "tok", approved: true }, onEvent);
+
+  assert.equal(url, "/api/chat/approve");
+  assert.equal(body, JSON.stringify({ approval_token: "tok", approved: true }));
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ["done"],
+  );
+  assert.ok(inner);
 });
 
 test("the signal reaches fetch, and an abort surfaces as AbortError", async () => {

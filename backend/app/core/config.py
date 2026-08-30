@@ -175,6 +175,70 @@ class Settings(BaseSettings):
     # on a planner. Slice 3's orchestrator gets its own ceiling.
     max_tool_calls_per_message: int = 3
 
+    # --- Super Agent / Orchestrator (Slice 3) --------------------------------
+    # OPT-IN per question, exactly the way the answer model is picked. The direct
+    # RAG path of Slice 1 stays and stays the default until the orchestrator
+    # measures better on scripts/eval_questions_ko.json - a planner is a new
+    # failure mode, and making it mandatory on day one means every regression is
+    # two systems deep.
+    #
+    # IT HAS NOT MEASURED BETTER, and the default stays where it is. Measured on
+    # the real 1270-chunk Korean examination manual with the 21 questions in
+    # scripts/eval_questions_ko.json, at top_n=8, reproducible with
+    # `python scripts/eval_retrieval.py --variants current --orchestrator`:
+    #
+    #   path            recall@8   anchor@8   prec@8
+    #   direct             1.000      0.857    0.292
+    #   orchestrator       0.905      0.714    0.226   (21/21 plans accepted,
+    #                                                   3.00 steps per plan)
+    #
+    # The mechanism is arithmetic, not a bad planner. ANSWER_CONTEXT_TOKEN_BUDGET
+    # holds roughly eight chunks of this corpus. A three-step plan therefore has
+    # to spend six of those eight slots on the two supplementary queries, and on
+    # a single-document corpus those queries return neighbours of what the first
+    # search already found - so the plan buys duplicates with slots that were
+    # carrying the answer. A plan cannot add without removing while the budget is
+    # the binding constraint.
+    #
+    # That is a statement about THIS eval set, and it is the honest one: 21
+    # single-hop questions against one manual, with no MCP server registered, is
+    # the case a planner cannot help with. The case it exists for - a question
+    # spanning several collections, or one that needs a tool call the corpus
+    # cannot answer - has no measurement here because the fixture contains none.
+    # Grow the eval set before changing this default in either direction.
+    #
+    # Every bound below exists because a planner that loops is a bill the
+    # operator pays, and none of them is enforced by asking the model nicely:
+    # the prompt states them, the executor refuses a plan that breaks them.
+    orchestrator_max_steps: int = 5
+    # Total TOOL steps in one plan, counted separately from the step ceiling: a
+    # five-step plan of five searches costs one embedding call each, and a
+    # five-step plan of five tool calls reaches five third-party servers.
+    orchestrator_max_tool_calls: int = 3
+    # Wall clock for the WHOLE plan, enforced with asyncio.timeout the way
+    # app/worker.py bounds ingestion with PIPELINE_TIMEOUT. It sits in front of
+    # the answer call rather than replacing it, so it is additive to a question
+    # the user is already waiting on - hence a value under a minute.
+    orchestrator_timeout_seconds: float = 45.0
+    # The LOWEST risk level that must be approved by a human before it runs.
+    # `destructive` by default: `write` would put a dialog in front of most
+    # useful tools, and `read` in front of all of them. Ordered by
+    # app.models.mcp.RISK_LEVELS, so setting this to "write" also gates
+    # "destructive".
+    orchestrator_approval_risk_level: str = "destructive"
+    # How long a paused plan can wait for its human. A second REQUEST carrying a
+    # token resumes it - not a generator held open across requests, which dies
+    # with the connection - so this is the lifetime of a Redis key, and the key
+    # is consumed on use so a token cannot be replayed.
+    orchestrator_approval_ttl_seconds: int = 900
+    # Empty means "use ANSWER_MODEL". A separate knob because planning and
+    # answering are different jobs with different price/latency profiles, and
+    # the Slice 1 design deferred exactly this split ("Planner/Fast/Reranker
+    # 모델 역할 분리는 Slice 3 Super Agent 도입 시 함께 확장한다"). It is NOT
+    # validated against `selectable_models`: that allowlist is what a CLIENT may
+    # name, and this is the operator's own choice.
+    planner_model: str = ""
+
     @property
     def selectable_models(self) -> list[str]:
         """The allowlist as the app reads it. ANSWER_MODEL is always first and
@@ -289,6 +353,30 @@ class Settings(BaseSettings):
             raise ValueError("MAX_TOOL_CALLS_PER_MESSAGE must be >= 1")
         if self.mcp_timeout_seconds <= 0:
             raise ValueError("MCP_TIMEOUT_SECONDS must be > 0")
+        # Same shape as every ceiling above: none of these errors when it goes
+        # non-positive, it just quietly makes the feature impossible. A plan with
+        # a zero step ceiling is refused on every question and the user is told
+        # their planner produced nothing; a zero budget times out before the
+        # first step starts.
+        if self.orchestrator_max_steps < 1:
+            raise ValueError("ORCHESTRATOR_MAX_STEPS must be >= 1")
+        if self.orchestrator_max_tool_calls < 0:
+            raise ValueError("ORCHESTRATOR_MAX_TOOL_CALLS must be >= 0")
+        if self.orchestrator_timeout_seconds <= 0:
+            raise ValueError("ORCHESTRATOR_TIMEOUT_SECONDS must be > 0")
+        if self.orchestrator_approval_ttl_seconds < 1:
+            raise ValueError("ORCHESTRATOR_APPROVAL_TTL_SECONDS must be >= 1")
+        # A typo here is the one that matters: an unrecognised level would make
+        # `RISK_LEVELS.index(...)` raise on the first plan that names a tool, and
+        # an operator who wrote "destructve" would get an unattended destructive
+        # call rather than a boot failure. Imported inside the validator because
+        # app.models imports this module.
+        from app.models.mcp import RISK_LEVELS
+
+        if self.orchestrator_approval_risk_level not in RISK_LEVELS:
+            raise ValueError(
+                "ORCHESTRATOR_APPROVAL_RISK_LEVEL must be one of " + ", ".join(RISK_LEVELS)
+            )
         return self
 
 

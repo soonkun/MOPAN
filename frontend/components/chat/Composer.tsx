@@ -61,6 +61,8 @@ export default function Composer({
   toolCall,
   onToolSelect,
   onToolRemove,
+  orchestrator,
+  onOrchestratorChange,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -82,6 +84,11 @@ export default function Composer({
   toolCall: PendingToolCall | null;
   onToolSelect: (call: PendingToolCall) => void;
   onToolRemove: () => void;
+  /** Slice 3's Super Agent, chosen per question the way the model is. A toggle
+   * rather than a third picker: there are two modes, and the direct RAG path is
+   * the default until the orchestrator measures better on the eval set. */
+  orchestrator: boolean;
+  onOrchestratorChange: (value: boolean) => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   // Chrome fires keydown(Enter) with isComposing=true while a Hangul syllable
@@ -275,6 +282,43 @@ export default function Composer({
             before the send button so that Tab order runs input -> model ->
             전송: the model is a property of the message being sent, so it
             belongs on the way to sending it rather than after. */}
+        {/* aria-pressed, not a checkbox: it is a toggle button in a row of
+            buttons, and the pressed state is the whole affordance. Same
+            onMouseDown guard as + and 도구 - reaching for it is the user still
+            composing, and a pointer press that moves focus off the textarea
+            dismisses the phone keyboard under them. */}
+        <button
+          type="button"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => onOrchestratorChange(!orchestrator)}
+          aria-pressed={orchestrator}
+          aria-label="슈퍼 에이전트"
+          title="질문에 맞춰 여러 단계의 검색과 도구 호출을 계획해서 실행합니다."
+          className={`inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full px-2 text-label transition-colors duration-150 sm:px-3 ${
+            orchestrator
+              ? "bg-primary-container text-on-primary-container"
+              : "text-on-surface-variant hover:bg-surface-container-high"
+          }`}
+        >
+          {/* The four-point spark. Plain currentColor, NOT the brand gradient:
+              §2 reserves that for the wordmark, the assistant sparkle and the
+              streaming indicator, and a button is none of those. */}
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 24 24"
+            className="h-4 w-4 shrink-0"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+          >
+            <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" />
+            <path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z" />
+          </svg>
+          <span aria-hidden="true" className="hidden sm:inline">
+            슈퍼 에이전트
+          </span>
+        </button>
+
         <ToolPicker tools={tools} onSelect={onToolSelect} />
 
         <ModelPicker models={models} value={model} onChange={onModelChange} />

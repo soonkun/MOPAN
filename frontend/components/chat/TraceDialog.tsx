@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { apiFetch, errorMessage } from "@/lib/api";
 import ErrorBanner from "@/components/ui/ErrorBanner";
-import type { MessageTrace, TraceEvidence } from "@/lib/types";
+import type { MessageTrace, PlanStep, TraceEvidence, TracePlan } from "@/lib/types";
 
 /** Why this answer looks the way it does.
  *
@@ -61,6 +61,77 @@ function EvidenceRow({ item }: { item: TraceEvidence }) {
         )}
       </td>
     </tr>
+  );
+}
+
+const PLAN_STATE_LABEL: Record<PlanStep["state"], string> = {
+  running: "진행 중",
+  done: "완료",
+  failed: "실패",
+  skipped: "건너뜀",
+  timeout: "시간 초과",
+};
+
+/** The Super Agent's plan, for an answer that had one.
+ *
+ * The section exists for two questions the evidence table cannot answer: what
+ * did it decide to do, and what did it fail to do. A refused plan is the most
+ * interesting case of all - the answer came from the plain search path, and this
+ * is the sentence that says why. */
+function PlanSection({ plan }: { plan: TracePlan }) {
+  return (
+    <>
+      <div className="mt-6 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <h3 className="text-title font-medium">실행 계획</h3>
+        <p className="text-caption text-on-surface-variant">
+          {plan.step_count}단계 · 도구 {plan.tool_step_count}회 · {plan.elapsed_ms.toLocaleString()}ms
+        </p>
+      </div>
+
+      {plan.refused && (
+        <p className="mt-3 rounded-md bg-surface-container-high p-4 text-body text-on-surface">
+          계획이 거부되어 일반 문서 검색으로 답변했습니다. 사유: {plan.refused}
+        </p>
+      )}
+      {!plan.refused && plan.step_count === 0 && (
+        <p className="mt-3 rounded-md bg-surface-container-high p-4 text-body text-on-surface">
+          계획 단계가 없어 일반 문서 검색으로 답변했습니다.
+        </p>
+      )}
+      {plan.step_count > 0 && plan.fell_back_to_direct_rag && (
+        <p className="mt-3 rounded-md bg-surface-container-high p-4 text-body text-on-surface">
+          계획이 근거를 만들지 못해 일반 문서 검색으로 답변했습니다.
+        </p>
+      )}
+      {plan.timed_out && (
+        <p className="mt-3 rounded-md bg-surface-container-high p-4 text-body text-on-surface">
+          계획 전체 제한 시간({plan.budget_seconds}초)을 넘겨 남은 단계는 실행하지 않았습니다.
+        </p>
+      )}
+
+      {plan.steps.length > 0 && (
+        <ol className="mt-3 space-y-2">
+          {plan.steps.map((step) => (
+            <li key={step.id} className="rounded-sm bg-surface-container p-3">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="break-keep font-medium">{step.label}</span>
+                <span className="shrink-0 text-caption text-on-surface-variant">
+                  {PLAN_STATE_LABEL[step.state] ?? step.state} · 근거 {step.evidence_count}건 ·{" "}
+                  {step.ms.toLocaleString()}ms
+                </span>
+              </div>
+              <p className="mt-1 text-caption text-on-surface-variant">
+                {step.kind === "tool"
+                  ? `도구 ${step.tool} · 위험도 ${step.risk_level ?? "—"}`
+                  : `컬렉션 ${step.collections?.length ? step.collections.join(", ") : "전체"}`}
+                {step.depends_on?.length ? ` · ${step.depends_on.join(", ")} 이후` : ""}
+              </p>
+              {step.error && <p className="mt-1 text-caption text-error">{step.error}</p>}
+            </li>
+          ))}
+        </ol>
+      )}
+    </>
   );
 }
 
@@ -162,6 +233,8 @@ export default function TraceDialog({
                 }
               />
             </dl>
+
+            {trace.plan && <PlanSection plan={trace.plan} />}
 
             {!trace.has_trace ? (
               <p className="mt-6 rounded-md bg-surface-container-high p-4 text-body text-on-surface-variant">

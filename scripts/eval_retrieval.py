@@ -287,6 +287,105 @@ def anchor_hit(returned_contents: list[str], anchor: str) -> int:
     return 1 if any(anchor in content for content in returned_contents) else 0
 
 
+async def measure_orchestrator(
+    maker, settings, provider, questions, pages, docs, dense, top_n, limit, rrf_k
+) -> None:
+    """Slice 3's Super Agent on the same questions, against the same corpus.
+
+    It runs the SHIPPED code - `plan()` then `PlanRun`, the same objects
+    /api/chat builds - rather than a re-implementation, because a re-implementation
+    would measure the eval script's idea of the orchestrator and not the product's.
+    Tool steps are excluded from the numbers: a tool result has no chunk id and no
+    page, so it can neither hit nor miss a gold page, and counting it would
+    silently penalise a plan for reaching outside the corpus.
+
+    A question whose plan is REFUSED or EMPTY falls back to the direct path here
+    exactly as it does in the router, because that is what a user gets. Reporting
+    the orchestrator's number over only the questions it planned successfully
+    would be reporting a system nobody runs.
+    """
+    from app.orchestrator.executor import PlanRun
+    from app.orchestrator.plan import PlanError, load_available
+    from app.orchestrator.planner import plan as make_plan
+    from app.retrieval.keyword_search import keyword_search
+    from app.retrieval.reranker import NoneReranker
+    from app.retrieval.rrf import reciprocal_rank_fusion
+
+    async with maker() as session:
+        resources = await load_available(session)
+    print(
+        f"\norchestrator: {len(resources.collections)} collection(s), "
+        f"{len(resources.tools)} tool(s) in the catalogue"
+    )
+
+    async def direct(entry) -> list[str]:
+        async with maker() as session:
+            sparse_ids = await keyword_search(session, entry["question"], limit)
+        fused = reciprocal_rank_fusion([dense[entry["id"]][:limit], sparse_ids], k=rrf_k)
+        return [chunk_id for chunk_id, _ in fused[:top_n]]
+
+    rows: dict[str, list[list[str]]] = {"direct": [], "orchestrator": []}
+    fell_back = 0
+    refused = 0
+    step_counts: list[int] = []
+    for entry in questions:
+        rows["direct"].append(await direct(entry))
+        try:
+            execution_plan = await make_plan(
+                entry["question"], resources, llm_provider=provider, settings=settings
+            )
+        except PlanError as exc:
+            refused += 1
+            fell_back += 1
+            print(f"  {entry['id']}: plan refused ({exc}) -> direct")
+            rows["orchestrator"].append(rows["direct"][-1])
+            continue
+        step_counts.append(len(execution_plan.steps))
+        if not execution_plan.steps:
+            fell_back += 1
+            rows["orchestrator"].append(rows["direct"][-1])
+            continue
+        run = PlanRun(
+            execution_plan,
+            resources,
+            settings=settings,
+            llm_provider=provider,
+            sessionmaker=maker,
+            reranker=NoneReranker(),
+        )
+        async for _frame in run.stream():
+            pass
+        selected = [
+            item.metadata.get("chunk_id")
+            for item in run.evidence()
+            if item.source_type == "rag" and item.metadata.get("chunk_id")
+        ][:top_n]
+        if not selected:
+            fell_back += 1
+            selected = rows["direct"][-1]
+        rows["orchestrator"].append(selected)
+
+    n = len(questions)
+    mean_steps = sum(step_counts) / len(step_counts) if step_counts else 0
+    print(
+        f"plans: {n - refused}/{n} accepted, {refused} refused, {fell_back} fell back to direct, "
+        f"{mean_steps:.2f} steps/plan"
+    )
+    header = f"{'path':<14} {'recall@' + str(top_n):>9} {'anchor@' + str(top_n):>9} {'prec@' + str(top_n):>9}"
+    print(f"\n{header}\n{'-' * len(header)}")
+    for name, selections in rows.items():
+        recalls, anchors, precisions = [], [], []
+        for entry, selected in zip(questions, selections, strict=True):
+            gold = set(entry["gold_pages"])
+            hit, hits = score([pages.get(cid) for cid in selected], gold)
+            recalls.append(hit)
+            anchors.append(anchor_hit([docs[cid] for cid in selected if cid in docs], entry["anchor"]))
+            precisions.append(hits / top_n)
+        print(
+            f"{name:<14} {sum(recalls) / n:>9.3f} {sum(anchors) / n:>9.3f} {sum(precisions) / n:>9.3f}"
+        )
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--variants", default="")
@@ -301,6 +400,13 @@ async def main() -> int:
         "list still contributes but can no longer outbid the dense list on rank alone.",
     )
     parser.add_argument("--verify", action="store_true")
+    parser.add_argument(
+        "--orchestrator",
+        action="store_true",
+        help="also measure Slice 3's Super Agent on the same questions. ONE planner "
+        "call per question against the live API, plus one embedding per plan step, "
+        "so it is the only mode here that is not free to re-run.",
+    )
     parser.add_argument("--detail", action="store_true", help="per-question hit counts")
     parser.add_argument("--show", default="", help="question id to print per-slot detail for")
     args = parser.parse_args()
@@ -456,6 +562,11 @@ async def main() -> int:
                     f"{sum(precisions) / n:>9.3f} "
                     f"{sum(overlaps) / n:>8.2f} {sum(noise) / n:>13.2f}"
                 )
+
+        if args.orchestrator:
+            await measure_orchestrator(
+                maker, settings, provider, questions, pages, docs, dense, top_n, limit, rrf_k
+            )
 
     await engine.dispose()
     return 0
