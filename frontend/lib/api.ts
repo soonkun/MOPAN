@@ -193,8 +193,22 @@ export async function streamChat(
      * arrives here as a rejected fetch, not as an error frame inside a 200. */
     tool_calls?: { tool_id: string; arguments: Record<string, unknown> }[];
     /** Slice 3's Super Agent, opt-in per question the way `model` is. Off means
-     * the Slice 1 direct RAG path, which is still the default. */
+     * the Slice 1 direct RAG path, which is still the default. An agent that
+     * carries the orchestrator turns it on regardless; there is no way to turn
+     * it off for one, which is why the composer shows the toggle forced on. */
     orchestrator?: boolean;
+    /** One of GET /api/agents/selectable. Omitted is the DEFAULT AGENT - no
+     * prompt override, no restriction, orchestrator off - which is this app
+     * exactly as it behaved before agents existed.
+     *
+     * It does not merely supply defaults for the fields above: the agent's
+     * collection and tool lists are a permission boundary, so `collection_ids`
+     * and `tool_calls` are narrowed and refused against it server-side. An
+     * unknown id (404), a disabled agent (409), a collection the agent cannot
+     * reach (400) and a tool it does not carry (403) are all Korean refusals
+     * BEFORE the conversation is created, so they arrive here as a rejected
+     * fetch rather than an error frame inside a 200. */
+    agent_id?: string;
   },
   onEvent: (event: ChatEvent) => void,
   signal?: AbortSignal,

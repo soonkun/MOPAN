@@ -1,10 +1,17 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import AgentPicker from "@/components/chat/AgentPicker";
 import AttachmentChip from "@/components/chat/AttachmentChip";
 import ModelPicker from "@/components/chat/ModelPicker";
 import ToolPicker from "@/components/chat/ToolPicker";
-import type { AnswerModel, Attachment, McpToolOption, PendingToolCall } from "@/lib/types";
+import type {
+  AgentOption,
+  AnswerModel,
+  Attachment,
+  McpToolOption,
+  PendingToolCall,
+} from "@/lib/types";
 
 /** One file the user has chosen. It exists on screen from the moment it is
  * picked, before POST /api/attachments has answered, so that a refusal can be
@@ -63,6 +70,9 @@ export default function Composer({
   onToolRemove,
   orchestrator,
   onOrchestratorChange,
+  agents,
+  agentId,
+  onAgentChange,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -89,7 +99,18 @@ export default function Composer({
    * the default until the orchestrator measures better on the eval set. */
   orchestrator: boolean;
   onOrchestratorChange: (value: boolean) => void;
+  /** GET /api/agents/selectable. Empty for a deployment with no agent
+   * configured, which is what makes the picker disappear rather than offer a
+   * single 기본 row that is not a choice. */
+  agents: AgentOption[];
+  /** null is the DEFAULT AGENT - this app exactly as it behaved before agents
+   * existed. It is a real selection, not "nothing chosen yet". */
+  agentId: string | null;
+  onAgentChange: (id: string | null) => void;
 }) {
+  // The agent's own setting, which the server ORs with the per-question toggle.
+  const forcedOrchestrator = agents.some((a) => a.id === agentId && a.orchestrator);
+
   const fileRef = useRef<HTMLInputElement>(null);
   // Chrome fires keydown(Enter) with isComposing=true while a Hangul syllable
   // is still being composed, but not every engine does; this ref is the second
@@ -287,15 +308,26 @@ export default function Composer({
             onMouseDown guard as + and 도구 - reaching for it is the user still
             composing, and a pointer press that moves focus off the textarea
             dismisses the phone keyboard under them. */}
+        {/* An agent that carries the orchestrator turns it on server-side, and
+            there is deliberately no way to turn it off for one - that is the
+            agent's configuration, not a per-question default. So the button is
+            shown pressed and DISABLED rather than left clickable: a control
+            that silently ignores a click is a bug report, and the title says
+            what is deciding instead. */}
         <button
           type="button"
           onMouseDown={(event) => event.preventDefault()}
           onClick={() => onOrchestratorChange(!orchestrator)}
-          aria-pressed={orchestrator}
+          disabled={forcedOrchestrator}
+          aria-pressed={orchestrator || forcedOrchestrator}
           aria-label="슈퍼 에이전트"
-          title="질문에 맞춰 여러 단계의 검색과 도구 호출을 계획해서 실행합니다."
-          className={`inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full px-2 text-label transition-colors duration-150 sm:px-3 ${
-            orchestrator
+          title={
+            forcedOrchestrator
+              ? "선택한 에이전트가 항상 슈퍼 에이전트로 답변합니다."
+              : "질문에 맞춰 여러 단계의 검색과 도구 호출을 계획해서 실행합니다."
+          }
+          className={`inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full px-2 text-label transition-colors duration-150 disabled:cursor-default sm:px-3 ${
+            orchestrator || forcedOrchestrator
               ? "bg-primary-container text-on-primary-container"
               : "text-on-surface-variant hover:bg-surface-container-high"
           }`}
@@ -318,6 +350,8 @@ export default function Composer({
             슈퍼 에이전트
           </span>
         </button>
+
+        <AgentPicker agents={agents} value={agentId} onChange={onAgentChange} />
 
         <ToolPicker tools={tools} onSelect={onToolSelect} />
 

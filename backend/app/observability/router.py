@@ -80,6 +80,7 @@ async def get_trace(
         conversation_id=message.conversation_id,
         created_at=message.created_at,
         model=message.model,
+        agent_name=message.agent_name,
         prompt_name=message.prompt_name,
         prompt_version=message.prompt_version,
         latency_ms=message.latency_ms,

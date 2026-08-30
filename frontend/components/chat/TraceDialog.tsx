@@ -28,6 +28,12 @@ function rank(value: number | null): string {
   return value === null ? "—" : `${value}위`;
 }
 
+const NEIGHBOR_REASON: Record<string, string> = {
+  proviso: "단서 이어붙임",
+  dangling: "앞 문맥 보충",
+  blanket: "일괄 확장",
+};
+
 function EvidenceRow({ item }: { item: TraceEvidence }) {
   return (
     <tr className="border-b border-outline-variant align-top">
@@ -40,6 +46,16 @@ function EvidenceRow({ item }: { item: TraceEvidence }) {
           {item.source_type !== "rag" ? ` · ${item.source_type}` : ""}
         </div>
         <p className="mt-1 line-clamp-2 text-caption text-on-surface-variant">{item.snippet}</p>
+        {item.neighbors.length > 0 ? (
+          // The row still cites ONE chunk; this line is what stops that being a
+          // lie about how much text the model actually read.
+          <p className="mt-1 text-caption text-primary">
+            {`앞뒤 청크 ${item.neighbors.length}개 합침 · `}
+            {item.neighbors
+              .map((n) => `${n.offset < 0 ? "앞" : "뒤"} #${n.chunk_index} (${NEIGHBOR_REASON[n.reason] ?? n.reason})`)
+              .join(", ")}
+          </p>
+        ) : null}
       </td>
       <td className="whitespace-nowrap px-3 py-3 tabular-nums">{rank(item.vector_rank)}</td>
       <td className="whitespace-nowrap px-3 py-3 tabular-nums">{rank(item.keyword_rank)}</td>
@@ -201,7 +217,15 @@ export default function TraceDialog({
           !error && <p className="py-8 text-center text-body text-on-surface-variant">불러오는 중...</p>
         ) : (
           <>
-            <dl className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {/* THREE columns, not four: this grid holds nine facts now that the
+                agent is one of them, and 3 divides 9 while 4 leaves a single
+                orphan on the last row. */}
+            <dl className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
+              {/* First, because it is the fact the other eight follow from: an
+                  agent decides which prompt answered, which corpus was in
+                  scope and which model ran. 기본 - not an em dash - because
+                  "the default agent answered" is a real answer, not a gap. */}
+              <Fact label="답변 에이전트" value={trace.agent_name ?? "기본"} />
               <Fact label="답변 모델" value={trace.model ?? "—"} />
               <Fact
                 label="프롬프트 버전"
@@ -223,6 +247,18 @@ export default function TraceDialog({
               <Fact
                 label="토큰 예산"
                 value={trace.retrieval.token_budget?.toLocaleString() ?? "—"}
+              />
+              {/* The pair that answers "did the prompt take my evidence". The
+                  budget above is the EVIDENCE's; the system prompt is charged
+                  against this allowance instead, so below it the answer is
+                  always no. */}
+              <Fact
+                label="프롬프트 토큰"
+                value={
+                  typeof trace.retrieval.prompt_tokens === "number"
+                    ? `${trace.retrieval.prompt_tokens.toLocaleString()} / ${trace.retrieval.mandatory_allowance?.toLocaleString() ?? "—"}`
+                    : "—"
+                }
               />
               <Fact
                 label="사용 토큰"

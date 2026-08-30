@@ -2,14 +2,22 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import require_admin
+from app.chat.prompt import MANDATORY_TOKEN_ALLOWANCE
 from app.core.db import get_db_session
 from app.core.logging import log_event
+from app.core.tokens import count_tokens
 from app.models.prompt import Prompt
 from app.models.user import User
-from app.schemas.prompt import PromptResponse, PromptVersionCreate, PromptVersionResponse
+from app.schemas.prompt import (
+    PromptCreate,
+    PromptResponse,
+    PromptVersionCreate,
+    PromptVersionResponse,
+)
 
 logger = logging.getLogger("mopan.prompts")
 router = APIRouter(prefix="/api", tags=["prompts"])
@@ -22,6 +30,34 @@ VERSION_NOT_FOUND_MESSAGE = "해당 버전을 찾을 수 없습니다."
 # model an empty system message and strip every citation and anti-injection
 # instruction in one save.
 EMPTY_PROMPT_MESSAGE = "프롬프트 내용을 입력해 주세요. 빈 내용으로는 저장할 수 없습니다."
+DUPLICATE_PROMPT_MESSAGE = "같은 이름의 프롬프트가 이미 있습니다."
+
+
+def too_long_message(tokens: int) -> str:
+    """The refusal an admin meets instead of a quietly shorter answer.
+
+    MANDATORY_TOKEN_ALLOWANCE is what the system prompt and the question may
+    spend before they start taking tokens off the evidence (see
+    app/chat/prompt.py). Below it, prompt length costs retrieval nothing at all -
+    which is the promise this endpoint has to keep, and the only way to keep it
+    is to refuse the save that would break it. Tokens, not characters: the
+    character count the screen shows is a different number in Korean and in
+    English, and this is the one the budget is actually made of."""
+    return (
+        f"프롬프트가 너무 깁니다. {MANDATORY_TOKEN_ALLOWANCE:,} 토큰까지 저장할 수 있는데 "
+        f"지금 내용은 {tokens:,} 토큰입니다. 이 한도를 넘기면 근거 자료에 쓸 토큰이 "
+        "줄어들기 때문에 저장하지 않습니다. 내용을 줄여 주세요."
+    )
+
+
+def _check_text(text: str) -> None:
+    """Both POST routes, one rule. A blank template is not a valid state, and a
+    template past the allowance would cost the answer its evidence."""
+    if not text.strip():
+        raise HTTPException(status_code=400, detail=EMPTY_PROMPT_MESSAGE)
+    tokens = count_tokens(text)
+    if tokens > MANDATORY_TOKEN_ALLOWANCE:
+        raise HTTPException(status_code=400, detail=too_long_message(tokens))
 
 
 def _to_version_response(prompt: Prompt, email: str | None) -> PromptVersionResponse:
@@ -77,9 +113,54 @@ async def list_prompts(
                 text=active.text,
                 version_count=len(versions),
                 updated_at=active.created_at,
+                # Counted server-side because tiktoken is what the budget is
+                # measured in and there is no honest way to count cl100k tokens
+                # in the browser. The screen shows this beside the character
+                # count, so an admin sees the cost before they meet the refusal.
+                tokens=count_tokens(active.text),
+                token_limit=MANDATORY_TOKEN_ALLOWANCE,
             )
         )
     return responses
+
+
+@router.post("/prompts", response_model=PromptVersionResponse, status_code=201)
+async def create_prompt(
+    payload: PromptCreate,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """A NEW prompt name at version 1, active immediately.
+
+    Separate from POST /prompts/{name}/versions on purpose: that route 404s on an
+    unknown name so a typo cannot silently fork the answer prompt, and this one
+    409s on a name that already exists so it cannot silently overwrite one.
+    Between them there is no way to create a prompt by accident.
+    """
+    _check_text(payload.text)
+    existing = await db.scalar(select(Prompt.id).where(Prompt.name == payload.name).limit(1))
+    if existing is not None:
+        raise HTTPException(status_code=409, detail=DUPLICATE_PROMPT_MESSAGE)
+
+    prompt = Prompt(
+        name=payload.name, version="1", text=payload.text, is_active=True, created_by=admin.id
+    )
+    db.add(prompt)
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        # The uniqueness check above loses a race; uq_prompts_name_active is the
+        # rule, so the loser gets the same 409 rather than a 500.
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=DUPLICATE_PROMPT_MESSAGE) from exc
+    log_event(
+        logger,
+        "prompt_created",
+        prompt_name=prompt.name,
+        admin_id=str(admin.id),
+        chars=len(payload.text),
+    )
+    return _to_version_response(prompt, admin.email)
 
 
 @router.get("/prompts/{name}/versions", response_model=list[PromptVersionResponse])
@@ -106,8 +187,7 @@ async def create_prompt_version(
     Message.prompt_version names the text an answer was produced from, so an
     UPDATE in place would rewrite history the moment the owner tries a change
     and wants it back."""
-    if not payload.text.strip():
-        raise HTTPException(status_code=400, detail=EMPTY_PROMPT_MESSAGE)
+    _check_text(payload.text)
 
     # FOR UPDATE over this name's rows before reading the highest version: two
     # admins saving at the same instant would otherwise both compute the same

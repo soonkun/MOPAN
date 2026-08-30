@@ -30,6 +30,11 @@ export interface PromptSummary {
   text: string;
   version_count: number;
   updated_at: string;
+  /** What the active text costs in tokens, and the ceiling a save is refused
+   * above. Counted by the server: the browser cannot count cl100k tokens, and
+   * the ceiling is a backend constant a copy here would silently outlive. */
+  tokens: number;
+  token_limit: number;
 }
 
 /** GET /api/prompts/{name}/versions, newest first. `created_by_email` is null
@@ -172,6 +177,40 @@ export interface Attachment {
   created_at: string;
 }
 
+/** GET /api/agents - the admin screen's row. Admin only, because the two lists
+ * ARE the boundary and enumerating a boundary tells somebody what to try. */
+export interface Agent {
+  id: string;
+  name: string;
+  description: string | null;
+  /** A name from the prompt store, never the text: the store owns versioning
+   * and attribution, and an agent carrying its own copy would fork it out. */
+  prompt_name: string;
+  /** Null means the deployment's own ANSWER_MODEL. */
+  answer_model: string | null;
+  orchestrator: boolean;
+  enabled: boolean;
+  /** EMPTY MEANS UNRESTRICTED, for both lists. The screen prints 전체 허용
+   * rather than 없음 beside an empty selection - that is the one place this
+   * rule could mislead an admin, so it is the one place it is spelled out. */
+  collections: { id: string; name: string }[];
+  tools: { id: string; server_name: string; name: string; risk_level: McpRiskLevel }[];
+  created_by_email: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** GET /api/agents/selectable - what the composer's picker lists. ENABLED
+ * agents only, readable by any authenticated user, and deliberately carrying
+ * neither list: the boundary is not an inventory to publish. */
+export interface AgentOption {
+  id: string;
+  name: string;
+  description: string | null;
+  answer_model: string | null;
+  orchestrator: boolean;
+}
+
 /** GET /api/models - the admin's ANSWER_MODELS allowlist, which POST /api/chat
  * enforces. `label` falls back to the id server-side, so it is never empty. */
 export interface AnswerModel {
@@ -202,6 +241,24 @@ export interface Feedback {
  * retrieved and then dropped because the answer's token budget ran out before
  * it, so the model never saw it. A null rank means the item was absent from that
  * ranking entirely, which is a fact worth showing rather than a zero. */
+/** One chunk that neighbour expansion folded into an evidence item's content.
+ *
+ * `offset` is -1 for the chunk before the cited one and +1 for the one after.
+ * The item's own chunk_id/page/section still name the PRIMARY chunk - an
+ * expanded item is one citation, not several - so this is the only thing on the
+ * trace screen that says the text shown to the model was wider than that chunk.
+ * `reason` is why it was merged: "proviso" (the next chunk opened with 다만 /
+ * 그러나 / …), "dangling" (this chunk opened referring to text it did not
+ * contain) or "blanket". */
+export interface TraceNeighbor {
+  chunk_id: string;
+  chunk_index: number;
+  offset: number;
+  page: number | null;
+  reason: string;
+  tokens: number;
+}
+
 export interface TraceEvidence {
   index: number;
   source_type: "rag" | "mcp" | "attachment";
@@ -215,6 +272,8 @@ export interface TraceEvidence {
   keyword_rank: number | null;
   rrf_score: number | null;
   rerank_score: number | null;
+  /** Empty when expansion is off, and on every answer written before it existed. */
+  neighbors: TraceNeighbor[];
   score: number | null;
   tokens: number;
   snippet: string;
@@ -295,6 +354,14 @@ export interface TraceRetrieval {
   rrf_k: number | null;
   sparse_weight: number | null;
   token_budget: number | null;
+  /** The system prompt's own cost and the allowance it is charged against.
+   * null on a trace written while the budget still bounded the whole request -
+   * which is not the same fact as 0. */
+  prompt_tokens: number | null;
+  mandatory_allowance: number | null;
+  /** "off" | "targeted" | "blanket", or null on a trace written before neighbour
+   * expansion existed - which is not the same fact as "off". */
+  neighbor_expansion: string | null;
   evidence_count: number;
   included_count: number;
 }
@@ -307,6 +374,7 @@ export interface MessageTrace {
   conversation_id: string;
   created_at: string;
   model: string | null;
+  agent_name: string | null;
   prompt_name: string | null;
   prompt_version: string | null;
   latency_ms: number | null;
@@ -359,6 +427,10 @@ export interface Message {
   // ("gpt-4o-2024-08-06"). Null on every user turn, and on assistant turns
   // written before the model became a per-question choice.
   model: string | null;
+  // WHICH AGENT ANSWERED. Null on every user turn, on every answer written
+  // before agents existed, and on every answer the default agent gave - all
+  // three render the same way, because they are the same fact.
+  agent_name: string | null;
   // The caller's own 👍/👎, null until they rate this answer. It rides the
   // transcript so a reload does not lose it, and so opening a conversation is
   // one request rather than one per assistant message.
@@ -393,5 +465,8 @@ export type ChatEvent =
       content: string;
       citations: Citation[];
       model: string | null;
+      // So the answer on screen can say what produced it without a reload,
+      // exactly as `model` does. Null for the default agent.
+      agent_name: string | null;
     }
   | { type: "error"; detail: string };

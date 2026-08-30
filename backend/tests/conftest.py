@@ -31,6 +31,14 @@ TABLES_IN_DELETE_ORDER = (
     "app_settings",
     "messages",
     "conversations",
+    # Before `collections` and `mcp_tools`, which they point at, and before
+    # `agents`, which they cascade from. Without these two here a "when the
+    # agents table is empty" test would pass with its guard removed, because the
+    # table would never actually be empty - the trap this list already documents
+    # for app_settings.
+    "agent_collections",
+    "agent_tools",
+    "agents",
     "chunks",
     "documents",
     "collections",
@@ -89,6 +97,27 @@ def migrated_database(test_database_url) -> None:
     config.set_main_option("sqlalchemy.url", TEST_DATABASE_URL)
     command.downgrade(config, "base")
     command.upgrade(config, "head")
+    # And drop the prompt rows the migrations seed.
+    #
+    # `clean_db` truncates users CASCADE after every DB test, which takes
+    # `prompts` with it - so from the second such test onward the table is empty
+    # and `get_prompt` answers from the module constant. The FIRST one saw the
+    # seeded rows, and that was invisible only while 0004's row happened to be
+    # identical to the constant. It is not any more: 0009 activates a later
+    # version, so "which prompt version answered" started depending on test
+    # ORDER. Emptying it here makes every DB test start where all but one of
+    # them already did. What the migrations seed is asserted by the two
+    # integration tests that re-run them and read the table directly.
+    asyncio.run(_truncate_prompts())
+
+
+async def _truncate_prompts() -> None:
+    engine = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("TRUNCATE TABLE prompts CASCADE"))
+    finally:
+        await engine.dispose()
 
 
 @pytest.fixture(scope="session")

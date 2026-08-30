@@ -7754,10 +7754,9 @@ measurement of the wrong thing, so `--verify` exits non-zero rather than reporti
       "id": "q19-공시송달-효력발생",
       "question": "공시송달은 언제부터 효력이 발생하나요?",
       "gold_pages": [
-        100,
-        108
+        101
       ],
-      "anchor": "최초의 공시송달은 특허공보에 게재한 날부터 2주일이 지나면"
+      "anchor": "공시송달은 특허공보에 게재한 날부터 2주일"
     },
     {
       "id": "q20-우편제출-도달일",

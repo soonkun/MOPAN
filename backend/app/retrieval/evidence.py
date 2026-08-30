@@ -17,12 +17,21 @@ class RetrievedChunk:
     content: str
     page: int | None = None
     section: str | None = None
+    # The chunk's position in its document, which is what neighbour expansion
+    # addresses a neighbour BY. Optional because a Reranker or a test may build a
+    # RetrievedChunk by hand; expansion skips an item that has none rather than
+    # guessing an index.
+    chunk_index: int | None = None
     # Per-stage scores kept separate. Collapsing them into one `score` means
     # Slice 5's trace view has to change the retrieval return type.
     vector_rank: int | None = None
     keyword_rank: int | None = None
     rrf_score: float = 0.0
     rerank_score: float | None = None
+    # What neighbour expansion folded into `content`, one entry per neighbour.
+    # Empty means this item is the stored chunk and nothing else - which is what
+    # every item is when NEIGHBOR_EXPANSION is off.
+    neighbors: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -56,5 +65,9 @@ def chunk_to_evidence(chunk: RetrievedChunk) -> Evidence:
             "keyword_rank": chunk.keyword_rank,
             "rrf_score": chunk.rrf_score,
             "rerank_score": chunk.rerank_score,
+            # The identity fields above all still name the PRIMARY chunk after
+            # expansion; this is the only place that says the content is wider
+            # than that chunk, and it is what the trace screen shows.
+            "neighbors": chunk.neighbors,
         },
     )

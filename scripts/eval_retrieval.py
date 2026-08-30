@@ -4,6 +4,7 @@
     python scripts/eval_retrieval.py --variants current,none
     python scripts/eval_retrieval.py --sweep              # rrf_k / candidate_limit grid
     python scripts/eval_retrieval.py --verify             # only check the fixture's anchors
+    python scripts/eval_retrieval.py --variants current --expansion off,targeted,blanket
 
 A SCRIPT, not a test: it talks to the running stack's Postgres and embeds each
 question once against the live OpenAI API. Embeddings are cached in the system
@@ -18,7 +19,19 @@ re-ingestion that renumbers chunk ids):
                  of the evidence budget was spent on the answer".
 
 The reranker is NoneReranker here, so the fused RRF order IS the final order and
-what this measures is retrieval, not reranking.
+what this measures is retrieval, not reranking. That is not a simplification of
+the product: NoneReranker is what every shipped call site passes.
+
+`--expansion` runs the SHIPPED `app.retrieval.neighbors.expand` over the selected
+ids, not a re-implementation, so what it measures is the product. It changes only
+`anchor@N` and `tokens` - expansion adds text to slots that were already won, so
+`recall@N` and `precision@N`, which are page-level and slot-level, cannot move.
+
+Questions carry an optional `group`, and every metric is reported per group. The
+21 original questions are group "base"; "neighbor" is the set written FROM the
+measured proviso splits, where the answer requires the sentence in the NEXT
+chunk. A change to expansion that shows nothing on "base" and everything on
+"neighbor" is the expected shape, not a bug in the measurement.
 
 Two variants need throwaway database objects that no migration creates, because
 they exist to answer "would this be worth a migration?" and the answer measured
@@ -287,6 +300,42 @@ def anchor_hit(returned_contents: list[str], anchor: str) -> int:
     return 1 if any(anchor in content for content in returned_contents) else 0
 
 
+async def expand_selection(session, selected, meta, *, mode, settings, query):
+    """The selected ids as RetrievedChunks, with neighbour expansion applied.
+
+    Calls the SHIPPED `app.retrieval.neighbors.expand` - the same function
+    hybrid_search calls, with the same CHUNK_OVERLAP and the same token budget -
+    so what this measures is the product and not a second implementation of it.
+    mode="off" returns the chunks untouched, which is exactly what the shipped
+    code does, so the "off" row of the table is not a separate code path either.
+    """
+    from app.retrieval.evidence import RetrievedChunk
+    from app.retrieval.neighbors import expand
+
+    chunks = [
+        RetrievedChunk(
+            chunk_id=cid,
+            document_id=str(meta[cid].document_id),
+            filename="",
+            content=meta[cid].content,
+            page=meta[cid].page,
+            section=meta[cid].section,
+            chunk_index=meta[cid].chunk_index,
+        )
+        for cid in selected
+        if cid in meta
+    ]
+    await expand(
+        session,
+        chunks,
+        mode=mode,
+        overlap_chars=settings.chunk_overlap,
+        token_budget=settings.answer_context_token_budget,
+        query=query,
+    )
+    return chunks
+
+
 async def measure_orchestrator(
     maker, settings, provider, questions, pages, docs, dense, top_n, limit, rrf_k
 ) -> None:
@@ -401,6 +450,11 @@ async def main() -> int:
     )
     parser.add_argument("--verify", action="store_true")
     parser.add_argument(
+        "--expansion",
+        default="off",
+        help="comma-separated NEIGHBOR_EXPANSION modes to compare: off, targeted, blanket.",
+    )
+    parser.add_argument(
         "--orchestrator",
         action="store_true",
         help="also measure Slice 3's Super Agent on the same questions. ONE planner "
@@ -417,6 +471,7 @@ async def main() -> int:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.core.config import get_settings
+    from app.core.tokens import count_tokens
     from app.llm.openai_provider import OpenAIProvider
     from app.models.chunk import Chunk
     from app.models.document import Document
@@ -436,7 +491,14 @@ async def main() -> int:
     async with maker() as session:
         rows = (
             await session.execute(
-                select(Chunk.id, Chunk.page, Chunk.content)
+                select(
+                    Chunk.id,
+                    Chunk.page,
+                    Chunk.content,
+                    Chunk.document_id,
+                    Chunk.chunk_index,
+                    Chunk.section,
+                )
                 .join(Document, Document.id == Chunk.document_id)
                 .where(Document.filename == fixture["document_filename"])
             )
@@ -444,8 +506,11 @@ async def main() -> int:
         if not rows:
             print(f"no chunks for {fixture['document_filename']!r} - is the corpus ingested?")
             return 1
-        pages = {str(cid): page for cid, page, _ in rows}
-        docs = {str(cid): content for cid, _, content in rows}
+        pages = {str(row.id): row.page for row in rows}
+        docs = {str(row.id): row.content for row in rows}
+        # document_id and chunk_index are what neighbour expansion addresses a
+        # neighbour BY, so the whole row is kept, not just its text.
+        meta = {str(row.id): row for row in rows}
         print(f"corpus: {len(rows)} chunks, {len({p for p in pages.values()})} pages\n")
 
         # Anchors are the fixture's own regression check: if extraction changes
@@ -500,21 +565,28 @@ async def main() -> int:
         if args.sweep:
             configs = [(k, n, w) for k in (10, 60) for n in (20, 50) for w in weights]
 
+        modes = [m.strip() for m in args.expansion.split(",") if m.strip()]
+        # Insertion order, so "base" (the 21 original questions) stays first.
+        groups = list(dict.fromkeys(entry.get("group", "base") for entry in questions))
+
         for cfg_k, cfg_limit, cfg_w in configs:
             header = (
                 f"top_n={top_n}  candidate_limit={cfg_limit}  rrf_k={cfg_k}  sparse_weight={cfg_w}"
             )
             print(f"\n{header}\n{'-' * len(header)}")
             print(
-                f"{'variant':<14} {'recall@' + str(top_n):>9} {'anchor@' + str(top_n):>9} "
-                f"{'prec@' + str(top_n):>9} {'overlap':>8} {'sparse-noise':>13}"
+                f"{'variant/expansion':<24} {'group':<9} {'n':>3} {'recall@' + str(top_n):>9} "
+                f"{'anchor@' + str(top_n):>9} {'prec@' + str(top_n):>9} {'overlap':>8} "
+                f"{'sparse-noise':>13} {'tokens':>7} {'expanded':>9}"
             )
             for name in wanted:
                 fn = variants[name]
-                recalls, precisions, overlaps, noise = [], [], [], []
-                anchors = []
+                # Retrieval runs ONCE per variant and every expansion mode is
+                # measured over the same selections. Expansion adds text to slots
+                # that were already won, so re-running the search per mode would
+                # only re-derive an identical ranking.
+                runs = []
                 for entry in questions:
-                    gold = set(entry["gold_pages"])
                     dense_ids = dense[entry["id"]][:cfg_limit]
                     sparse_ids = await fn(session, entry["question"], cfg_limit)
                     if cfg_w == 1.0:
@@ -529,22 +601,9 @@ async def main() -> int:
                             acc[cid] += cfg_w / (cfg_k + rank)
                         fused = sorted(acc.items(), key=lambda p: -p[1])
                     selected = [chunk_id for chunk_id, _ in fused[:top_n]]
-                    hit, hits = score([pages.get(cid) for cid in selected], gold)
-                    anchors.append(
-                        anchor_hit([docs[cid] for cid in selected if cid in docs], entry["anchor"])
-                    )
-                    recalls.append(hit)
-                    precisions.append(hits / top_n)
-                    overlaps.append(len(set(dense_ids) & set(sparse_ids)))
-                    # slots that only the sparse side put there AND that miss gold
-                    noise.append(
-                        sum(
-                            1
-                            for cid in selected
-                            if cid not in dense_ids[:top_n] and pages.get(cid) not in gold
-                        )
-                    )
+                    runs.append((entry, selected, dense_ids, sparse_ids))
                     if args.show == entry["id"]:
+                        gold = set(entry["gold_pages"])
                         print(f"  [{name}] {entry['id']}")
                         for i, cid in enumerate(selected, 1):
                             mark = "HIT " if pages.get(cid) in gold else "    "
@@ -553,15 +612,50 @@ async def main() -> int:
                                 f"dense={dense_ids.index(cid) + 1 if cid in dense_ids else '-'} "
                                 f"sparse={sparse_ids.index(cid) + 1 if cid in sparse_ids else '-'}"
                             )
-                n = len(questions)
-                if args.detail:
-                    for entry, hits in zip(questions, precisions, strict=True):
-                        print(f"    {entry['id']:<28} {round(hits * top_n)}/{top_n}")
-                print(
-                    f"{name:<14} {sum(recalls) / n:>9.3f} {sum(anchors) / n:>9.3f} "
-                    f"{sum(precisions) / n:>9.3f} "
-                    f"{sum(overlaps) / n:>8.2f} {sum(noise) / n:>13.2f}"
-                )
+
+                for mode in modes:
+                    per_group = defaultdict(lambda: defaultdict(list))
+                    for entry, selected, dense_ids, sparse_ids in runs:
+                        gold = set(entry["gold_pages"])
+                        chunks = await expand_selection(
+                            session, selected, meta, mode=mode, settings=settings,
+                            query=entry["question"],
+                        )
+                        hit, hits = score([pages.get(cid) for cid in selected], gold)
+                        bucket = per_group[entry.get("group", "base")]
+                        bucket["recall"].append(hit)
+                        bucket["anchor"].append(
+                            anchor_hit([c.content for c in chunks], entry["anchor"])
+                        )
+                        bucket["prec"].append(hits / top_n)
+                        bucket["overlap"].append(len(set(dense_ids) & set(sparse_ids)))
+                        # slots that only the sparse side put there AND that miss gold
+                        bucket["noise"].append(
+                            sum(
+                                1
+                                for cid in selected
+                                if cid not in dense_ids[:top_n] and pages.get(cid) not in gold
+                            )
+                        )
+                        bucket["tokens"].append(sum(count_tokens(c.content) for c in chunks))
+                        bucket["expanded"].append(sum(1 for c in chunks if c.neighbors))
+                        if args.detail:
+                            print(
+                                f"    {mode:<9} {entry['id']:<28} "
+                                f"{round(bucket['prec'][-1] * top_n)}/{top_n} "
+                                f"anchor={bucket['anchor'][-1]} exp={bucket['expanded'][-1]}"
+                            )
+                    for group in groups:
+                        bucket = per_group.get(group)
+                        if not bucket:
+                            continue
+                        n = len(bucket["recall"])
+                        mean = lambda key: sum(bucket[key]) / n  # noqa: E731
+                        print(
+                            f"{name + '/' + mode:<24} {group:<9} {n:>3} {mean('recall'):>9.3f} "
+                            f"{mean('anchor'):>9.3f} {mean('prec'):>9.3f} {mean('overlap'):>8.2f} "
+                            f"{mean('noise'):>13.2f} {mean('tokens'):>7.0f} {mean('expanded'):>9.2f}"
+                        )
 
         if args.orchestrator:
             await measure_orchestrator(

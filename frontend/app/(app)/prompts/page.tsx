@@ -38,6 +38,13 @@ export default function PromptsPage() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
 
+  // The 새 프롬프트 form, which agents made necessary: an agent picks a prompt
+  // by NAME from this store, and the store had no way to gain a third name.
+  const [newName, setNewName] = useState("");
+  const [newText, setNewText] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+
   const [expanded, setExpanded] = useState<string | null>(null);
   const [activateTarget, setActivateTarget] = useState<PromptVersion | null>(null);
 
@@ -106,10 +113,86 @@ export default function PromptsPage() {
     setSaved(null);
   }
 
+  /** A NEW prompt name, at version 1.
+   *
+   * Added for agents: an agent picks a prompt from this store, and until this
+   * existed the store had only the names the migrations seeded - so an agent
+   * could never answer with anything but the deployment's own system prompt,
+   * which is the field the whole feature is about. */
+  async function handleCreate(event: React.FormEvent) {
+    event.preventDefault();
+    setCreating(true);
+    setCreateError(null);
+    try {
+      await apiFetch<PromptVersion>("/api/prompts", {
+        method: "POST",
+        body: JSON.stringify({ name: newName, text: newText }),
+      });
+      setNewName("");
+      setNewText("");
+      const current = await load(newName);
+      if (current) setDraft(current.text);
+    } catch (err) {
+      setCreateError(errorMessage(err));
+    } finally {
+      setCreating(false);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6">
       <h1 className="text-headline font-medium">프롬프트 관리</h1>
       <ErrorBanner message={loadError} />
+
+      <form onSubmit={handleCreate} className="space-y-3 rounded-md bg-surface-container-low p-6">
+        <h2 className="text-title font-medium">새 프롬프트</h2>
+        <p className="text-body text-on-surface-variant">
+          에이전트마다 다른 답변 지침을 쓰려면 여기에서 새 프롬프트를 만든 뒤, 에이전트 관리에서
+          선택하세요. 기존 이름은 덮어쓰지 않습니다.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div>
+            <label htmlFor="prompt-new-name" className="text-label font-medium text-on-surface-variant">
+              이름
+            </label>
+            <input
+              id="prompt-new-name"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              required
+              maxLength={100}
+              // The server pattern, stated here too so the refusal arrives
+              // before the round trip rather than instead of it.
+              pattern="[a-z][a-z0-9_]*"
+              placeholder="field_agent"
+              className="field mt-1 w-full font-mono"
+            />
+            <p className="mt-1 text-caption text-on-surface-variant">
+              영문 소문자와 밑줄만 쓸 수 있습니다. 저장 후에는 바꿀 수 없습니다.
+            </p>
+          </div>
+          <div className="sm:col-span-2">
+            <label htmlFor="prompt-new-text" className="text-label font-medium text-on-surface-variant">
+              내용
+            </label>
+            <textarea
+              id="prompt-new-text"
+              value={newText}
+              onChange={(e) => setNewText(e.target.value)}
+              rows={4}
+              spellCheck={false}
+              placeholder="너는 현장 담당자를 돕는 조수다. ..."
+              className="mt-1 w-full rounded-sm border border-outline bg-surface px-3 py-2 font-mono text-body text-on-surface transition-colors duration-150 focus:border-primary"
+            />
+          </div>
+        </div>
+        <ErrorBanner message={createError} />
+        <div className="flex justify-end">
+          <button type="submit" disabled={creating} className="btn-filled">
+            {creating ? "만드는 중..." : "만들기"}
+          </button>
+        </div>
+      </form>
 
       {prompts === null ? (
         !loadError && (
@@ -202,6 +285,15 @@ export default function PromptsPage() {
                   근거 자료를 감싸는 보안 울타리는 코드에서 만들어지므로, 이 내용을 어떻게 고쳐도
                   사라지지 않습니다.
                 </li>
+                {/* The coupling this screen used to hide: every word typed here
+                    took a token off the evidence, and nothing said so. It no
+                    longer does - up to the limit, which is where the refusal on
+                    save comes from. */}
+                <li>
+                  길게 써도 근거 자료에 쓸 토큰 예산은 줄어들지 않습니다. 다만{" "}
+                  {active.token_limit.toLocaleString()} 토큰을 넘으면 그때부터는 근거 자료를
+                  밀어내기 때문에 저장이 거절됩니다.
+                </li>
               </ul>
             </div>
 
@@ -225,6 +317,13 @@ export default function PromptsPage() {
               />
               <p id="prompt-text-help" className="mt-1 text-caption text-on-surface-variant">
                 현재 사용 중인 버전 v{active.version} · {draft.length.toLocaleString()}자
+                {/* Tokens are the unit the limit is actually in, and the browser
+                    cannot count them - so this is the SAVED text's cost, from
+                    the server, next to the live character count. The refusal on
+                    save carries the number for what is in the box. */}
+                {" · 저장된 내용 "}
+                {active.tokens.toLocaleString()} 토큰 / 최대{" "}
+                {active.token_limit.toLocaleString()} 토큰
                 {dirty && " · 저장하지 않은 변경이 있습니다"}
               </p>
             </div>

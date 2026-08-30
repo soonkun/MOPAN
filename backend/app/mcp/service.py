@@ -7,6 +7,11 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.service import (
+    DEFAULT_AGENT,
+    TOOL_NOT_ALLOWED_MESSAGE,
+    ResolvedAgent,
+)
 from app.core.config import Settings
 from app.core.logging import log_event
 from app.mcp.client import MCPClient, MCPError, MCPTarget
@@ -144,7 +149,9 @@ class PendingToolCall:
 
 
 async def load_tool_calls(
-    db: AsyncSession, requested: list[tuple[uuid.UUID, dict]]
+    db: AsyncSession,
+    requested: list[tuple[uuid.UUID, dict]],
+    agent: ResolvedAgent = DEFAULT_AGENT,
 ) -> list[PendingToolCall]:
     """Resolve tool ids to callable targets, or refuse.
 
@@ -153,6 +160,14 @@ async def load_tool_calls(
     conversation in the sidebar, and once a StreamingResponse has begun there is
     no status line left to set - a 404 would degrade into an error frame inside
     a 200.
+
+    THE AGENT CHECK IS HERE, not in the router, because this is the manual half
+    of the same boundary `load_available` keeps for the planner. Restricting an
+    agent to read-only tools would mean nothing if the user could pick a
+    `destructive` one out of the composer's own tool picker on the very same
+    turn - the planner would be fenced and the human would not be, which is the
+    wrong way round. DEFAULT_AGENT allows everything, so the pre-agent behaviour
+    is unchanged.
     """
     if not requested:
         return []
@@ -176,6 +191,11 @@ async def load_tool_calls(
             # 409, not the 404 above: the row exists and an admin turned it off,
             # so there is nothing to conceal - only a state to explain.
             raise HTTPException(status_code=409, detail=TOOL_UNAVAILABLE_MESSAGE)
+        if not agent.allows_tool(tool.id):
+            # 403, not the 409 above: the tool is fine and enabled, the CALLER is
+            # not allowed to reach it through this agent. Checked before the
+            # risk_level rule so the message names the real reason.
+            raise HTTPException(status_code=403, detail=TOOL_NOT_ALLOWED_MESSAGE)
         if tool.risk_level == "destructive":
             raise HTTPException(status_code=400, detail=DESTRUCTIVE_MESSAGE)
         calls.append(

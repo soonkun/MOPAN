@@ -47,6 +47,12 @@ class TraceEvidence(BaseModel):
     keyword_rank: int | None = None
     rrf_score: float | None = None
     rerank_score: float | None = None
+    # What neighbour expansion merged into this item, one entry per neighbour:
+    # chunk_id, chunk_index, offset (-1 before / +1 after), page, reason and
+    # tokens. Empty for every item when NEIGHBOR_EXPANSION is off, and for every
+    # trace written before it existed. `dict`, not a model: it is a record for a
+    # human reading the screen, not a contract anything computes on.
+    neighbors: list[dict] = Field(default_factory=list)
     score: float | None = None
     tokens: int = 0
     snippet: str = ""
@@ -66,6 +72,15 @@ class TraceRetrieval(BaseModel):
     rrf_k: int | None = None
     sparse_weight: float | None = None
     token_budget: int | None = None
+    # The system prompt's own cost, and the allowance it is charged against.
+    # None on every trace written before the budget stopped bounding the whole
+    # request - honestly different from 0, which would say the prompt was empty.
+    prompt_tokens: int | None = None
+    mandatory_allowance: int | None = None
+    # None on every trace written before neighbour expansion existed, which is
+    # honestly different from "off" - it means nobody recorded a value, not that
+    # the value was off.
+    neighbor_expansion: str | None = None
     evidence_count: int = 0
     included_count: int = 0
 
@@ -124,6 +139,10 @@ class TraceResponse(BaseModel):
 
     # Straight off the Message columns Slice 1 added for this.
     model: str | None = None
+    # WHICH AGENT ANSWERED. Null for the default agent and for every answer
+    # written before agents existed, which the screen renders as 기본 - the same
+    # sentence, because they are the same fact.
+    agent_name: str | None = None
     prompt_name: str | None = None
     prompt_version: str | None = None
     latency_ms: int | None = None

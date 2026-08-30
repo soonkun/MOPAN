@@ -16,7 +16,11 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select, text
 from test_chat import make_fake_llm, parse_sse, vec
 
-from app.chat.prompt import ANSWER_SYSTEM_PROMPT
+from app.chat.prompt import (
+    ANSWER_SYSTEM_PROMPT,
+    MANDATORY_TOKEN_ALLOWANCE,
+    PromptTemplate,
+)
 from app.chat.service import answer, build_trace
 from app.core.settings_store import (
     RUNTIME_SAFE_SETTINGS,
@@ -144,6 +148,10 @@ async def test_trace_shows_every_retrieval_stage_and_the_answer_metadata(owner):
     assert trace["retrieval"]["rrf_k"] == 60
     assert trace["retrieval"]["evidence_count"] == len(CHUNK_TEXTS)
     assert trace["retrieval"]["token_budget"] > 0
+    # What the prompt cost and what it was allowed - the pair that answers "did
+    # the prompt take my evidence", which the budget alone cannot.
+    assert trace["retrieval"]["prompt_tokens"] == count_tokens(ANSWER_SYSTEM_PROMPT)
+    assert trace["retrieval"]["mandatory_allowance"] == MANDATORY_TOKEN_ALLOWANCE
 
     item = trace["evidence"][0]
     # The four Slice 1 kept separate rather than collapsing into one score. If any
@@ -170,8 +178,11 @@ async def test_the_trace_records_evidence_the_token_budget_cut(owner, db):
     trace = (await owner.get(f"/api/messages/{first['message_id']}/trace")).json()
     assert [item["included"] for item in trace["evidence"]] == [True] * len(CHUNK_TEXTS)
 
-    mandatory = count_tokens(ANSWER_SYSTEM_PROMPT) + count_tokens(QUESTION)
-    budget = mandatory + trace["evidence"][0]["tokens"] + 60
+    # The system prompt is NOT added in: the budget bounds the evidence and the
+    # history, and the prompt is charged against MANDATORY_TOKEN_ALLOWANCE
+    # instead (app/chat/prompt.py). Adding it here would have made this budget
+    # grow with the prose and quietly stop cutting anything at all.
+    budget = trace["evidence"][0]["tokens"] + 60
     put = await owner.put("/api/settings/ANSWER_CONTEXT_TOKEN_BUDGET", json={"value": str(budget)})
     assert put.status_code == 200, put.text
 
@@ -209,7 +220,9 @@ def test_build_trace_marks_cut_items_by_identity_not_by_position():
             sparse_weight=1.0,
             answer_context_token_budget=8000,
         ),
-        prompt=AsyncMock(name="p", version="1"),
+        # A real template, not a mock: the trace records what the prompt COSTS,
+        # and a Mock attribute is not something tiktoken can count.
+        prompt=PromptTemplate(name="p", version="1", text="지침"),
     )
     assert [item["included"] for item in trace["evidence"]] == [True, False, True]
 
@@ -409,7 +422,13 @@ async def test_the_api_key_can_be_neither_read_nor_written(owner, db, app):
     assert "openai_api_key" not in serialised
     if app.state.settings.openai_api_key:
         assert app.state.settings.openai_api_key not in serialised
-    assert {item["key"] for item in body["env_only"]} == {"EMBEDDING_MODEL", "EMBEDDING_DIM"}
+    assert {item["key"] for item in body["env_only"]} == {
+        "EMBEDDING_MODEL",
+        "EMBEDDING_DIM",
+        # off/targeted/blanket - a choice, not a number, so it has no editable
+        # spec and appears here instead. See app/core/settings_store.py.
+        "NEIGHBOR_EXPANSION",
+    }
     assert all(item["reason"] for item in body["env_only"])
 
     # Even a row written straight into the table cannot make it readable or

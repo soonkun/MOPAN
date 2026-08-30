@@ -11,6 +11,7 @@ import Composer, {
 import MessageBubble from "@/components/chat/MessageBubble";
 import PlanProgress from "@/components/chat/PlanProgress";
 import type {
+  AgentOption,
   AnswerModel,
   ApprovalRequest,
   Attachment,
@@ -48,6 +49,13 @@ const MODEL_STORAGE_KEY = "mopan.answer-model";
 // browser that refuses to store this starts on the default every time - which is
 // the safe direction.
 const ORCHESTRATOR_STORAGE_KEY = "mopan.orchestrator";
+
+// Which agent answers, remembered the same way and validated against the list
+// the same way the model is: an admin can disable or delete an agent, and a
+// stale id would then be a 404 or a 409 on every send that the user cannot act
+// on. The absence of a stored value is the DEFAULT AGENT, which is this app
+// exactly as it behaved before agents existed - the safe direction.
+const AGENT_STORAGE_KEY = "mopan.agent";
 
 // §8: 3-4 chips that fill the composer when clicked. Deliberately about
 // documents and not about the corpus that happens to be loaded - this is a
@@ -107,6 +115,12 @@ export default function ChatWindow({
   // Slice 3, opt-in per question. False on the server too, so a client that
   // never sends the flag gets the Slice 1 path unchanged.
   const [orchestrator, setOrchestrator] = useState(false);
+  // Every ENABLED agent. Empty for a deployment with none configured, and the
+  // picker then renders nothing at all.
+  const [agents, setAgents] = useState<AgentOption[]>([]);
+  // null is the default agent, and a send then carries no `agent_id` - exactly
+  // the body this app sent before agents existed.
+  const [agentId, setAgentId] = useState<string | null>(null);
   // The plan, as it runs. Keyed by step id and updated in place, because each
   // step arrives twice - `running`, then its final state.
   const [steps, setSteps] = useState<PlanStep[]>([]);
@@ -190,6 +204,24 @@ export default function ChatWindow({
     apiFetch<McpToolOption[]>("/api/mcp/tools")
       .then(setTools)
       .catch(() => setTools([]));
+    // Same rule again, and it matters most here: a deployment with no agents
+    // answers with [], the picker disappears, and every send carries no
+    // `agent_id` - which is the app as it was. A failure to load agents must
+    // never stop a question being asked.
+    apiFetch<AgentOption[]>("/api/agents/selectable")
+      .then((list) => {
+        setAgents(list);
+        let stored: string | null = null;
+        try {
+          stored = localStorage.getItem(AGENT_STORAGE_KEY);
+        } catch {
+          // Private mode, or site data blocked. Fall through to the default.
+        }
+        // Validated against the list, never trusted: an agent an admin disabled
+        // is absent from it, and a stale id would be a 409 on every send.
+        setAgentId(list.some((a) => a.id === stored) ? stored : null);
+      })
+      .catch(() => setAgents([]));
     // Read HERE and not in a useState initialiser, for the same two reasons the
     // model is: this component is server-rendered, where `window` does not
     // exist, and reading during render would hydrate a different value than the
@@ -387,6 +419,10 @@ export default function ChatWindow({
                 // switch the picker while this answer is still streaming, and
                 // the label has to name what actually answered.
                 model: event.model,
+                // From the frame for the same reason the model is: the picker
+                // may have moved while this answer was streaming, and the label
+                // has to name what actually produced it.
+                agent_name: event.agent_name,
                 created_at: new Date().toISOString(),
               },
             ]);
@@ -481,6 +517,7 @@ export default function ChatWindow({
         citations: [],
         attachments: sent,
         model: null,
+        agent_name: null,
         feedback: null,
         created_at: new Date().toISOString(),
       },
@@ -502,6 +539,9 @@ export default function ChatWindow({
           // Omitted when off, so a turn that does not want a plan sends exactly
           // the body Slice 1 sent.
           ...(orchestrator ? { orchestrator: true } : {}),
+          // Omitted for the default agent, for the same reason: the request is
+          // then byte-identical to the one this app sent before agents existed.
+          ...(agentId ? { agent_id: agentId } : {}),
         },
         onEvent,
         signal,
@@ -534,6 +574,29 @@ export default function ChatWindow({
     } catch {
       // Same as the model: the choice applies to this session and just will not
       // survive a reload.
+    }
+  }
+
+  /** Picking an agent also moves the MODEL picker to the agent's model.
+   *
+   * The server treats the agent's model as a default an explicit `model` still
+   * overrides, so leaving the picker where it was would send the old model and
+   * silently ignore the agent's - the user would have configured a model on the
+   * agent and never seen it used. Moving the visible control is what makes the
+   * two agree, and the user can still change it afterwards. */
+  function chooseAgent(id: string | null) {
+    setAgentId(id);
+    const agent = agents.find((a) => a.id === id) ?? null;
+    setNotice(`${agent?.name ?? "기본"} 에이전트로 답변합니다.`);
+    if (agent?.answer_model && models.some((m) => m.id === agent.answer_model)) {
+      setModel(agent.answer_model);
+    }
+    try {
+      if (id) localStorage.setItem(AGENT_STORAGE_KEY, id);
+      else localStorage.removeItem(AGENT_STORAGE_KEY);
+    } catch {
+      // The choice still applies to this session; it just will not survive a
+      // reload. Nothing to tell the user about.
     }
   }
 
@@ -607,7 +670,19 @@ export default function ChatWindow({
             // measured at 375px, "무엇이든" split across two lines as 무 / 엇이든.
             // keep-all breaks at spaces instead, which is how the language
             // reads. Only needed at display size; at 14-16px it is invisible.
-            <div className="mt-24">
+            <div className="mt-12">
+              {/* See the note at the top of this file for why this is a plain
+                  <img> and why it is decorative. mt-12 rather than mt-24: the
+                  mascot occupies the space the old top margin was holding, and
+                  on a 390px phone the greeting was already close to the fold. */}
+              <img
+                src="/mascot.png"
+                alt=""
+                aria-hidden="true"
+                width={720}
+                height={631}
+                className="mx-auto mb-6 h-auto w-48 md:w-60"
+              />
               {/* 36px is the display size for a desktop column. On a 390px
                   phone the same string wraps to two lines and eats the top
                   half of the screen, so it steps down below md. */}
@@ -705,6 +780,9 @@ export default function ChatWindow({
           onToolRemove={() => setToolCall(null)}
           orchestrator={orchestrator}
           onOrchestratorChange={chooseOrchestrator}
+          agents={agents}
+          agentId={agentId}
+          onAgentChange={chooseAgent}
         />
       </div>
     </div>

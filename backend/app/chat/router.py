@@ -11,6 +11,7 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agents.service import AgentScopeError, ResolvedAgent, load_agent
 from app.attachments.service import (
     attachment_root,
     load_claimable,
@@ -108,6 +109,7 @@ async def _pause_frame(
     collection_ids: list[uuid.UUID] | None,
     attachment_ids: list[uuid.UUID],
     tool_evidence: list[Evidence],
+    agent: ResolvedAgent,
 ) -> dict:
     """Store everything the resume needs and return the frame that asks.
 
@@ -121,6 +123,11 @@ async def _pause_frame(
     steps that already finished. Re-running a `write` tool because a LATER step
     needed its own approval is precisely the unattended repeat this gate exists
     to prevent.
+
+    The AGENT is stored as an id, for the same reason the plan is stored as
+    names: the resume re-loads it and re-narrows the catalogue against it, so an
+    agent an admin disabled - or whose tool list they trimmed - while the user
+    was deciding refuses the resumed plan exactly as it would refuse a fresh one.
     """
     step = run.pause
     assert step is not None and step.tool is not None
@@ -131,6 +138,7 @@ async def _pause_frame(
             "conversation_id": str(conversation.id),
             "question": question,
             "model": model,
+            "agent_id": str(agent.id) if agent.id else None,
             "collection_ids": [str(c) for c in collection_ids] if collection_ids else None,
             "attachment_ids": [str(a) for a in attachment_ids],
             "plan": execution_plan.to_raw(),
@@ -179,6 +187,7 @@ async def _complete(
     images: list[str] | None,
     model: str,
     attachment_ids: list[uuid.UUID],
+    agent: ResolvedAgent,
 ) -> AsyncIterator[str]:
     """Everything after the evidence has been gathered: retrieve if there is
     none, answer, persist, emit `citations` and `done`.
@@ -209,6 +218,12 @@ async def _complete(
                 question,
                 settings=settings,
                 collection_ids=collection_ids,
+                # THE FALLBACK IS INSIDE THE BOUNDARY TOO. This is the path a
+                # refused or empty plan lands on, and an agent restricted to one
+                # collection whose plan was thrown away must not answer from the
+                # whole corpus instead. `retrieve` narrows again itself; passing
+                # the agent here is what makes that narrowing reachable.
+                agent=agent,
             )
         retrieval_ms += int((time.perf_counter() - started) * 1000)
     if plan_trace is not None:
@@ -223,6 +238,7 @@ async def _complete(
         settings=settings,
         images=images,
         model=model,
+        prompt_name=agent.prompt_name,
     )
     if plan_trace is not None:
         # THE ACCEPTANCE TEST FOR THIS SLICE IS THAT answer() DID NOT CHANGE, so
@@ -240,6 +256,7 @@ async def _complete(
             chat_answer,
             retrieval_ms,
             attachment_ids=attachment_ids,
+            agent_name=agent.name,
         )
 
     yield _sse({"type": "citations", "citations": chat_answer.citations})
@@ -251,6 +268,10 @@ async def _complete(
             "content": chat_answer.content,
             "citations": chat_answer.citations,
             "model": chat_answer.model,
+            # Null for the default agent. Carried on the frame so the answer on
+            # screen says what produced it without waiting for a reload, exactly
+            # as `model` is.
+            "agent_name": agent.name,
         }
     )
 
@@ -284,9 +305,36 @@ async def chat(
     # pays per call and this allowlist is the only thing standing between a forged
     # body and gpt-4o pricing - or a model that does not exist, whose 400 would
     # otherwise arrive as an error frame inside a 200 after the row was written.
-    model = payload.model or settings.answer_model
+    # THE AGENT FIRST, because everything below is resolved against it. A missing
+    # id is a 404 and a disabled one a 409, both before the conversation exists -
+    # the rule every other pre-flight check in this function follows.
+    agent = await load_agent(db, payload.agent_id)
+
+    # The agent supplies the DEFAULT, never the ceiling: the allowlist below is
+    # still the only thing that decides what reaches the provider, so a row whose
+    # model an operator later dropped from ANSWER_MODELS is refused here exactly
+    # as a forged body would be. An explicit `model` in the request still wins,
+    # which is what keeps the composer's own picker meaningful when an agent is
+    # selected.
+    model = payload.model or agent.answer_model or settings.answer_model
     if model not in settings.selectable_models:
         raise HTTPException(status_code=400, detail=f"사용할 수 없는 답변 모델입니다: {model}")
+
+    # THE COLLECTION BOUNDARY, resolved before anything is written. `retrieve`
+    # and `load_available` both narrow again on their own - this is not the
+    # enforcement, it is the refusal: a question scoped to a collection this
+    # agent cannot reach gets a Korean 400 rather than an answer built from
+    # nothing, which would read as "the corpus does not say".
+    try:
+        collection_ids = agent.scope_collections(payload.collection_ids)
+    except AgentScopeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # An agent that carries the orchestrator turns it on; the per-question toggle
+    # can still turn it on for an agent that does not. There is deliberately no
+    # way to turn it OFF for an agent configured with it - that is the agent's
+    # configuration, and the composer shows the toggle forced on and says so.
+    use_orchestrator = payload.orchestrator or agent.orchestrator
 
     attachment_ids = payload.attachment_ids or []
     if len(attachment_ids) > settings.max_attachments_per_message:
@@ -318,13 +366,18 @@ async def chat(
             status_code=400,
             detail=f"도구는 한 번에 최대 {settings.max_tool_calls_per_message}개까지 호출할 수 있습니다.",
         )
-    pending_tool_calls = await load_tool_calls(db, [(t.tool_id, t.arguments) for t in tool_requests])
+    pending_tool_calls = await load_tool_calls(
+        db, [(t.tool_id, t.arguments) for t in tool_requests], agent
+    )
 
     # Loaded here, before the response starts, for the same reason everything
     # above it is: this is the ONLY set of names the planner may use, and reading
     # it needs the request's session. Narrowed by `collection_ids`, so a question
     # scoped to one collection produces a plan that cannot search another.
-    resources = await load_available(db, payload.collection_ids) if payload.orchestrator else None
+    # `agent` goes in with it: a tool the agent does not carry never enters the
+    # catalogue, so a plan naming it cannot be validated and is refused WHOLE
+    # rather than filtered - the same treatment a hallucinated name gets.
+    resources = await load_available(db, collection_ids, agent) if use_orchestrator else None
 
     if payload.conversation_id is None:
         conversation = Conversation(user_id=user.id, title=payload.message[:80])
@@ -399,9 +452,10 @@ async def chat(
                                 conversation=conversation,
                                 question=payload.message,
                                 model=model,
-                                collection_ids=payload.collection_ids,
+                                collection_ids=collection_ids,
                                 attachment_ids=attachment_ids,
                                 tool_evidence=tool_evidence,
+                                agent=agent,
                             )
                         )
                         # TERMINAL. No answer is produced: the user is being asked
@@ -437,10 +491,11 @@ async def chat(
                 plan_evidence=plan_evidence,
                 plan_trace=plan_trace,
                 plan_ms=plan_ms,
-                collection_ids=payload.collection_ids,
+                collection_ids=collection_ids,
                 images=images,
                 model=model,
                 attachment_ids=attachment_ids,
+                agent=agent,
             ):
                 yield frame
         except LLMError:
@@ -528,6 +583,13 @@ async def approve(
         raise HTTPException(status_code=404, detail=APPROVAL_NOT_FOUND_MESSAGE)
 
     conversation = await get_owned_conversation(db, uuid.UUID(stored["conversation_id"]), user)
+    # RE-LOADED, not carried across the pause, for the reason the plan is
+    # re-validated below: an admin may have disabled the agent or trimmed its
+    # tool list while the user was deciding, and the resumed request has to be
+    # refused exactly as a fresh one would be. load_agent raises the same 404/409
+    # it raises on /api/chat, before the response starts.
+    stored_agent_id = stored.get("agent_id")
+    agent = await load_agent(db, uuid.UUID(stored_agent_id) if stored_agent_id else None)
     collection_ids = [uuid.UUID(c) for c in stored.get("collection_ids") or []] or None
     attachment_ids = [uuid.UUID(a) for a in stored.get("attachment_ids") or []]
     attachments = await load_claimable(db, attachment_ids, user)
@@ -539,7 +601,14 @@ async def approve(
     # it must then be refused the way a fresh one would be - which is exactly what
     # load_available + validate_plan already do, with no second rule to keep in
     # step.
-    resources = await load_available(db, collection_ids)
+    try:
+        resources = await load_available(db, collection_ids, agent)
+    except AgentScopeError as exc:
+        # The agent's collections were trimmed under the pause and no longer
+        # cover the scope this question was asked with. Same 409 the refused plan
+        # gets below, and for the same reason: the request was fine, the world
+        # changed.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     try:
         execution_plan = validate_plan(stored.get("plan"), resources, settings=settings)
     except PlanError as exc:
@@ -604,6 +673,7 @@ async def approve(
                         collection_ids=collection_ids,
                         attachment_ids=attachment_ids,
                         tool_evidence=tool_evidence,
+                        agent=agent,
                     )
                 )
                 return
@@ -622,6 +692,7 @@ async def approve(
                 images=images,
                 model=model,
                 attachment_ids=attachment_ids,
+                agent=agent,
             ):
                 yield frame
         except LLMError:

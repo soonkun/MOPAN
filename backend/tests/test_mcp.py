@@ -24,7 +24,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
-from app.chat.prompt import build_prompt, get_prompt
+from app.chat.prompt import MANDATORY_TOKEN_ALLOWANCE, build_prompt, get_prompt
 from app.core.config import Settings
 from app.core.tokens import count_tokens
 from app.llm.base import ChatResult
@@ -672,8 +672,13 @@ async def test_a_huge_tool_result_stays_inside_the_answer_token_budget(
         "/api/chat",
         json={"message": "요약", "tool_calls": [{"tool_id": tool_id_of(created, "current_weather")}]},
     )
-    total = sum(count_tokens(m.content) for m in fake_llm.chat.await_args.args[0])
-    assert total <= 1000
+    # The CONTEXT is what the budget bounds - the messages between the system
+    # prompt and the question - and the whole request is bounded by that plus
+    # MANDATORY_TOKEN_ALLOWANCE. See tests/test_prompt.py for why a single
+    # `total <= budget` stopped being the right assertion.
+    messages = fake_llm.chat.await_args.args[0]
+    assert sum(count_tokens(m.content) for m in messages[1:-1]) <= 1000
+    assert sum(count_tokens(m.content) for m in messages) <= 1000 + MANDATORY_TOKEN_ALLOWANCE
 
 
 # --- run_tool_calls is callable from code, not only from a request handler ---

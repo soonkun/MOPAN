@@ -13,11 +13,18 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
 
-from app.chat.prompt import ANSWER_SYSTEM_PROMPT, build_prompt, get_prompt
+from app.chat.prompt import (
+    ANSWER_SYSTEM_PROMPT,
+    MANDATORY_TOKEN_ALLOWANCE,
+    build_prompt,
+    get_prompt,
+)
 from app.core.db import current_sessionmaker
+from app.core.tokens import count_tokens
 from app.llm.base import ChatResult
 from app.models.chunk import EMBEDDING_DIM
 from app.models.prompt import Prompt
+from app.prompts.router import too_long_message
 from app.retrieval.evidence import Evidence
 
 # The seed migration 0004 writes runs before any user exists, and every
@@ -90,26 +97,58 @@ def make_fake_llm() -> AsyncMock:
 # --- The seed ----------------------------------------------------------------
 
 
-def test_migration_0004_seeds_the_module_constant_verbatim():
-    """0004 inlines the prompt text rather than importing it, so that what
-    version 1 WAS cannot change because someone edited a constant later. This is
-    what keeps the two copies identical, and so what makes "nothing changes
-    behaviour on deploy" a checked claim instead of a hope."""
+def _migration(name: str):
     import importlib.util
     from pathlib import Path
 
-    path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "0004_prompts.py"
-    spec = importlib.util.spec_from_file_location("migration_0004", path)
+    path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    assert module.SEED_ANSWER_PROMPT == ANSWER_SYSTEM_PROMPT
+    return module
+
+
+def test_migration_0004_still_carries_its_own_historical_text():
+    """0004 inlines the prompt text rather than importing it, so that what
+    version 1 WAS cannot change because someone edits a constant later.
+
+    It used to be asserted equal to ANSWER_SYSTEM_PROMPT, and that was the wrong
+    claim: it made "nothing changes behaviour on deploy" mean "the constant may
+    never change", so the first measured improvement to the prompt broke a
+    migration test. What 0004 owes is its own history, and 0009 is what carries
+    a change forward to a deployment. The fragment below is one 0004 wrote and
+    0009 deliberately dropped - it is the sentence that blessed the one-line
+    answer - so this fails exactly when someone "helpfully" pastes today's
+    constant over the record of what version 1 said.
+    """
+    text = _migration("0004_prompts").SEED_ANSWER_PROMPT
+    assert "including an answer " in text
+    assert "that is only one sentence long" in text
+    assert text != ANSWER_SYSTEM_PROMPT
+
+
+def test_migration_0009_carries_the_module_constant_verbatim():
+    """0009 is the CURRENT text, and the same rule applies to it in reverse: the
+    row a fresh install ends up with has to be the text this image would fall
+    back to, or `get_prompt`'s fallback and its database disagree about what the
+    deployment answers with."""
+    assert _migration("0009_answer_prompt_v2").SEED_ANSWER_PROMPT_V2 == ANSWER_SYSTEM_PROMPT
 
 
 @pytest.mark.integration
 def test_a_freshly_migrated_database_has_exactly_one_active_answer_prompt(migrated_database):
-    """Re-runs the migrations rather than trusting the session-scoped fixture:
-    every DB test truncates users CASCADE, which takes `prompts` with it, so by
-    the time this runs the seeded row is long gone.
+    """THE property, and the one worth asserting: after a full migration the
+    ACTIVE prompt is the module constant. That is what makes `get_prompt`'s
+    fallback and its database agree about what this deployment answers with, and
+    it survives the constant being edited - which is what the old "0004 equals
+    the constant" assertion did not.
+
+    Version 1 is checked in the same run, against 0004's own historical text: an
+    admin's rollback to it has to land on what version 1 actually said.
+
+    Re-runs the migrations rather than trusting the session-scoped fixture: every
+    DB test truncates users CASCADE, which takes `prompts` with it, so by the
+    time this runs the seeded rows are long gone.
 
     Sync, like test_downgrade_then_upgrade_round_trips and for the same reason -
     alembic/env.py calls asyncio.run(), which raises inside a running loop."""
@@ -137,18 +176,29 @@ def test_a_freshly_migrated_database_has_exactly_one_active_answer_prompt(migrat
                         text("SELECT version, text FROM prompts WHERE name = 'answer_agent' AND is_active")
                     )
                 ).all()
+                history = (
+                    await conn.execute(
+                        text("SELECT version, text FROM prompts WHERE name = 'answer_agent' ORDER BY 1")
+                    )
+                ).all()
                 # This test does its own cleanup: it is sync, so the autouse
                 # async clean_db fixture is not a reliable way to get the seeded
                 # row back out of the way of the tests that seed their own.
                 await conn.execute(text("TRUNCATE TABLE prompts CASCADE"))
-            return rows
+            return rows, history
         finally:
             await engine.dispose()
 
-    rows = asyncio.run(read_then_clear())
+    rows, history = asyncio.run(read_then_clear())
     assert len(rows) == 1
-    assert rows[0].version == "1"
     assert rows[0].text == ANSWER_SYSTEM_PROMPT
+    # Version 1 is still 0004's own text, untouched, and still there to roll back
+    # to. The active version is NOT asserted to be a particular number: 0009
+    # computes it from what is in the table, which is the only way an existing
+    # deployment carrying an admin's own version 2 can be upgraded at all.
+    by_version = {row.version: row.text for row in history}
+    assert by_version["1"] == _migration("0004_prompts").SEED_ANSWER_PROMPT
+    assert rows[0].version != "1"
 
 
 # --- get_prompt: the database is the source, the constant is the floor -------
@@ -319,6 +369,118 @@ async def test_an_empty_or_whitespace_only_template_is_refused(admin_client, db,
     # And it wrote nothing: a refused save must not leave a version behind.
     versions = (await db.scalars(select(Prompt.version).where(Prompt.name == "answer_agent"))).all()
     assert list(versions) == ["1"]
+
+
+# --- The token ceiling -------------------------------------------------------
+#
+# The coupling this ceiling exists for: ANSWER_CONTEXT_TOKEN_BUDGET used to bound
+# the WHOLE request, so every word saved through this screen removed an evidence
+# chunk and nothing said so. The budget now bounds the evidence and the history,
+# and the system prompt is charged against MANDATORY_TOKEN_ALLOWANCE instead -
+# which is only a promise as long as something refuses the save that would break
+# it. That is this refusal.
+
+
+@pytest.mark.parametrize(
+    "path,body",
+    [
+        ("/api/prompts/answer_agent/versions", {}),
+        ("/api/prompts", {"name": "field_agent"}),
+    ],
+    ids=["a new version", "a new prompt"],
+)
+async def test_a_template_past_the_token_allowance_is_refused(admin_client, db, path, body):
+    over = ANSWER_SYSTEM_PROMPT * 8
+    tokens = count_tokens(over)
+    assert tokens > MANDATORY_TOKEN_ALLOWANCE
+
+    response = await admin_client.post(path, json={**body, "text": over})
+
+    assert response.status_code == 400
+    # The number is IN the message: the screen shows a character count, and
+    # characters are not the unit the ceiling is in - a Korean prompt and an
+    # English one of the same length are nowhere near the same token cost.
+    assert response.json()["detail"] == too_long_message(tokens)
+    assert str(MANDATORY_TOKEN_ALLOWANCE // 1000) in response.json()["detail"]
+    # And it wrote nothing.
+    versions = (await db.scalars(select(Prompt.version))).all()
+    assert list(versions) == ["1"]
+
+
+async def test_a_template_at_the_allowance_is_accepted(admin_client):
+    """The refusal is a ceiling, not a suggestion that shorter is better. A
+    template six times the shipped one still saves."""
+    under = "지" * 100
+    assert count_tokens(under) <= MANDATORY_TOKEN_ALLOWANCE
+    response = await admin_client.post(
+        "/api/prompts/answer_agent/versions", json={"text": under}
+    )
+    assert response.status_code == 201
+
+
+async def test_the_screen_is_told_what_the_active_prompt_costs_and_what_the_limit_is(admin_client):
+    """Counted server-side because there is no honest way to count cl100k tokens
+    in a browser, and the limit rides along because a copy of it in the TSX would
+    outlive a change to the constant in silence."""
+    body = (await admin_client.get("/api/prompts")).json()
+    assert body[0]["tokens"] == count_tokens(ANSWER_SYSTEM_PROMPT)
+    assert body[0]["token_limit"] == MANDATORY_TOKEN_ALLOWANCE
+
+
+async def test_a_long_prompt_cannot_take_evidence_off_an_answer(admin_client, app, bound_sessionmaker):
+    """The property the whole change is for, through the real request path.
+
+    The same question against the same corpus, before and after the prompt is
+    made 1,000 tokens longer: the model is handed the same evidence. Under the
+    old accounting the second answer silently lost a chunk of it.
+    """
+    app.state.llm_provider = make_fake_llm()
+    # Pin the baseline. This test measures a budget from the ACTIVE prompt and
+    # then compares against a longer one, so it cannot inherit whichever version
+    # an earlier test left active - over MANDATORY_TOKEN_ALLOWANCE build_prompt
+    # trims evidence by design, and a leaked over-allowance version made `before`
+    # smaller than `after`, inverting the very failure this test is named for.
+    pinned = await admin_client.post(
+        "/api/prompts/answer_agent/versions", json={"text": ANSWER_SYSTEM_PROMPT}
+    )
+    assert pinned.status_code == 201, pinned.text
+
+    evidence = [_evidence(f"근거 {n} " + "본문 " * 60) for n in range(6)]
+    # A budget with no slack in it, measured from what these six items cost. With
+    # room to spare this test passes with the old accounting restored - the
+    # prompt takes its tokens from a pool nothing was competing for - so the
+    # budget has to be the size of the evidence for the question to be asked at
+    # all.
+    # Sized to a STRICT SUBSET, not to all six. The budget has to be biting
+    # already, or a longer prompt has nothing to take and the comparison proves
+    # nothing - which is exactly what happened when this was `all six + 5`: under
+    # the new accounting nothing competes for that pool, everything fit, and the
+    # non-vacuity guard below fired with `assert 6 < 6`.
+    messages = build_prompt(
+        "질문", [], evidence, prompt=await get_prompt("answer_agent"), token_budget=1_000_000
+    )[0]
+    full = sum(count_tokens(m.content) for m in messages[1:-1])
+    budget = full // 2
+
+    before = build_prompt(
+        "질문", [], evidence, prompt=await get_prompt("answer_agent"), token_budget=budget
+    )[1]
+
+    longer = ANSWER_SYSTEM_PROMPT + "\n\n" + "추가 지침 문장입니다. " * 150
+    assert count_tokens(longer) - count_tokens(ANSWER_SYSTEM_PROMPT) > 1000
+    saved = await admin_client.post(
+        "/api/prompts/answer_agent/versions", json={"text": longer}
+    )
+    assert saved.status_code == 201, saved.text
+
+    after = build_prompt(
+        "질문", [], evidence, prompt=await get_prompt("answer_agent"), token_budget=budget
+    )[1]
+
+    assert [item.ref for item in after] == [item.ref for item in before]
+    # Non-vacuous: the budget has to be biting, or both calls would fit
+    # everything and agree for a reason that is not the one being tested.
+    assert 0 < len(before) < len(evidence)
 
 
 # --- Activation --------------------------------------------------------------

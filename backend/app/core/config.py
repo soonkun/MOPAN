@@ -130,6 +130,53 @@ class Settings(BaseSettings):
     # Reproduce with `python scripts/eval_retrieval.py --weights 1.0,0.5,0.0`.
     sparse_weight: float = 1.0
 
+    # Neighbour-chunk expansion. See app/retrieval/neighbors.py for the mechanism
+    # and the corpus measurements; this note is the number that picked the
+    # default.
+    #
+    # The failure: a chunk ends at "~~~가 가능하다" and the NEXT chunk opens
+    # "다만, ~~~의 경우에는 예외를 허용한다". Retrieval returns the rule, the
+    # exception never arrives, the answer is confidently wrong. On the live
+    # 2578-chunk corpus 149 of 2577 adjacent pairs are exactly that shape.
+    #
+    # Measured on the real corpus with `python scripts/eval_retrieval.py
+    # --variants current --expansion off,targeted,blanket [--top-n N]`, over the
+    # 21 original questions in scripts/eval_questions_ko.json (group "base").
+    # anchor@N is the metric that can see this at all - recall and precision are
+    # page- and slot-level, and expansion adds text to slots already won, so
+    # neither can move. `tokens` is the mean size of the whole evidence set.
+    #
+    #   top_n   off              targeted            blanket
+    #            anchor  tokens   anchor  tokens      anchor  tokens
+    #    4        0.619    1578    0.714    1665 +6%   0.714    3469 +120%
+    #    6        0.714    2375    0.810    2509 +6%   0.810    5169 +118%
+    #    8        0.762    3170    0.857    3357 +6%   0.905    6849 +116%
+    #   10        0.762    3959    0.857    4200 +6%   0.905    8569 +116%
+    #   14        0.857    5536    0.905    5849 +6%   0.952    9566  +73%
+    #
+    # TARGETED, because blanket buys one more question for ten times the tokens.
+    # They tie at top_n 4 and 6; above that blanket leads by exactly one question
+    # of 21 (q15, whose answer-bearing chunk opens "(예2) 【청구항 1】" - an example
+    # continuation no marker recognises) and pays 3,500-3,900 tokens per answer
+    # for it. At top_n=14 blanket is also BUDGET-BOUND: only 8.5 of 14 items get
+    # expanded before ANSWER_CONTEXT_TOKEN_BUDGET stops it, so it cannot even
+    # deliver its own behaviour consistently. Targeted expands 1.1 items of 14
+    # and never comes near the budget.
+    #
+    # WHAT IT DOES NOT FIX, stated because it is the interesting negative. Eight
+    # further questions (group "neighbor") were written from the measured
+    # proviso pairs - the rule in one chunk, the 다만 that qualifies it in the
+    # next. Expansion does not move them, because it does not need to: at
+    # CHUNK_OVERLAP=150 the proviso chunk REPEATS the rule chunk's tail, so it is
+    # a near-duplicate in embedding space and retrieval already returns both. At
+    # top_n=6, 7 of those 8 already score anchor=1 with expansion off. The gain
+    # measured above is a different case: a chunk adjacent to a retrieved one
+    # that was itself outside the top N.
+    #
+    # Literal, not str: an operator's "targetted" would otherwise boot fine and
+    # silently disable the feature they were switching on.
+    neighbor_expansion: Literal["off", "targeted", "blanket"] = "targeted"
+
     chunking_strategy: str = "semantic"
     # Characters, for both strategies. Measured on the 1950 stored chunks of the
     # real Korean examination manual: 0.911 cl100k tokens per character (mean

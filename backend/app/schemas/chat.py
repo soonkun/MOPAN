@@ -55,6 +55,18 @@ class ChatRequest(BaseModel):
     # still ride the turn, and a tool the USER picked in `tool_calls` still runs
     # before the plan does. The planner decides what ELSE to reach for.
     orchestrator: bool = False
+    # Slice 4's agent, chosen per question the way `model` is. None is the
+    # DEFAULT AGENT - no prompt override, no restriction, orchestrator off -
+    # which is this app exactly as it behaved before agents existed, so an empty
+    # `agents` table changes nothing about this request.
+    #
+    # It does not merely supply defaults for the fields above it: the agent's
+    # collection and tool lists are a BOUNDARY, so `collection_ids` and
+    # `tool_calls` are narrowed and refused against it server-side
+    # (app/agents/service.py). Resolved in the router before the response starts,
+    # like the model and the attachment ids, for the reason they are: a refusal
+    # after a StreamingResponse has begun is an error frame inside a 200.
+    agent_id: uuid.UUID | None = None
 
 
 class ApprovalDecision(BaseModel):
@@ -129,6 +141,11 @@ class MessageResponse(BaseModel):
     # reloaded conversation cannot say which model gave which answer, which is the
     # whole point of being able to pick one.
     model: str | None = None
+    # WHICH AGENT ANSWERED. Null on every user turn, on every answer written
+    # before agents existed, and on every answer the default agent gave - all
+    # three of which the transcript renders the same way, because they are the
+    # same thing: the app answering as it always did.
+    agent_name: str | None = None
     # The CALLER's own rating, null when they have not rated this answer. It
     # rides the transcript rather than a second request because the alternative
     # is one fetch per assistant message on every conversation open. Always the

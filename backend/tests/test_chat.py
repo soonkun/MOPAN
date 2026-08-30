@@ -11,6 +11,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event, select, text
 
+from app.chat.prompt import MANDATORY_TOKEN_ALLOWANCE
 from app.core.config import Settings
 from app.core.tokens import count_tokens
 from app.llm.base import ChatResult, LLMError
@@ -540,14 +541,21 @@ async def test_a_fence_marker_in_an_attachment_is_stripped_end_to_end(logged_in,
 
 async def test_a_huge_attachment_stays_inside_the_answer_token_budget(logged_in, fake_llm, app):
     """Attachment text is charged against ANSWER_CONTEXT_TOKEN_BUDGET, not added on
-    top of it: a 200k-character file must not reach the provider whole."""
+    top of it: a 200k-character file must not reach the provider whole.
+
+    Two bounds, because the budget bounds the CONTEXT - the messages between the
+    system prompt and the question - and the request as a whole is bounded by
+    that plus MANDATORY_TOKEN_ALLOWANCE. A single `total <= budget` was only ever
+    true because the system prompt was charged against the same pool, which is
+    the coupling that made every word of prompt prose cost an evidence chunk."""
     app.state.settings = app.state.settings.model_copy(update={"answer_context_token_budget": 1000})
     attachment_id = await attach(logged_in, "huge.txt", b"turbidity " * 20000)
 
     await logged_in.post("/api/chat", json={"message": "summarise", "attachment_ids": [attachment_id]})
 
-    total = sum(count_tokens(m.content) for m in sent_messages(fake_llm))
-    assert total <= 1000
+    messages = sent_messages(fake_llm)
+    assert sum(count_tokens(m.content) for m in messages[1:-1]) <= 1000
+    assert sum(count_tokens(m.content) for m in messages) <= 1000 + MANDATORY_TOKEN_ALLOWANCE
 
 
 async def test_an_image_attachment_reaches_the_model_as_an_image_part(logged_in, fake_llm):

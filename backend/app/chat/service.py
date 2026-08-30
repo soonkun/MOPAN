@@ -7,8 +7,15 @@ from dataclasses import dataclass, field
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.service import DEFAULT_AGENT, ResolvedAgent
 from app.attachments.service import claim as claim_attachments
-from app.chat.prompt import PromptTemplate, build_prompt, get_prompt, new_nonce
+from app.chat.prompt import (
+    MANDATORY_TOKEN_ALLOWANCE,
+    PromptTemplate,
+    build_prompt,
+    get_prompt,
+    new_nonce,
+)
 from app.core.config import Settings
 from app.core.logging import log_event
 from app.core.tokens import count_tokens
@@ -53,9 +60,18 @@ async def retrieve(
     *,
     settings: Settings,
     collection_ids: list[uuid.UUID] | None = None,
+    agent: ResolvedAgent = DEFAULT_AGENT,
 ) -> list[Evidence]:
     """Slice 3's Orchestrator will produce list[Evidence] a different way (a plan
-    running RAG and MCP steps) and hand it to the same answer() below."""
+    running RAG and MCP steps) and hand it to the same answer() below.
+
+    THE AGENT'S COLLECTION RESTRICTION IS APPLIED HERE, not by the caller, for
+    the same reason this function owns its own commit below: a boundary a caller
+    has to remember is not a boundary. The router narrows too, and that is fine -
+    `scope_collections` is idempotent - but this is the line that makes "an agent
+    restricted to A cannot return evidence from B" true of the direct RAG path
+    however it is reached. DEFAULT_AGENT restricts nothing, so /api/search and
+    every pre-agent caller behave exactly as before."""
     # hybrid_search embeds before its first statement, so it opens no transaction
     # across that network call - but only half the property is its to keep. The
     # caller has typically just read the conversation and its history from this
@@ -67,6 +83,7 @@ async def retrieve(
     # reads, and rollback would silently discard a caller's pending write.
     # Depends on expire_on_commit=False (app.core.db.make_sessionmaker), so the
     # caller's already-loaded Conversation survives the commit unexpired.
+    scoped = agent.scope_collections(collection_ids)
     await db.commit()
     return await hybrid_search(
         db,
@@ -78,7 +95,16 @@ async def retrieve(
         rrf_k=settings.rrf_k,
         candidate_limit=settings.retrieval_candidate_limit,
         sparse_weight=settings.sparse_weight,
-        collection_ids=collection_ids,
+        collection_ids=scoped,
+        # Neighbour expansion is opted into HERE, at the one choke point every
+        # direct-RAG caller reaches - /api/chat, /api/search and the
+        # orchestrator's fallback all come through this function - rather than at
+        # four call sites that would each have to remember. CHUNK_OVERLAP is not
+        # a chunking detail leaking into retrieval: it is how expansion knows
+        # which repeated characters to drop when it joins two chunks.
+        neighbor_expansion=settings.neighbor_expansion,
+        chunk_overlap=settings.chunk_overlap,
+        token_budget=settings.answer_context_token_budget,
     )
 
 
@@ -176,6 +202,11 @@ def build_trace(
                 "keyword_rank": metadata.get("keyword_rank"),
                 "rrf_score": metadata.get("rrf_score"),
                 "rerank_score": metadata.get("rerank_score"),
+                # What neighbour expansion folded into this item's content. The
+                # identity fields above still name the primary chunk - an expanded
+                # item is ONE citation - so this list is the only thing on the
+                # screen that says the text is wider than the chunk it cites.
+                "neighbors": metadata.get("neighbors") or [],
                 "score": item.score,
                 "tokens": count_tokens(item.content),
                 "snippet": item.content[:SNIPPET_CHARS],
@@ -190,6 +221,15 @@ def build_trace(
             "rrf_k": settings.rrf_k,
             "sparse_weight": settings.sparse_weight,
             "token_budget": settings.answer_context_token_budget,
+            # What the system prompt cost, and the allowance it is charged
+            # against - NOT against `token_budget`, which is the evidence's
+            # (app/chat/prompt.py:MANDATORY_TOKEN_ALLOWANCE). Recorded because
+            # this pair is the only thing that can answer "did the prompt take
+            # my evidence": below the allowance the answer is always no, and
+            # above it the difference is exactly what was taken.
+            "prompt_tokens": count_tokens(prompt.text),
+            "mandatory_allowance": MANDATORY_TOKEN_ALLOWANCE,
+            "neighbor_expansion": settings.neighbor_expansion,
             "evidence_count": len(evidence),
             "included_count": len(used),
         },
@@ -211,12 +251,20 @@ async def answer(
     settings: Settings,
     images: list[str] | None = None,
     model: str | None = None,
+    prompt_name: str = "answer_agent",
 ) -> ChatAnswer:
     """Deliberately knows nothing about where `evidence` came from: no session, no
     vector store, no reranker. That is the whole point of the split - Slice 3 runs
     an execution plan over RAG and MCP steps, merges the results into one
-    list[Evidence], and calls this function unchanged."""
-    template = await get_prompt("answer_agent")
+    list[Evidence], and calls this function unchanged.
+
+    `prompt_name` is Slice 4's agent, and it is a defaulted keyword rather than a
+    new collaborator: an agent picks WHICH stored prompt answers, so this stays
+    one `get_prompt` call and the signature that
+    tests/test_chat_service.py pins - no session, no retrieval collaborator -
+    is unchanged. The default is the name every caller used before agents
+    existed, which is why the default agent is not a second code path."""
+    template = await get_prompt(prompt_name)
     messages, used_evidence = build_prompt(
         question,
         history,
@@ -291,6 +339,7 @@ async def persist_turn(
     chat_answer: ChatAnswer,
     retrieval_ms: int,
     attachment_ids: list[uuid.UUID] | None = None,
+    agent_name: str | None = None,
 ) -> uuid.UUID:
     """Returns the ASSISTANT message's id, which the SSE `done` frame carries so
     that the answer on screen can be rated and traced without a reload. Before
@@ -313,6 +362,10 @@ async def persist_turn(
         model=chat_answer.model,
         prompt_name=chat_answer.prompt_name,
         prompt_version=chat_answer.prompt_version,
+        # NULL for the default agent, which is the app behaving as it always
+        # did. Written beside `model` for the same reason: it survives a reload,
+        # so a transcript can still say what answered it.
+        agent_name=agent_name,
         usage=chat_answer.usage,
         latency_ms=chat_answer.latency_ms,
         retrieval_ms=retrieval_ms,

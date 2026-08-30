@@ -214,6 +214,15 @@ ENV_ONLY_SETTINGS: list[EnvOnlySetting] = [
         ),
     ),
     EnvOnlySetting(
+        key="NEIGHBOR_EXPANSION",
+        label="인접 청크 확장",
+        reason=(
+            "off / targeted / blanket 중 하나를 고르는 값이라 이 화면의 숫자 입력 칸으로는 다룰 수 "
+            "없습니다. 답변에 쓰이는 근거의 분량을 바꾸므로 토큰 예산과 함께 판단해야 하며, "
+            "scripts/eval_retrieval.py 로 측정한 뒤 환경변수로 바꿉니다."
+        ),
+    ),
+    EnvOnlySetting(
         key="EMBEDDING_DIM",
         label="임베딩 차원",
         reason=(

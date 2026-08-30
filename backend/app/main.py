@@ -124,6 +124,7 @@ def create_app() -> FastAPI:
             )
         return {"status": "ready"}
 
+    from app.agents.router import router as agents_router
     from app.attachments.router import router as attachments_router
     from app.auth.router import router as auth_router
     from app.chat.router import router as chat_router
@@ -133,6 +134,7 @@ def create_app() -> FastAPI:
     from app.prompts.router import router as prompts_router
     from app.users.router import router as users_router
 
+    app.include_router(agents_router)
     app.include_router(attachments_router)
     app.include_router(auth_router)
     app.include_router(chat_router)

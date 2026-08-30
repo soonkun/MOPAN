@@ -217,6 +217,16 @@ export default function MessageBubble({
             </svg>
             추적
           </button>
+          {/* Before the model, because it is the coarser fact: an agent decides
+              the prompt, the corpus scope and the tool list, and the model is
+              one of the things it decides. Absent for the default agent, which
+              is the app answering as it always did and needs no label. */}
+          {message.agent_name && (
+            <span className="min-w-0 truncate text-caption text-on-surface-variant">
+              <span className="sr-only">답변 에이전트 </span>
+              {message.agent_name}
+            </span>
+          )}
           {message.model && (
             <span className="min-w-0 truncate text-caption text-on-surface-variant">
               <span className="sr-only">답변 모델 </span>

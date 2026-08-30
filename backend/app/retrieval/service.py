@@ -11,6 +11,7 @@ from app.models.chunk import Chunk
 from app.models.document import Document
 from app.retrieval.evidence import Evidence, RetrievedChunk, chunk_to_evidence
 from app.retrieval.keyword_search import keyword_search
+from app.retrieval.neighbors import ExpansionMode, expand
 from app.retrieval.reranker import Reranker
 from app.retrieval.rrf import reciprocal_rank_fusion
 from app.retrieval.vector_store import VectorStore
@@ -54,12 +55,23 @@ async def hybrid_search(
     candidate_limit: int,
     sparse_weight: float = 1.0,
     collection_ids: list[uuid.UUID] | None = None,
+    neighbor_expansion: ExpansionMode = "off",
+    chunk_overlap: int = 0,
+    token_budget: int = 0,
 ) -> list[Evidence]:
-    """Query -> (dense + sparse) -> RRF -> rerank -> top-N -> Evidence.
+    """Query -> (dense + sparse) -> RRF -> rerank -> top-N -> expand -> Evidence.
 
     RRF and the reranker are separate, separately configurable stages: RRF is
     arithmetic over two rank lists, the reranker is a model. Swapping in a
     cross-encoder means passing a different `Reranker`; nothing here changes.
+
+    The last three arguments are neighbour expansion, and they DEFAULT TO OFF so
+    that every caller that says nothing gets exactly the behaviour it got before
+    expansion existed. The application wiring opts in, in chat/service.py, the
+    same way it opts into `sparse_weight`. Expansion runs AFTER the reranker and
+    after the top-N cut - a neighbour is not a candidate competing for a slot, it
+    is text added to a slot that was already won - and BEFORE build_prompt's
+    budget, which is why `token_budget` is passed rather than assumed.
     """
     started = time.perf_counter()
     # Embedding first, before the first DB statement, so THIS function opens no
@@ -104,6 +116,7 @@ async def hybrid_search(
                 content=chunk.content,
                 page=chunk.page,
                 section=chunk.section,
+                chunk_index=chunk.chunk_index,
                 vector_rank=vector_rank.get(chunk_id),
                 keyword_rank=keyword_rank.get(chunk_id),
                 rrf_score=score,
@@ -116,6 +129,19 @@ async def hybrid_search(
     reranked = await reranker.rerank(query, candidates)
     selected = reranked[:top_n]
 
+    # After the truncation, on the items that survived it. Expanding the whole
+    # candidate set instead would pay for 20 neighbours to use 14, and expanding
+    # BEFORE the rerank would let a neighbour's text change the score of the
+    # chunk it was attached to.
+    await expand(
+        db,
+        selected,
+        mode=neighbor_expansion,
+        overlap_chars=chunk_overlap,
+        token_budget=token_budget,
+        query=query,
+    )
+
     log_event(
         logger,
         "hybrid_search",
@@ -123,6 +149,7 @@ async def hybrid_search(
         keyword_hits=len(keyword_ids),
         candidates=len(candidates),
         selected=len(selected),
+        expanded=sum(1 for chunk in selected if chunk.neighbors),
         duration_ms=round((time.perf_counter() - started) * 1000, 2),
     )
     return [chunk_to_evidence(chunk) for chunk in selected]

@@ -260,7 +260,15 @@ class PlanRun:
                         rrf_k=self.settings.rrf_k,
                         candidate_limit=self.settings.retrieval_candidate_limit,
                         sparse_weight=self.settings.sparse_weight,
-                        collection_ids=list(step.collection_ids) or None,
+                        # NO `or None`. `validate_plan` now writes the whole
+                        # catalogue into a step that named no collections, so an
+                        # empty tuple here means the catalogue was empty - and
+                        # `or None` would turn "this agent may reach nothing"
+                        # into "search every collection in the database", which
+                        # is the exact inversion an agent's restriction exists to
+                        # prevent. hybrid_search reads [] as an IN () predicate
+                        # that matches no row, which is the truthful answer.
+                        collection_ids=list(step.collection_ids),
                     )
             else:
                 assert step.tool is not None  # validate_plan guarantees it

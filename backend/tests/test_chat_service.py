@@ -7,6 +7,7 @@ from sqlalchemy import select, text
 
 from app.chat.service import ChatAnswer, answer, load_history, persist_turn, retrieve
 from app.core.config import Settings
+from app.core.tokens import count_tokens
 from app.llm.base import ChatResult
 from app.models.chunk import EMBEDDING_DIM
 from app.models.conversation import Conversation
@@ -146,9 +147,15 @@ async def test_an_index_past_any_digit_bound_can_be_cited(settings):
 
 async def test_evidence_dropped_by_the_token_budget_cannot_be_cited(settings):
     """`used` is what build_prompt actually showed the model, not what retrieval
-    returned. An index past it must not resolve against the retrieved list."""
-    small = settings.model_copy(update={"answer_context_token_budget": 300})
+    returned. An index past it must not resolve against the retrieved list.
+
+    The budget is derived from what ONE item costs rather than hard-coded: a
+    literal here is a number about the length of the system prompt, and it went
+    stale the first time the prompt was edited."""
     evidence = [_evidence("word " * 200, i) for i in range(1, 6)]
+    small = settings.model_copy(
+        update={"answer_context_token_budget": count_tokens(evidence[0].content) + 40}
+    )
     llm = FakeLLM(content="See [1] and [5].")
 
     result = await answer(llm, "q", [], evidence, settings=small)
@@ -166,9 +173,11 @@ def test_answer_takes_no_session_and_no_retrieval_collaborator():
     params = list(inspect.signature(answer).parameters)
     # `images` is data, like `evidence`: chat attachments of kind 'image', already
     # read off disk by the caller. `model` is the same shape - a string the caller
-    # has ALREADY validated against the allowlist, not a capability. Neither
-    # carries a session or a retrieval collaborator, which is the property this
-    # test is actually about.
+    # has ALREADY validated against the allowlist, not a capability. `prompt_name`
+    # is Slice 4's agent and is the same shape again: it names WHICH stored prompt
+    # `get_prompt` should read, so it is still one lookup through the indirection
+    # this function already had. None of the four carries a session or a retrieval
+    # collaborator, which is the property this test is actually about.
     assert params == [
         "llm_provider",
         "question",
@@ -177,6 +186,7 @@ def test_answer_takes_no_session_and_no_retrieval_collaborator():
         "settings",
         "images",
         "model",
+        "prompt_name",
     ]
 
 

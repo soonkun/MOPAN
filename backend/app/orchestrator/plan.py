@@ -19,6 +19,7 @@ from typing import Literal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.service import DEFAULT_AGENT, ResolvedAgent
 from app.core.config import Settings
 from app.mcp.client import MCPTarget
 from app.models.collection import Collection
@@ -92,7 +93,9 @@ class AvailableResources:
 
 
 async def load_available(
-    db: AsyncSession, collection_ids: list[uuid.UUID] | None = None
+    db: AsyncSession,
+    collection_ids: list[uuid.UUID] | None = None,
+    agent: ResolvedAgent = DEFAULT_AGENT,
 ) -> AvailableResources:
     """What this question may reach.
 
@@ -104,25 +107,42 @@ async def load_available(
     authenticated user may READ every collection, so this is a scoping boundary
     on top of that, not a replacement for it.
 
+    `agent` is the SECOND, stronger narrowing, and THIS IS THE PLACE IT CANNOT BE
+    BYPASSED. An agent's allowed-collection and allowed-tool lists are permission
+    boundaries: a tool the agent does not carry never enters the catalogue, so
+    `validate_plan` cannot resolve its name and refuses the whole plan - the same
+    treatment a hallucinated tool name gets, and for the same reason. Doing it in
+    the router instead would make the boundary a habit; doing it here makes it a
+    property of the only function that can produce a catalogue.
+
+    The agent scope is re-applied here even though the caller has usually applied
+    it already. That is deliberate and free - intersecting an already-intersected
+    set changes nothing - and it is what stops a future caller that forgets from
+    quietly widening the boundary. `scope_collections` raises AgentScopeError for
+    a request that names a collection outside the agent, which the router turns
+    into a Korean 400; it never silently empties the scope.
+
     Tools are exactly what `GET /api/mcp/tools` lists - enabled tools on enabled
     servers - so a tool an admin turned off is not merely un-runnable, it is
     invisible to the planner and unnameable in a plan.
     """
+    scoped = agent.scope_collections(collection_ids)
     query = select(Collection).order_by(Collection.name)
-    if collection_ids is not None:
-        query = query.where(Collection.id.in_(collection_ids))
+    if scoped is not None:
+        query = query.where(Collection.id.in_(scoped))
     collections = tuple(
         AvailableCollection(id=row.id, name=row.name, description=row.description)
         for row in (await db.scalars(query)).all()
     )
-    rows = (
-        await db.execute(
-            select(McpTool, McpServer)
-            .join(McpServer, McpServer.id == McpTool.server_id)
-            .where(McpTool.enabled.is_(True), McpServer.enabled.is_(True))
-            .order_by(McpServer.name, McpTool.name)
-        )
-    ).all()
+    tool_query = (
+        select(McpTool, McpServer)
+        .join(McpServer, McpServer.id == McpTool.server_id)
+        .where(McpTool.enabled.is_(True), McpServer.enabled.is_(True))
+        .order_by(McpServer.name, McpTool.name)
+    )
+    if agent.tool_ids:
+        tool_query = tool_query.where(McpTool.id.in_(agent.tool_ids))
+    rows = (await db.execute(tool_query)).all()
     tools = tuple(
         AvailableTool(
             id=tool.id,
@@ -259,7 +279,15 @@ def validate_plan(raw: object, resources: AvailableResources, *, settings: Setti
             for name in names:
                 if name not in by_name:
                     raise PlanError(UNKNOWN_COLLECTION_MESSAGE.format(name=name[:100]))
-            chosen = [by_name[name] for name in names]
+            # NO NAMES MEANS THE WHOLE CATALOGUE, WRITTEN OUT. It used to mean an
+            # empty tuple that the executor turned back into `collection_ids=None`
+            # - every collection in the database, whatever the catalogue held -
+            # and that was the one way an agent's collection restriction could be
+            # walked around: a planner that simply omitted "collections" searched
+            # outside the agent. `resources.collections` is already narrowed to
+            # what this question may reach, so resolving the default here closes
+            # it in the same place every other name is resolved.
+            chosen = [by_name[name] for name in names] if names else list(resources.collections)
             steps.append(
                 PlanStep(
                     id=step_id,
@@ -269,8 +297,9 @@ def validate_plan(raw: object, resources: AvailableResources, *, settings: Setti
                     # third-party-influenced text in the UI for no benefit.
                     label=f"문서 검색: {query.strip()[:60]}",
                     query=query.strip(),
-                    # Empty means "every collection this question may reach",
-                    # which is what hybrid_search's collection_ids=None does.
+                    # ALWAYS a closed set of ids, never empty-meaning-everything.
+                    # It is empty only when the catalogue itself is, which is a
+                    # corpus with nothing in it to find.
                     collection_ids=tuple(c.id for c in chosen),
                     collection_names=tuple(c.name for c in chosen),
                     depends_on=depends_on,

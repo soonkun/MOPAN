@@ -36,5 +36,13 @@ export const config = {
   // script therefore never ran on /login or /register - the two routes a
   // logged-out user actually sees - and a dark-theme user got a white flash on
   // every visit to them. It carries no user data and gates nothing.
-  matcher: ["/((?!api|_next/static|_next/image|favicon.ico|theme.js).*)"],
+  // Static files in public/ are excluded BY EXTENSION, not by name. Naming
+  // them one at a time is how /theme.js came to be listed here, and the
+  // symptom was ugly: the middleware answered a script request with the
+  // login page's HTML, so the browser reported a syntax error and the
+  // pre-paint theme script silently never ran. An extension list, rather
+  // than "anything containing a dot", because a route may contain one.
+  matcher: [
+    "/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:js|css|png|jpg|jpeg|gif|svg|webp|avif|ico|woff|woff2|ttf|map)$).*)",
+  ],
 };
