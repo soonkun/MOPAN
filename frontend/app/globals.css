@@ -121,6 +121,29 @@ body {
    class. Three button variants exactly as the spec lists them, plus the
    destructive one the 삭제 / 비활성화 flows need. */
 @layer components {
+  /* iOS Safari resolves 100vh to the viewport with the address bar HIDDEN, so
+     a 100vh shell is taller than what is actually on screen and its bottom row
+     - the chat composer - sits below the fold with no way to scroll to it,
+     because this element is the thing that bounds scrolling. 100dvh is the
+     visible height; the vh line is the fallback for a browser that drops it.
+     Headless Chrome at 375px does NOT reproduce this - it has no browser
+     chrome - which is why a 375px sweep passed every route while a real iPhone
+     showed no composer at all. Two declarations in one rule, not two Tailwind
+     height classes: Tailwind decides the emission order of `h-screen` versus
+     `h-[100dvh]` itself, so the class-attribute order would not settle it. */
+  .app-shell {
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  /* Same reason, min-height, for the two auth pages. */
+  .auth-shell {
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+}
+
+@layer components {
   .btn-filled {
     @apply inline-flex h-10 items-center justify-center rounded-sm bg-primary px-4 text-label font-medium text-on-primary transition-opacity duration-150 hover:opacity-90 disabled:opacity-50;
   }

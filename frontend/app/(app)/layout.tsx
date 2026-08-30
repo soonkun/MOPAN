@@ -1,6 +1,7 @@
 import Sidebar from "@/components/layout/Sidebar";
+import ThemeToggle from "@/components/ui/ThemeToggle";
 
-// h-screen, not min-h-screen. The sidebar is a full-height column with a
+// .app-shell is 100dvh with a 100vh fallback, not min-h-screen. The sidebar is a full-height column with a
 // scrolling history region and a footer pinned under it, and `main`'s
 // overflow-y-auto only scrolls when something bounds its height. Under
 // min-h-screen the container grows with the page instead, so main never
@@ -9,7 +10,8 @@ import Sidebar from "@/components/layout/Sidebar";
 // the logout button ends up below the fold.
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex h-screen">
+    <div className="app-shell flex">
+      <ThemeToggle />
       <Sidebar />
       {/* pt-12 md:pt-0 reserves the strip the fixed hamburger occupies. It is
           part of the layout, not of each page: without it every page's first

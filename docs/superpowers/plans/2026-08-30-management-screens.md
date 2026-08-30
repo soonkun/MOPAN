@@ -4386,7 +4386,9 @@ async def test_renaming_a_conversation_changes_the_title_in_the_list(logged_in):
     than it is a name - the rename is the only way to fix that."""
     conversation_id = await start_conversation(logged_in, "hello")
 
-    response = await logged_in.patch(f"/api/conversations/{conversation_id}", json={"title": "  분기 보고서  "})
+    response = await logged_in.patch(
+        f"/api/conversations/{conversation_id}", json={"title": "  분기 보고서  "}
+    )
 
     assert response.status_code == 200
     # Stripped, not stored verbatim: the sidebar row is `truncate`d, so leading
@@ -5346,7 +5348,10 @@ export default function ChatWindow({
             // keep-all breaks at spaces instead, which is how the language
             // reads. Only needed at display size; at 14-16px it is invisible.
             <div className="mt-24">
-              <p className="break-keep text-center text-display">
+              {/* 36px is the display size for a desktop column. On a 390px
+                  phone the same string wraps to two lines and eats the top
+                  half of the screen, so it steps down below md. */}
+              <p className="break-keep text-center text-headline md:text-display">
                 <span className="text-gradient-brand">등록된 문서에 대해 무엇이든 물어보세요.</span>
               </p>
               <div className="mt-10 flex flex-wrap justify-center gap-2">

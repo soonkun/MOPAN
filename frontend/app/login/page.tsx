@@ -36,7 +36,7 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center px-4">
+    <div className="auth-shell flex items-center justify-center px-4">
       <form
         onSubmit={handleSubmit}
         className="w-full max-w-sm space-y-6 rounded-lg bg-surface-container-low p-8"

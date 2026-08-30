@@ -412,7 +412,10 @@ export default function ChatWindow({
             // keep-all breaks at spaces instead, which is how the language
             // reads. Only needed at display size; at 14-16px it is invisible.
             <div className="mt-24">
-              <p className="break-keep text-center text-display">
+              {/* 36px is the display size for a desktop column. On a 390px
+                  phone the same string wraps to two lines and eats the top
+                  half of the screen, so it steps down below md. */}
+              <p className="break-keep text-center text-headline md:text-display">
                 <span className="text-gradient-brand">등록된 문서에 대해 무엇이든 물어보세요.</span>
               </p>
               <div className="mt-10 flex flex-wrap justify-center gap-2">

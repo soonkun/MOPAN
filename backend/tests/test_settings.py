@@ -71,13 +71,35 @@ def test_production_rejects_default_database_password():
 
 
 def test_self_registration_defaults_off_in_production():
+    """What the environment IMPLIES when the operator has set nothing.
+
+    allow_self_registration=None is passed explicitly on both sides, because
+    pydantic-settings fills an unspecified field from the real .env: with
+    ALLOW_SELF_REGISTRATION=false in that file the development case read false
+    and failed, while the production case still passed - for the wrong reason,
+    since it was reading the operator's value rather than the derivation this
+    test is named after."""
     prod = Settings(
         environment="production",
+        allow_self_registration=None,
         openai_api_key="sk-test",
         database_url="postgresql+asyncpg://mopan:s3cret@db:5432/mopan",
     )
     assert prod.allow_self_registration is False
-    assert Settings(environment="development").allow_self_registration is True
+    dev = Settings(environment="development", allow_self_registration=None)
+    assert dev.allow_self_registration is True
+
+    # And an explicit value still wins over the derivation, in both directions.
+    assert Settings(environment="development", allow_self_registration=False).allow_self_registration is False
+    assert (
+        Settings(
+            environment="production",
+            allow_self_registration=True,
+            openai_api_key="sk-test",
+            database_url="postgresql+asyncpg://mopan:s3cret@db:5432/mopan",
+        ).allow_self_registration
+        is True
+    )
 
 
 def test_invalid_chunk_overlap_is_rejected():

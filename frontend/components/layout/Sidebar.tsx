@@ -6,7 +6,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import ErrorBanner from "@/components/ui/ErrorBanner";
-import ThemeToggle from "@/components/ui/ThemeToggle";
 import type { Conversation, User } from "@/lib/types";
 
 // The trap has to enumerate everything focusable inside the drawer, not just
@@ -399,7 +398,6 @@ export default function Sidebar() {
         <div className="truncate px-4 text-caption text-on-surface-variant">
           {user ? `${user.email}${user.role === "admin" ? " · 관리자" : ""}` : "\u00a0"}
         </div>
-        <ThemeToggle />
         {logoutError && <ErrorBanner message={logoutError} />}
         {/* type="button" on every button in this file: the default is
             "submit", which is a live bug the moment one of them ends up

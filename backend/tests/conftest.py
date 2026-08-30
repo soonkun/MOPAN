@@ -111,7 +111,19 @@ async def app(test_engine, test_sessionmaker, fake_redis, tmp_path_factory):
     """A real app instance wired to the test engine and a fake Redis. No lifespan
     is run, so nothing touches the developer's database or Redis."""
     application = create_app()
-    settings = get_settings().model_copy(update={"upload_dir": tmp_path_factory.mktemp("uploads")})
+    # Every value the suite depends on is pinned here rather than inherited from
+    # the operator's .env. `allow_self_registration` was inherited, and setting
+    # it to false before opening a public tunnel turned 29 tests red - a
+    # deployment decision must not be able to fail the suite. A test that cares
+    # about the flag overrides it locally (see test_auth.py); the rest get the
+    # default this fixture states out loud.
+    settings = get_settings().model_copy(
+        update={
+            "upload_dir": tmp_path_factory.mktemp("uploads"),
+            "allow_self_registration": True,
+            "environment": "development",
+        }
+    )
     application.state.settings = settings
     application.state.engine = test_engine
     application.state.sessionmaker = test_sessionmaker

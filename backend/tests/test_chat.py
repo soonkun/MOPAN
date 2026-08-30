@@ -221,7 +221,9 @@ async def test_renaming_a_conversation_changes_the_title_in_the_list(logged_in):
     than it is a name - the rename is the only way to fix that."""
     conversation_id = await start_conversation(logged_in, "hello")
 
-    response = await logged_in.patch(f"/api/conversations/{conversation_id}", json={"title": "  분기 보고서  "})
+    response = await logged_in.patch(
+        f"/api/conversations/{conversation_id}", json={"title": "  분기 보고서  "}
+    )
 
     assert response.status_code == 200
     # Stripped, not stored verbatim: the sidebar row is `truncate`d, so leading
