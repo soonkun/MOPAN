@@ -118,10 +118,10 @@ All settings live in `.env` at the repository root. `docker-compose.yml` overrid
 | `RETRIEVAL_TOP_N` | `6` | Chunks that reach the prompt |
 | `RETRIEVAL_CANDIDATE_LIMIT` | `20` | Per retriever, before fusion |
 | `CHUNKING_STRATEGY` | `semantic` | `semantic` (structure + embedding merge) or `fixed` (character windows) |
-| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `800` / `100` | Characters; `fixed` strategy only; `0 <= overlap < size` |
-| `MAX_CHUNK_TOKENS` | `500` | 1–4095; bounds every strategy |
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `150` | Characters; both strategies; `0 <= overlap < size`. Overlap is carried only across a SIZE split, never across a heading |
+| `MAX_CHUNK_TOKENS` | `1300` | 1–4095; the hard ceiling every strategy is held to, where `CHUNK_SIZE` is the target |
 | `SEMANTIC_SIMILARITY_THRESHOLD` | `0.75` | Cosine, −1.0 to 1.0. Higher merges less. `1.0` is not "never" — float noise puts identical vectors at or above it |
-| `ANSWER_CONTEXT_TOKEN_BUDGET` | `6000` | Evidence tokens allowed into the prompt |
+| `ANSWER_CONTEXT_TOKEN_BUDGET` | `8000` | Evidence tokens allowed into the prompt (`RETRIEVAL_TOP_N` x `MAX_CHUNK_TOKENS` = 7800) |
 | `UPLOAD_DIR` | `./data/uploads` | |
 | `MAX_UPLOAD_SIZE_MB` | `50` | Enforced server-side; the Next proxy body cap is raised to match |
 | `API_INTERNAL_URL` | `http://localhost:8000` | Build-time only, see above |

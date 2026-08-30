@@ -83,6 +83,19 @@ export default function MessageBubble({
       <div className="min-w-0 flex-1">
         {/* No whitespace-pre-wrap any more: markdown owns the block structure,
             and pre-wrap would double every blank line between paragraphs. */}
+        {message.citations.length === 0 && (
+          // See the note at the top of this component: the prompt cannot
+          // guarantee grounding, so the absence of a citation is treated as
+          // what it is - an answer that cannot be shown to come from the
+          // corpus. role="note", not "alert": nothing failed, and an assertive
+          // live region would interrupt the answer being announced.
+          <p
+            role="note"
+            className="mb-3 rounded-md bg-surface-container-high px-3 py-2 text-body text-on-surface-variant"
+          >
+            등록된 문서에서 근거를 찾지 못한 답변입니다. 사실 여부를 직접 확인해 주세요.
+          </p>
+        )}
         <Markdown content={message.content} citations={message.citations} />
         {message.citations.length > 0 && (
           <div className="mt-4 border-t border-outline-variant pt-3 text-caption text-on-surface-variant">

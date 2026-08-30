@@ -99,6 +99,41 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
   return (await response.json()) as T;
 }
 
+/** The 원본 다운로드 control on the documents screens.
+ *
+ * A plain `<a href download>` would be lazier and would stream, but Chrome saves
+ * whatever body a same-origin response carries INCLUDING a 404's - so a document
+ * whose stored file has gone missing would land on disk as a file full of JSON
+ * instead of putting the backend's Korean 원본 파일을 더 이상 찾을 수 없습니다.
+ * in the page's error banner. That case is reachable: a locally-run backend and
+ * the Docker backend do not share UPLOAD_DIR (host path vs named volume), so a
+ * document uploaded to one is a row the other lists and a file it cannot open.
+ *
+ * ponytail: the whole file passes through memory as a Blob. The ceiling is
+ * settings.max_upload_size_mb (50MB today), which a tab holds without trouble;
+ * if that limit ever rises past what one can, go back to an anchor and give the
+ * missing-file case a preflight instead. */
+export async function downloadDocument(id: string, filename: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/documents/${id}/download`, {
+    credentials: "include",
+  });
+  if (!response.ok) {
+    throw await failure(response);
+  }
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  // The server sends the original name in Content-Disposition, but a blob: URL
+  // has no response headers behind it - without this the file saves as a uuid.
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  // Deferred, not immediate: revoking in the same task as the click has been
+  // seen to cancel the download before the browser has read the blob.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 /** Where to land after login. `next` is attacker-supplied via the query string,
  * so only a single-slash relative path is accepted - "//evil.com" and
  * "https://evil.com" are both browser-valid redirect targets otherwise. */

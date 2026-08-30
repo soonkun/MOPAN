@@ -52,6 +52,7 @@ async def hybrid_search(
     top_n: int,
     rrf_k: int,
     candidate_limit: int,
+    sparse_weight: float = 1.0,
     collection_ids: list[uuid.UUID] | None = None,
 ) -> list[Evidence]:
     """Query -> (dense + sparse) -> RRF -> rerank -> top-N -> Evidence.
@@ -72,7 +73,14 @@ async def hybrid_search(
     vector_ids = [hit.chunk_id for hit in vector_hits]
     keyword_ids = await keyword_search(db, query, candidate_limit, collection_ids)
 
-    fused = reciprocal_rank_fusion([vector_ids, keyword_ids], k=rrf_k)[:candidate_limit]
+    # The dense list is weighted 1.0 and the sparse list below it, because on the
+    # Korean corpus they are not peers - see the note over Settings.sparse_weight
+    # for the measurement. The default here is 1.0, plain RRF, so this function
+    # keeps its textbook behaviour for a caller that says nothing; only the
+    # application wiring in chat/service.py opts into the demotion.
+    fused = reciprocal_rank_fusion(
+        [vector_ids, keyword_ids], k=rrf_k, weights=[1.0, sparse_weight]
+    )[:candidate_limit]
     vector_rank = _ranks(vector_ids)
     keyword_rank = _ranks(keyword_ids)
 

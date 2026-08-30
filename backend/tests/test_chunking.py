@@ -598,3 +598,152 @@ def test_strategy_factory_honours_the_setting():
     assert isinstance(get_chunking_strategy(Settings(chunking_strategy="fixed")), FixedChunking)
     with pytest.raises(ValueError):
         get_chunking_strategy(Settings(chunking_strategy="nonsense"))
+
+
+# --- Character target and overlap --------------------------------------------
+
+TARGET_CHARS = 300
+OVERLAP_CHARS = 60
+
+
+def _sentence_body(sentence_count: int = 60) -> str:
+    return " ".join(f"Sentence number {i} runs on for a little while here." for i in range(sentence_count))
+
+
+def _korean_body(sentence_count: int = 60) -> str:
+    sentence = "제{}항의 농약은 라벨에 적힌 희석 배수를 지켜 사용하여야 한다."
+    return " ".join(sentence.format(i) for i in range(sentence_count))
+
+
+def test_size_pass_lands_chunks_on_the_character_target():
+    """MAX_CHUNK_TOKENS alone does not produce ~1000-character chunks - the token
+    bound bites first and the character size follows the script. Measured on the
+    real 854-page Korean manual at MAX_CHUNK_TOKENS=500: chunks cut at ~549
+    characters and averaged 362. The character target is what puts them on size."""
+    blocks = [Block(text=_sentence_body(), block_type="paragraph", page=1)]
+
+    candidates = build_size_bounded_candidates(blocks, 10_000, TARGET_CHARS, OVERLAP_CHARS)
+
+    assert len(candidates) > 1, "the character target never fired"
+    assert all(c.char_count <= TARGET_CHARS for c in candidates), [c.char_count for c in candidates]
+    # Aiming at the target, not merely under it: a splitter that cut anywhere below
+    # it would pass the bound above and still ship 100-character chunks.
+    body = [c.char_count for c in candidates[:-1]]
+    assert min(body) > TARGET_CHARS // 2, body
+
+
+def test_size_pass_keeps_the_token_ceiling_as_the_hard_bound():
+    """The character target is a target; the token count is the guarantee, because
+    it is what protects the embedding input limit. Korean measures up to 1.213
+    cl100k tokens per character, so a character target alone bounds nothing."""
+    blocks = [Block(text=_korean_body(), block_type="paragraph", page=1)]
+
+    candidates = build_size_bounded_candidates(blocks, MAX_TOKENS, 10_000, OVERLAP_CHARS)
+
+    assert len(candidates) > 1
+    for candidate in candidates:
+        assert count_tokens(candidate.content) <= candidate.token_count <= MAX_TOKENS
+
+
+def test_size_pass_repeats_the_previous_tail_after_a_size_split():
+    """A chunk that starts exactly where the previous one stopped loses whatever
+    straddles the seam. Every cut the SIZE bound forced carries the tail across."""
+    blocks = [Block(text=_sentence_body(), block_type="paragraph", page=1)]
+
+    candidates = build_size_bounded_candidates(blocks, 10_000, TARGET_CHARS, OVERLAP_CHARS)
+
+    assert len(candidates) > 2
+    for previous, candidate in zip(candidates, candidates[1:], strict=False):
+        head = candidate.content.split("\n", 1)[0]
+        assert previous.content.endswith(head), (previous.content[-80:], head)
+        assert OVERLAP_CHARS // 2 <= len(head) <= OVERLAP_CHARS
+
+
+def test_size_pass_starts_a_heading_chunk_clean():
+    """A heading is a boundary the DOCUMENT drew. Carrying the previous section's
+    tail across it puts text in a chunk the author placed in another section and
+    makes the embedding describe both, so overlap belongs only to a size split."""
+    blocks = [
+        Block(text="1. 보관", block_type="heading", page=1, section="1. 보관"),
+        Block(text=_sentence_body(), block_type="paragraph", page=1, section="1. 보관"),
+        Block(text="2. 희석", block_type="heading", page=2, section="2. 희석"),
+        Block(text="라벨의 값을 따른다.", block_type="paragraph", page=2, section="2. 희석"),
+    ]
+
+    candidates = build_size_bounded_candidates(blocks, 10_000, TARGET_CHARS, OVERLAP_CHARS)
+
+    opened_at_heading = [c for c in candidates if c.content.startswith("2. 희석")]
+    assert len(opened_at_heading) == 1, [c.content[:40] for c in candidates]
+    assert opened_at_heading[0].content == "2. 희석\n라벨의 값을 따른다."
+
+
+def test_size_pass_cuts_the_overlap_on_a_sentence_boundary():
+    """A fixed-width tail opens mid-word, which is noise in the chunk text and in
+    its embedding alike. split_sentences already knows this corpus's terminators."""
+    blocks = [Block(text=_sentence_body(), block_type="paragraph", page=1)]
+
+    candidates = build_size_bounded_candidates(blocks, 10_000, TARGET_CHARS, OVERLAP_CHARS)
+
+    first, second = candidates[0], candidates[1]
+    head = second.content.split("\n", 1)[0]
+    assert head != first.content[-OVERLAP_CHARS:], "overlap is the raw character tail"
+    # Whole sentences of the previous chunk, in order, starting at one of them.
+    assert head.startswith("Sentence number "), head
+    assert split_sentences(head) == [s for s in split_sentences(first.content) if s in head]
+
+
+@pytest.mark.parametrize("overlap", [0, 30, 60])
+def test_size_pass_does_not_orphan_a_heading_under_the_character_target(overlap):
+    """The token bound's orphan hole has a character twin: if the body's first
+    piece is split against the whole target, heading + piece exceeds it,
+    `over_target` fires, and the heading ships alone. The overlap sweep is what
+    reaches it - at overlap 60 the body is already split against 239 of the 300
+    and the heading fits in the slack by luck, so a single-configuration test
+    passes against the defect."""
+    # A heading long enough that heading + the body's first piece runs past the
+    # target: at 300/60 the pieces come out at 254 characters, so a short heading
+    # fits in the slack and the defect hides. Section titles this long are normal
+    # in the manual this was measured on.
+    heading = "1. Dilution rates, mixing order and protective equipment"
+    blocks = [
+        Block(text=heading, block_type="heading", page=1, section=heading),
+        Block(text=_sentence_body(), block_type="paragraph", page=1, section=heading),
+    ]
+
+    candidates = build_size_bounded_candidates(blocks, 10_000, TARGET_CHARS, overlap)
+
+    assert candidates[0].content.startswith(f"{heading}\n"), (
+        f"heading orphaned: first candidate is {candidates[0].content!r}"
+    )
+    assert all(c.char_count <= TARGET_CHARS for c in candidates), [c.char_count for c in candidates]
+
+
+def test_size_pass_drops_the_overlap_rather_than_bust_the_token_ceiling():
+    """The target may be missed; the ceiling may not. A limit too small to hold
+    the overlap AND content ships without the overlap."""
+    blocks = [Block(text=_korean_body(), block_type="paragraph", page=1)]
+
+    candidates = build_size_bounded_candidates(blocks, 40, TARGET_CHARS, OVERLAP_CHARS)
+
+    assert len(candidates) > 1
+    assert all(c.token_count <= 40 for c in candidates), [c.token_count for c in candidates]
+
+
+async def test_semantic_merge_respects_the_character_target():
+    """Pass 2 must stay the exact negation of pass 1's split predicate on BOTH
+    bounds. Checking only the token ceiling lets the merge rejoin a pair the
+    character target split and ship a chunk at twice the target size."""
+    blocks = [
+        Block(text="A", block_type="heading", section="A"),
+        Block(text="topic-a " + "x" * 60, block_type="paragraph", section="A"),
+        Block(text="B", block_type="heading", section="B"),
+        Block(text="topic-a " + "y" * 60, block_type="paragraph", section="B"),
+    ]
+    strategy = StructureSemanticChunking(
+        similarity_threshold=0.5, max_chunk_tokens=1000, target_chars=100, overlap_chars=20
+    )
+
+    candidates = await strategy.chunk(blocks, fake_embed_fn)
+
+    assert len(candidates) == 2, [c.content for c in candidates]
+    assert all(c.char_count <= 100 for c in candidates), [c.char_count for c in candidates]

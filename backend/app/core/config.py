@@ -67,13 +67,64 @@ class Settings(BaseSettings):
     rrf_k: int = 60
     retrieval_top_n: int = 6
     retrieval_candidate_limit: int = 20
+    # The sparse ranking's weight in RRF. Textbook RRF is 1.0 - every retriever a
+    # peer - and that is the value this was measured against, on the real 854-page
+    # Korean examination manual with the 20-question set in
+    # scripts/eval_questions_ko.json:
+    #
+    #   dense only                    recall@6 0.950   relevant slots/6  2.25
+    #   dense + sparse, weight 1.0    recall@6 0.900   relevant slots/6  2.10
+    #   dense + sparse, weight 0.5    recall@6 0.950   relevant slots/6  2.30
+    #
+    # At 1.0 the sparse half is a net NEGATIVE: it loses a question the dense half
+    # answers and spends 2.4 of the 6 evidence slots on chunks that are neither
+    # relevant nor in the dense top 6. The arithmetic is structural, not bad luck.
+    # At k=60 a sparse rank 1 scores 1/61 and a dense rank 6 scores 1/66, so ANY
+    # sparse rank 1 is guaranteed a slot in the top 6 however irrelevant it is -
+    # and on Korean it frequently is, because 'simple' is a whitespace tokenizer
+    # and Korean is agglutinative (see keyword_search.py).
+    #
+    # Below ~0.92 that guarantee is gone: 0.5/61 is under the dense list's own
+    # rank-20 score of 1/80, so the sparse half can promote a chunk the dense half
+    # already found but can no longer seat one on its own. That is a deliberate
+    # demotion from peer retriever to ranking signal, and it is why 0.5 and 0.7
+    # measure identically - anything under the threshold behaves the same.
+    #
+    # THAT ENTIRE ANALYSIS WAS FITTED TO A BUG, and the default is back to 1.0.
+    # It was measured against the corpus as pypdf had extracted it, where the
+    # stored text was scrambled - digits and item markers carried out of the words
+    # they belonged to. Keyword matching was therefore being done against garbage,
+    # which is most of why the sparse half looked like a net negative. Re-measured
+    # on the SAME 20 questions after the pdfplumber parser landed and the corpus
+    # was re-ingested, the finding inverted: weight 1.0 gives recall@6 1.000 and
+    # weight 0.5 gives 0.950, with dense alone at 0.950. The sparse half now earns
+    # its peer status.
+    #
+    # The threshold arithmetic above is still true and still the reason a weight
+    # below ~0.92 behaves as one setting rather than a curve. Keep it: it is what
+    # to reach for if sparse ever regresses again.
+    #
+    # Still open, and now worth more than it was: BM25 over character bigrams
+    # measured 0.400 precision at weight 1.0 against 0.358 for the shipped
+    # to_tsquery, on equal recall. That is 5 slots in 120 on a 20-question set -
+    # suggestive, not decisive. Grow the eval set before paying for the migration.
+    # Reproduce with `python scripts/eval_retrieval.py --weights 1.0,0.5,0.0`.
+    sparse_weight: float = 1.0
 
     chunking_strategy: str = "semantic"
-    chunk_size: int = 800
-    chunk_overlap: int = 100
-    max_chunk_tokens: int = 500
+    # Characters, for both strategies. Measured on the 1950 stored chunks of the
+    # real Korean examination manual: 0.911 cl100k tokens per character (mean
+    # 0.860, max 1.213 over a 400-chunk sample), so 1000 characters is ~903 tokens.
+    # See .env.example for why each of the four numbers below is what it is.
+    chunk_size: int = 1000
+    chunk_overlap: int = 150
+    # The GUARANTEE, where chunk_size is the target: 1000 chars x the 1.213
+    # tokens/char worst case = 1213, rounded up for the separator residual.
+    max_chunk_tokens: int = 1300
     semantic_similarity_threshold: float = 0.75
-    answer_context_token_budget: int = 6000
+    # RETRIEVAL_TOP_N (6) x MAX_CHUNK_TOKENS (1300) = 7800, so the budget never
+    # truncates a full evidence set.
+    answer_context_token_budget: int = 8000
 
     upload_dir: Path = Path("./data/uploads")
     max_upload_size_mb: int = 50
@@ -135,6 +186,13 @@ class Settings(BaseSettings):
         # the first query that reaches fusion.
         if self.rrf_k < 0:
             raise ValueError("RRF_K must be >= 0")
+        # reciprocal_rank_fusion rejects a negative weight for the same reason it
+        # rejects a negative k: a ranking that subtracts is not a ranking, and the
+        # 500 would land on the first chat request rather than at boot. 0 is legal
+        # and means "dense only" - a documented way to switch the sparse half off
+        # without deleting it.
+        if self.sparse_weight < 0:
+            raise ValueError("SPARSE_WEIGHT must be >= 0")
         # Neither knob errors when it goes non-positive, it just quietly returns
         # less: RETRIEVAL_TOP_N=-1 drops the last evidence item off every answer,
         # and CANDIDATE_LIMIT=0 empties the candidate set before the reranker is

@@ -72,6 +72,7 @@ async def retrieve(
         top_n=settings.retrieval_top_n,
         rrf_k=settings.rrf_k,
         candidate_limit=settings.retrieval_candidate_limit,
+        sparse_weight=settings.sparse_weight,
         collection_ids=collection_ids,
     )
 

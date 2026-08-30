@@ -1,6 +1,8 @@
 import base64
+import shutil
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 import pytest_asyncio
@@ -181,7 +183,7 @@ async def test_list_documents_requires_auth(client):
         ("GET", f"/api/documents/{MISSING_ID}"),
         ("DELETE", f"/api/documents/{MISSING_ID}"),
         ("GET", f"/api/documents/{MISSING_ID}/chunks"),
-        ("GET", f"/api/documents/{MISSING_ID}/structure"),
+        ("GET", f"/api/documents/{MISSING_ID}/download"),
         ("GET", f"/api/chunks/{MISSING_ID}"),
     ],
 )
@@ -244,18 +246,52 @@ async def test_chunk_response_reports_embedding_state(admin_client, db, collecti
     assert single.json()["embedded"] is True
 
 
-async def test_document_structure_returns_parsed_blocks(admin_client, collection_id):
+async def test_download_returns_the_stored_bytes_under_the_original_filename(
+    admin_client, member_client, collection_id
+):
+    """The uploaded name is Korean and never touches the path on disk - the file
+    is stored as source.md - so Content-Disposition is the only place it can come
+    back from. Any authenticated user may fetch it: same authorization as
+    GET /api/documents/{id}, because the corpus is shared by design."""
+    body = "# 제목\n\n본문입니다.\n".encode()
     upload = await admin_client.post(
         "/api/documents",
         data={"collection_id": collection_id},
-        files={"file": ("doc.md", b"# Title\n\nA paragraph.\n", "text/markdown")},
+        files={"file": ("심사기준 초안.md", body, "text/markdown")},
     )
     document_id = upload.json()["id"]
-    response = await admin_client.get(f"/api/documents/{document_id}/structure")
+
+    response = await member_client.get(f"/api/documents/{document_id}/download")
     assert response.status_code == 200
-    blocks = response.json()
-    assert blocks[0]["block_type"] == "heading"
-    assert blocks[0]["text"] == "Title"
+    assert response.content == body
+    # octet-stream for every type, not text/markdown: .html is an accepted upload
+    # and /api/* is proxied same-origin by Next, so echoing a stored file back
+    # under its own Content-Type would be stored XSS on the app's own origin.
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    disposition = response.headers["content-disposition"]
+    assert disposition.startswith("attachment")
+    assert disposition.endswith("filename*=UTF-8''" + quote("심사기준 초안.md"))
+
+
+async def test_download_of_a_document_whose_file_is_gone_is_a_korean_404(
+    admin_client, app, collection_id
+):
+    """Reachable, not theoretical: a locally-run backend and the Docker backend do
+    not share UPLOAD_DIR (host path vs named volume), so a document uploaded to
+    one is a row the other lists and a file it cannot open. Left to FileResponse
+    this raises RuntimeError from inside the response and answers 500."""
+    upload = await admin_client.post(
+        "/api/documents",
+        data={"collection_id": collection_id},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+    )
+    document_id = upload.json()["id"]
+    shutil.rmtree(Path(app.state.settings.upload_dir) / document_id)
+
+    response = await admin_client.get(f"/api/documents/{document_id}/download")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "원본 파일을 더 이상 찾을 수 없습니다."
 
 
 # --- collection CRUD ----------------------------------------------------------

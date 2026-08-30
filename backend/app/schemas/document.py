@@ -42,10 +42,3 @@ class ChunkResponse(BaseModel):
     @classmethod
     def _embedded_from_vector(cls, value: object) -> bool:
         return value is not None
-
-
-class BlockResponse(BaseModel):
-    text: str
-    block_type: str
-    page: int | None
-    section: str | None

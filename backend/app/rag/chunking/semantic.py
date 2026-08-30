@@ -23,7 +23,8 @@ class StructureSemanticChunking(ChunkingStrategy):
        entire document, which then exceeds the embedding model's input limit.
     2. Semantic merge pass: adjacent candidates whose embeddings are similar
        enough that splitting them would break one idea in two get merged, as long
-       as the result still fits under the token limit.
+       as the result still fits under BOTH of pass 1's size bounds - the token
+       ceiling and the character target.
 
     Pass 2 can only DELETE a boundary pass 1 drew; it never creates one. So the
     document detail view shows STRUCTURE-aware chunking, and only demonstrates
@@ -39,11 +40,16 @@ class StructureSemanticChunking(ChunkingStrategy):
 
     That is structural, not a misconfiguration - and the merge pass can only ever
     delete a heading boundary, never repair a size split. Pass 1 closes A and opens
-    B at piece p exactly when `A.tokens + NEWLINE_TOKENS + tokens(p) > max`, and
-    `B.tokens >= tokens(p)`; pass 2 merges exactly when
-    `A.tokens + NEWLINE_TOKENS + B.tokens <= max`. Same limit, same separator
-    constant, so the merge predicate is the negation of the split predicate: a pair
-    the size bound split can never be rejoined at any similarity. Swept
+    B at piece p exactly when `A.tokens + NEWLINE_TOKENS + tokens(p) > max` OR
+    `A.chars + 1 + len(p) > target`, and B is p possibly PREFIXED with A's overlap
+    tail, so `B.tokens >= tokens(p)` and `B.chars >= len(p)`; pass 2 merges exactly
+    when `A.tokens + NEWLINE_TOKENS + B.tokens <= max` AND
+    `A.chars + 1 + B.chars <= target`. Same limits, same separator constants,
+    bound for bound, so the merge predicate is still the negation of the split
+    predicate: whichever bound forced the split is the conjunct that fails here,
+    and a pair the size bound split can never be rejoined at any similarity. Which
+    also means a candidate carrying an overlap prefix is never merged back into the
+    candidate it overlaps - the merged text cannot duplicate that tail. Swept
     max_chunk_tokens 20..400 over a heading plus a 40-sentence body with cosine
     forced to 1.0 - 381 limits, zero rejoins. Which leaves only the other case:
     every merge this pass CAN perform joins two candidates pass 1 opened at
@@ -62,15 +68,29 @@ class StructureSemanticChunking(ChunkingStrategy):
     with no semantic pass at all.
     """
 
-    def __init__(self, similarity_threshold: float = 0.75, max_chunk_tokens: int = 500):
+    def __init__(
+        self,
+        similarity_threshold: float = 0.75,
+        max_chunk_tokens: int = 1300,
+        target_chars: int = 1000,
+        overlap_chars: int = 150,
+    ):
         self.similarity_threshold = similarity_threshold
         self.max_chunk_tokens = max_chunk_tokens
+        self.target_chars = target_chars
+        self.overlap_chars = overlap_chars
 
     async def chunk(self, blocks: list[Block], embed_fn: EmbedFn) -> list[ChunkCandidate]:
         # tiktoken assembly is CPU-bound and arq runs every job on one event
         # loop, so both passes go through a thread. Only the embed call in
         # between actually belongs on the loop.
-        candidates = await to_thread.run_sync(build_size_bounded_candidates, blocks, self.max_chunk_tokens)
+        candidates = await to_thread.run_sync(
+            build_size_bounded_candidates,
+            blocks,
+            self.max_chunk_tokens,
+            self.target_chars,
+            self.overlap_chars,
+        )
         for candidate in candidates:
             candidate.metadata.setdefault("strategy", "semantic")
         # One candidate cannot merge with anything, so the embedding call would
@@ -109,9 +129,13 @@ class StructureSemanticChunking(ChunkingStrategy):
             # omits it, and an under-count here re-breaks the bound pass 1 just
             # enforced - measured at 9 tokens under an 8-token limit.
             combined_tokens = previous.token_count + NEWLINE_TOKENS + candidate.token_count
+            combined_chars = previous.char_count + 1 + candidate.char_count
             previous_embedding = embedding
 
-            if similarity >= self.similarity_threshold and combined_tokens <= self.max_chunk_tokens:
+            fits = combined_tokens <= self.max_chunk_tokens and (
+                not self.target_chars or combined_chars <= self.target_chars
+            )
+            if similarity >= self.similarity_threshold and fits:
                 previous.content = f"{previous.content}\n{candidate.content}"
                 previous.token_count = combined_tokens
                 previous.char_count = len(previous.content)

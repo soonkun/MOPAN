@@ -58,13 +58,6 @@ export interface Chunk {
   embedded: boolean;
 }
 
-export interface Block {
-  text: string;
-  block_type: "heading" | "paragraph" | "list_item" | "table_cell";
-  page: number | null;
-  section: string | null;
-}
-
 export interface Citation {
   index: number;
   // source_type and ref are the only two fields every citation carries - the

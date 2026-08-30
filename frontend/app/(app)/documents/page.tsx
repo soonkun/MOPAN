@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { apiFetch, errorMessage } from "@/lib/api";
+import { apiFetch, downloadDocument, errorMessage } from "@/lib/api";
 import DocumentTable, { STATUS_LABEL, TERMINAL } from "@/components/documents/DocumentTable";
 import UploadDropzone from "@/components/documents/UploadDropzone";
 import ErrorBanner from "@/components/ui/ErrorBanner";
@@ -73,6 +73,19 @@ export default function DocumentsPage() {
     }, 3000);
     return () => clearInterval(interval);
   }, [loadDocuments]);
+
+  // Here as well as on the detail page: this is the screen the product owner
+  // asked for it on, and the detail page is where you already have the document
+  // open. Both go through downloadDocument so a missing stored file shows the
+  // backend's Korean 404 in this page's banner rather than saving as JSON.
+  const download = useCallback(async (doc: DocumentItem) => {
+    try {
+      await downloadDocument(doc.id, doc.filename);
+      setError(null);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }, []);
 
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -170,7 +183,7 @@ export default function DocumentsPage() {
       {loading ? (
         <p className="py-8 text-center text-body text-on-surface-variant">불러오는 중...</p>
       ) : (
-        <DocumentTable documents={visible} />
+        <DocumentTable documents={visible} onDownload={download} />
       )}
     </div>
   );

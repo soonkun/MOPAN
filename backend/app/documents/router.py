@@ -1,11 +1,12 @@
 import logging
 import uuid
+from pathlib import Path
+from urllib.parse import quote
 
-from anyio import to_thread
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,7 +30,7 @@ from app.models.collection import Collection
 from app.models.document import Document
 from app.models.user import User
 from app.schemas.collection import CollectionCreate, CollectionResponse, CollectionUpdate
-from app.schemas.document import BlockResponse, ChunkResponse, DocumentResponse
+from app.schemas.document import ChunkResponse, DocumentResponse
 
 logger = logging.getLogger("mopan.documents")
 router = APIRouter(prefix="/api", tags=["documents"])
@@ -297,29 +298,40 @@ async def list_chunks(
     return list(result)
 
 
-@router.get("/documents/{document_id}/structure", response_model=list[BlockResponse])
-async def get_document_structure(
+@router.get("/documents/{document_id}/download")
+async def download_document(
     document_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Left pane of the document detail view: the parsed original structure, so an
-    admin can eyeball chunking quality against it. Re-parsed on demand (in a
-    thread) rather than duplicating every document's text into a JSONB column."""
-    # Imported here, not at module scope: app.rag.parsers lands in Task 8, and a
-    # module-level import would stop app.main from importing at all until then.
-    from app.rag.parsers import get_parser
+    """The stored original, under the name it was uploaded with. Same
+    authorization as GET /api/documents/{id} - any authenticated user - because
+    the corpus is shared by design and every one of them can already read the
+    chunks this file was cut into.
 
+    Headers follow GET /api/attachments/{id}/content: octet-stream and
+    Content-Disposition: attachment for EVERY type, because .html is an accepted
+    upload and /api/* is proxied same-origin by Next, so echoing a stored file
+    back under its own Content-Type would be stored XSS on the app's own origin.
+    nosniff stops a browser second-guessing that."""
     document = await get_readable_document(db, document_id)
-    parser = get_parser(document.file_type)
-    try:
-        parsed = await to_thread.run_sync(parser.parse, document.storage_path)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="원본 파일을 더 이상 찾을 수 없습니다.") from exc
-    return [
-        BlockResponse(text=b.text, block_type=b.block_type, page=b.page, section=b.section)
-        for b in parsed.blocks
-    ]
+    # Checked rather than left to FileResponse, which raises RuntimeError from
+    # inside the response and answers 500. This case is reachable and has already
+    # bitten this project: a locally-run backend and the Docker backend do not
+    # share UPLOAD_DIR (host path vs named volume), so a document uploaded to one
+    # is a row the other lists and a file it cannot open. The first clause covers
+    # a row whose upload never completed: storage_path is "" there, and Path("")
+    # is the current directory rather than a missing path.
+    if not document.storage_path or not Path(document.storage_path).is_file():
+        raise HTTPException(status_code=404, detail="원본 파일을 더 이상 찾을 수 없습니다.")
+    return FileResponse(
+        document.storage_path,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(document.filename)}",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get("/chunks/{chunk_id}", response_model=ChunkResponse)

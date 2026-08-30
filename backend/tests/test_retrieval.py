@@ -480,3 +480,26 @@ def test_evidence_keeps_every_stage_score_in_metadata():
     assert metadata["keyword_rank"] == 1
     assert metadata["rrf_score"] == 0.03
     assert metadata["rerank_score"] == 0.9
+
+
+async def test_hybrid_search_weights_both_retrievers_equally_by_default(db, corpus):
+    """The durian chunk has no embedding, so its whole score is the sparse half's
+    contribution and the weight is readable straight off the metadata."""
+    evidence = await _search(db, corpus, query="durian ripeness", top_n=20)
+    durian = next(e for e in evidence if e.content.startswith("durian"))
+    assert durian.metadata["keyword_rank"] == 1
+    assert durian.metadata["vector_rank"] is None
+    assert durian.metadata["rrf_score"] == 1 / 61
+
+
+async def test_sparse_weight_scales_the_keyword_half_of_the_fused_score(db, corpus):
+    """What Settings.sparse_weight buys, at the layer that spends it. At weight 1
+    a sparse rank 1 scores 1/61 and a dense rank 6 scores 1/66, so any sparse
+    rank 1 is guaranteed an evidence slot however irrelevant - on the Korean
+    corpus that cost 2.4 of the 6 slots and one question the dense half answers.
+    Below ~0.92 the guarantee is gone. Unpinned, the weights argument could be
+    dropped from the reciprocal_rank_fusion call and every other test stays green."""
+    evidence = await _search(db, corpus, query="durian ripeness", top_n=20, sparse_weight=0.5)
+    durian = next(e for e in evidence if e.content.startswith("durian"))
+    assert durian.metadata["keyword_rank"] == 1
+    assert durian.metadata["rrf_score"] == 0.5 / 61

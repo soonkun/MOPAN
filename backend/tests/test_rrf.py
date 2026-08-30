@@ -117,3 +117,45 @@ def test_rrf_does_not_mutate_its_input():
     rankings = [["a", "b"], ["b", "a"]]
     reciprocal_rank_fusion(rankings, k=60)
     assert rankings == [["a", "b"], ["b", "a"]]
+
+
+def test_rrf_defaults_to_equal_weights():
+    # Textbook RRF, and what every call that says nothing about weights gets.
+    assert reciprocal_rank_fusion([["a"], ["b"]], k=60) == reciprocal_rank_fusion(
+        [["a"], ["b"]], k=60, weights=[1.0, 1.0]
+    )
+
+
+def test_rrf_weight_scales_only_its_own_ranking():
+    fused = dict(reciprocal_rank_fusion([["a"], ["b"]], k=60, weights=[1.0, 0.5]))
+    assert fused["a"] == 1 / 61
+    assert fused["b"] == 0.5 / 61
+
+
+def test_a_down_weighted_ranking_cannot_outbid_the_other_lists_tail():
+    # The whole point of Settings.sparse_weight. At weight 1.0 a sparse rank 1
+    # (1/61) outscores a dense rank 6 (1/66), so ANY sparse rank 1 is guaranteed
+    # an evidence slot however irrelevant it is - measured as 2.4 of 6 slots on
+    # the Korean corpus. At 0.5 it scores 0.5/61, below even the dense list's
+    # rank-20 tail (1/80), so it can promote a chunk the dense half already found
+    # but can no longer seat one on its own.
+    dense = [f"d{n}" for n in range(20)]
+    fused = reciprocal_rank_fusion([dense, ["sparse-only"]], k=60, weights=[1.0, 0.5])
+    assert [id_ for id_, _ in fused] == dense + ["sparse-only"]
+
+
+def test_rrf_weight_zero_silences_a_ranking_without_dropping_the_other():
+    fused = reciprocal_rank_fusion([["a"], ["b"]], k=60, weights=[1.0, 0.0])
+    assert fused == [("a", 1 / 61), ("b", 0.0)]
+
+
+def test_rrf_rejects_a_weight_per_ranking_mismatch():
+    with pytest.raises(ValueError, match="weights"):
+        reciprocal_rank_fusion([["a"], ["b"]], k=60, weights=[1.0])
+
+
+def test_rrf_rejects_a_negative_weight():
+    # Same reasoning as the negative k: sparse_weight is admin-configurable, and
+    # a ranking that subtracts is not a ranking.
+    with pytest.raises(ValueError, match="weights"):
+        reciprocal_rank_fusion([["a"]], k=60, weights=[-1.0])

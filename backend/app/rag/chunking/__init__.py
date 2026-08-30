@@ -13,6 +13,13 @@ def get_chunking_strategy(settings: Settings) -> ChunkingStrategy:
         return StructureSemanticChunking(
             similarity_threshold=settings.semantic_similarity_threshold,
             max_chunk_tokens=settings.max_chunk_tokens,
+            # CHUNK_SIZE/CHUNK_OVERLAP are the character knobs for BOTH strategies:
+            # fixed slides a CHUNK_SIZE window with CHUNK_OVERLAP of carry-over, and
+            # semantic aims each chunk at CHUNK_SIZE characters with CHUNK_OVERLAP
+            # carried across a size-forced split. Same units, same meaning, so a
+            # second pair of settings would only let the two drift apart.
+            target_chars=settings.chunk_size,
+            overlap_chars=settings.chunk_overlap,
         )
     if name == "fixed":
         return FixedChunking(

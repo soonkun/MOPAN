@@ -30,8 +30,8 @@ def split_sentences(text: str) -> list[str]:
     return [piece.strip() for piece in _SENTENCE_BOUNDARY.split(text) if piece.strip()]
 
 
-def _hard_split(text: str, max_tokens: int) -> list[str]:
-    """Last resort for a single sentence that alone exceeds the limit.
+def _hard_split(text: str, max_tokens: int, max_chars: int = 0) -> list[str]:
+    """Last resort for a single sentence that alone exceeds a bound.
 
     Slicing the token stream on a fixed stride is not safe. cl100k tokenises
     Korean, emoji and other multi-byte characters into fragments *below* one
@@ -47,6 +47,15 @@ def _hard_split(text: str, max_tokens: int) -> list[str]:
     while start < len(token_ids):
         end = min(start + max_tokens, len(token_ids))
         piece = decode_tokens(token_ids[start:end])
+        # A character bound cannot be converted into a token count up front -
+        # cl100k splits Korean BELOW one character and merges English words ABOVE
+        # it - so shrink the token window by the overshoot ratio and re-decode.
+        # `shrunk if shrunk < end else end - 1` is what guarantees termination when
+        # the ratio rounds back to the same window.
+        while max_chars and len(piece) > max_chars and end > start + 1:
+            shrunk = start + max(1, int((end - start) * max_chars / len(piece)))
+            end = shrunk if shrunk < end else end - 1
+            piece = decode_tokens(token_ids[start:end])
         # Stopping at one token guarantees progress for a character wider than
         # the whole limit (a 4-token emoji under a 2-token limit), which no split
         # can render intact anyway.
@@ -58,18 +67,27 @@ def _hard_split(text: str, max_tokens: int) -> list[str]:
     return pieces
 
 
-def split_to_token_limit(text: str, max_tokens: int) -> list[str]:
-    """Split on sentence boundaries until every piece fits under max_tokens."""
+def split_to_token_limit(text: str, max_tokens: int, max_chars: int = 0) -> list[str]:
+    """Split on sentence boundaries until every piece fits under max_tokens, and
+    under max_chars as well when one is given (0 = no character bound).
+
+    The two bounds are not the same kind of thing. max_tokens is the GUARANTEE:
+    nothing this returns exceeds it, because it protects the embedding input limit
+    and the prompt budget. max_chars is the TARGET: it normally just moves a
+    boundary onto an EARLIER sentence, and only reaches for the mid-word hard split
+    when one "sentence" is longer than the target all by itself.
+    """
     if max_tokens < 1:
         # max_chunk_tokens is an operator-facing setting, so 0 is reachable from
         # configuration. Fail with a named cause rather than deep inside a slice.
         raise ValueError("max_tokens must be at least 1")
-    if count_tokens(text) <= max_tokens:
+    if count_tokens(text) <= max_tokens and (not max_chars or len(text) <= max_chars):
         return [text]
 
     pieces: list[str] = []
     current: list[str] = []
     current_tokens = 0
+    current_chars = 0
 
     for sentence in split_sentences(text):
         if current:
@@ -81,18 +99,27 @@ def split_to_token_limit(text: str, max_tokens: int) -> list[str]:
             # never cross a pre-token boundary and the space opens one, so
             # count_tokens(" " + sentence) is the exact incremental cost.
             cost = count_tokens(f" {sentence}")
-            if current_tokens + cost <= max_tokens:
+            fits = current_tokens + cost <= max_tokens and (
+                not max_chars or current_chars + 1 + len(sentence) <= max_chars
+            )
+            if fits:
                 current.append(sentence)
                 current_tokens += cost
+                current_chars += 1 + len(sentence)
                 continue
             pieces.append(" ".join(current))
-            current, current_tokens = [], 0
+            current, current_tokens, current_chars = [], 0, 0
 
         standalone = count_tokens(sentence)
-        if standalone > max_tokens:
-            pieces.extend(_hard_split(sentence, max_tokens))
+        if standalone > max_tokens or (max_chars and len(sentence) > max_chars):
+            # No boundary inside this "sentence" to cut on, so the cut lands
+            # mid-word. Measured on the real corpus: without the character arm 30
+            # of 1267 chunks ran past the target, the longest at 2341 characters -
+            # PDF text with no terminal punctuation at all (numbered tables and
+            # form lines), which sentence splitting cannot reach.
+            pieces.extend(_hard_split(sentence, max_tokens, max_chars))
             continue
-        current, current_tokens = [sentence], standalone
+        current, current_tokens, current_chars = [sentence], standalone, len(sentence)
 
     if current:
         pieces.append(" ".join(current))
@@ -102,12 +129,56 @@ def split_to_token_limit(text: str, max_tokens: int) -> list[str]:
     return pieces or _hard_split(text, max_tokens)
 
 
-def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) -> list[ChunkCandidate]:
+def _sentence_aligned_tail(text: str, overlap_chars: int) -> str:
+    """The last ~overlap_chars of `text`, started at a sentence boundary.
+
+    A raw character tail almost always opens mid-word, and the leading fragment is
+    noise in both the chunk text and its embedding. split_sentences already knows
+    this corpus's terminators (Korean "다." included), so the window's first piece
+    - the truncated one - is dropped. Dropping it can leave almost nothing when one
+    long sentence fills the window, so the aligned tail is only taken while it
+    still carries at least half the requested overlap.
+    """
+    tail = text[-overlap_chars:]
+    if len(text) <= overlap_chars:
+        return tail
+    sentences = split_sentences(tail)
+    if len(sentences) > 1:
+        aligned = " ".join(sentences[1:])
+        if 2 * len(aligned) >= overlap_chars:
+            return aligned
+    return tail
+
+
+def build_size_bounded_candidates(
+    blocks: list[Block],
+    max_chunk_tokens: int,
+    target_chars: int = 0,
+    overlap_chars: int = 0,
+) -> list[ChunkCandidate]:
     """Pass 1 of chunking. Opens a new candidate when a heading arrives OR when
-    adding this piece would exceed max_chunk_tokens, and splits any single block
+    adding this piece would exceed either size bound, and splits any single block
     that is too big on its own. The one exception is a candidate that so far holds
     nothing but headings: it absorbs forward instead of breaking, so a title
     followed straight by a section heading does not ship as a chunk of its own.
+
+    Two size bounds, and they do different jobs. target_chars (0 = off) is the
+    TARGET the chunk aims for; max_chunk_tokens is the GUARANTEE and is never
+    exceeded, because it is what protects the embedding input limit and the prompt
+    budget. On this corpus the character target is what normally binds - Korean
+    measures 0.911 cl100k tokens per character (mean 0.860, max 1.213 over 400
+    stored chunks), so 1000 characters is ~903 tokens, well under the 1300-token
+    ceiling. A pure token bound bites first and yields chunks a third of the target
+    size: MAX_CHUNK_TOKENS=500 cut at ~549 characters and averaged 362.
+
+    A candidate holds target_chars characters INCLUDING its overlap prefix, so each
+    block is split at target_chars - overlap_chars and the two sum back to the
+    target.
+
+    overlap_chars of the previous chunk are repeated at the start of the next -
+    but ONLY when the SIZE bound forced the split. A heading is a boundary the
+    document itself drew; carrying the previous section's tail across it pollutes
+    both the text and the embedding, so a heading-opened chunk starts clean.
 
     Token counts accumulate incrementally, separator included. Re-encoding the
     whole accumulated string on every block append is O(n^2) tiktoken work over a
@@ -115,6 +186,12 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
     an under-count is how a chunk gets past the limit it is supposed to enforce.
     See NEWLINE_TOKENS for the residual case where the separator costs 2, not 1.
     """
+    if target_chars and not 0 <= overlap_chars < target_chars:
+        raise ValueError("overlap_chars must satisfy 0 <= overlap_chars < target_chars")
+    # The newline joining the overlap prefix to the piece is a character of the
+    # chunk too, so it comes out of the piece's budget - without it the target is
+    # exceeded by exactly 1 on every overlapped chunk (measured: 4 of 1309 at 1001).
+    piece_chars = max(1, target_chars - overlap_chars - bool(overlap_chars)) if target_chars else 0
     candidates: list[ChunkCandidate] = []
     current: ChunkCandidate | None = None
     pending_break = False
@@ -136,13 +213,20 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
         # ponytail: if a heading stack ever fills the limit the budget goes <1 and
         # we fall back, accepting the orphan rather than shredding the body.
         limit = max_chunk_tokens
+        char_limit = piece_chars
         if heading_only and current is not None:
             budget = max_chunk_tokens - current.token_count - NEWLINE_TOKENS
             if budget >= 1:
                 limit = budget
+            # Same reasoning for the character target: without it `over_target`
+            # fires on the body's first piece and orphans the heading exactly the
+            # way `over_limit` used to.
+            char_budget = piece_chars - current.char_count - 1
+            if piece_chars and char_budget >= 1:
+                char_limit = char_budget
         # An empty or whitespace-only block would otherwise emit a zero-length
         # candidate, which costs an embedding call and retrieves nothing.
-        pieces = [p for p in split_to_token_limit(block.text, limit) if p.strip()]
+        pieces = [p for p in split_to_token_limit(block.text, limit, char_limit) if p.strip()]
         if not pieces:
             # ...but a heading with no text is still a section boundary, and
             # text_parser emits one for a bare "#" line. Dropping it outright
@@ -157,6 +241,11 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
                 current is not None
                 and current.token_count + NEWLINE_TOKENS + piece_tokens > max_chunk_tokens
             )
+            over_target = (
+                target_chars > 0
+                and current is not None
+                and current.char_count + 1 + len(piece) > target_chars
+            )
             # A candidate holding nothing but headings is orphaned text, not a
             # chunk: `# Title` followed straight by `## Section` emitted the title
             # on its own, measured at 12 tokens / 10 characters on the markdown
@@ -164,17 +253,35 @@ def build_size_bounded_candidates(blocks: list[Block], max_chunk_tokens: int) ->
             # So a section break is only honoured once the candidate has a body;
             # until then the next piece is absorbed. The size bound still wins,
             # which is what keeps a heading stack from growing past the limit.
-            starts_new = (
-                current is None
-                or over_limit
-                or (not heading_only and (pending_break or block.block_type == "heading"))
-            )
+            heading_break = not heading_only and (pending_break or block.block_type == "heading")
+            starts_new = current is None or over_limit or over_target or heading_break
             pending_break = False
             if starts_new:
+                # Overlap only where the SIZE bound forced the cut. `heading_break`
+                # and a heading piece are boundaries the document drew: carrying the
+                # previous section's tail across one puts text in a chunk the author
+                # placed in a different section, and the embedding then describes
+                # both. It would also hand a heading-only candidate a body it did
+                # not introduce, re-opening the orphan case the branch below guards.
+                prefix = ""
+                prefix_tokens = 0
+                if (
+                    overlap_chars
+                    and current is not None
+                    and not heading_break
+                    and block.block_type != "heading"
+                ):
+                    tail = _sentence_aligned_tail(current.content, overlap_chars)
+                    tail_tokens = count_tokens(tail) + NEWLINE_TOKENS if tail else 0
+                    # The target may be met approximately; the ceiling may not. A
+                    # limit too small to hold overlap plus content ships without it.
+                    if tail and tail_tokens + piece_tokens <= max_chunk_tokens:
+                        prefix, prefix_tokens = tail, tail_tokens
+                content = f"{prefix}\n{piece}" if prefix else piece
                 current = ChunkCandidate(
-                    content=piece,
-                    token_count=piece_tokens,
-                    char_count=len(piece),
+                    content=content,
+                    token_count=piece_tokens + prefix_tokens,
+                    char_count=len(content),
                     page=block.page,
                     section=block.section,
                 )

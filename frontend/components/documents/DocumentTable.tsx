@@ -51,7 +51,13 @@ export function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export default function DocumentTable({ documents }: { documents: DocumentItem[] }) {
+export default function DocumentTable({
+  documents,
+  onDownload,
+}: {
+  documents: DocumentItem[];
+  onDownload: (doc: DocumentItem) => void;
+}) {
   if (documents.length === 0) {
     return <p className="py-8 text-center text-body text-on-surface-variant">문서가 없습니다.</p>;
   }
@@ -73,6 +79,7 @@ export default function DocumentTable({ documents }: { documents: DocumentItem[]
                 indexed. Two columns would always show the same value. */}
             <th scope="col" className="px-3 py-3">상태</th>
             <th scope="col" className="px-3 py-3 text-right">크기</th>
+            <th scope="col" className="px-3 py-3">원본</th>
           </tr>
         </thead>
         <tbody>
@@ -114,6 +121,23 @@ export default function DocumentTable({ documents }: { documents: DocumentItem[]
                 <StalledNote doc={doc} />
               </td>
               <td className="px-3 py-3 text-right text-on-surface-variant">{formatSize(doc.size_bytes)}</td>
+              <td className="px-3 py-3">
+                {/* A button, not an <a href download>: Chrome saves whatever
+                    body a same-origin response carries, so a document whose
+                    stored file has gone missing would download its own 404 as a
+                    file full of JSON. onDownload routes the Korean detail to
+                    the page's error banner instead. The accessible name carries
+                    the filename - every row's control would otherwise be named
+                    다운로드, which names nothing in a list. */}
+                <button
+                  type="button"
+                  onClick={() => onDownload(doc)}
+                  aria-label={`${doc.filename} 원본 파일 다운로드`}
+                  className="btn-text btn-compact"
+                >
+                  받기
+                </button>
+              </td>
             </tr>
           ))}
         </tbody>

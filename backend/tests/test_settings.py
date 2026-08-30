@@ -33,6 +33,11 @@ def test_values_are_read_from_the_env_file(tmp_path, monkeypatch):
 def test_defaults_cover_binding_requirements():
     settings = Settings()
     assert settings.rrf_k == 60
+    # Not 1.0: the sparse half is a ranking signal, not a peer retriever. The
+    # measurement is in the note over the field.
+    # 1.0, the textbook RRF peer weight. It was briefly 0.5, fitted to a
+    # corpus the old parser had scrambled; see the note in config.py.
+    assert settings.sparse_weight == 1.0
     assert settings.embedding_dim == 1536
     assert settings.chunking_strategy == "semantic"
     assert settings.max_upload_size_mb == 50
@@ -215,3 +220,17 @@ def test_non_positive_attachment_limits_are_rejected(field, value):
     # upload impossible with a message that blames the user's file.
     with pytest.raises(ValueError, match=field.upper()):
         Settings(**{field: value})
+
+
+@pytest.mark.parametrize("value", [-0.1, -1.0])
+def test_negative_sparse_weight_is_rejected(value):
+    # reciprocal_rank_fusion raises on a negative weight for the same reason it
+    # raises on a negative k: a ranking that subtracts is not a ranking, and the
+    # failure would land on the first chat request instead of at boot.
+    with pytest.raises(ValueError, match="SPARSE_WEIGHT"):
+        Settings(sparse_weight=value)
+
+
+def test_sparse_weight_zero_is_accepted():
+    # 0 is the documented way to run dense-only without deleting the sparse half.
+    assert Settings(sparse_weight=0).sparse_weight == 0
