@@ -79,6 +79,33 @@ export default function Composer({
     el.style.height = `${Math.min(el.scrollHeight, MAX_HEIGHT)}px`;
   }, [value, textareaRef]);
 
+  /** Put the caret back in the textarea after the file sheet closes.
+   *
+   * Retaining focus (see the + button's onMouseDown) is what keeps the
+   * keyboard up on the way IN. It does not bring it back on the way OUT: iOS
+   * hides the keyboard for the duration of a system sheet regardless of who
+   * holds focus. Re-focusing here runs inside the gesture the pick completed,
+   * which is the one place the platform allows it.
+   *
+   * Guarded on the element still being there - a stream can unmount the
+   * composer between opening the sheet and closing it. */
+  function restoreKeyboard() {
+    textareaRef.current?.focus();
+  }
+
+  // `cancel` on a file input - dismissing the sheet without choosing anything -
+  // is attached natively because React's InputHTMLAttributes does not declare
+  // onCancel, so the JSX prop is a type error rather than a listener. Without
+  // this, backing out of the picker leaves a focused composer and no keyboard,
+  // which is the same complaint as tapping + in the first place.
+  useEffect(() => {
+    const input = fileRef.current;
+    if (!input) return;
+    const onCancel = () => textareaRef.current?.focus();
+    input.addEventListener("cancel", onCancel);
+    return () => input.removeEventListener("cancel", onCancel);
+  }, [textareaRef]);
+
   function take(list: FileList | null) {
     if (!list?.length) return;
     onFiles(Array.from(list));
@@ -118,6 +145,19 @@ export default function Composer({
             activated from the keyboard at all. */}
         <button
           type="button"
+          // Tapping + must not close the keyboard. Reaching for the attach
+          // button is the user continuing the same action - they are still
+          // composing - and a keyboard that drops costs them the tap to bring
+          // it back plus the scroll jump when the viewport resizes twice.
+          //
+          // A pointer press moves focus by DEFAULT, which blurs the textarea
+          // and dismisses the keyboard with it. preventDefault on mousedown
+          // suppresses only that focus shift; the click still fires, which is
+          // why this is the long-standing pattern for editor toolbar buttons.
+          // mousedown rather than pointerdown/touchstart: cancelling a touch
+          // sequence that early can also swallow the click on some browsers,
+          // and iOS synthesises mousedown before click, so this covers both.
+          onMouseDown={(event) => event.preventDefault()}
           onClick={() => fileRef.current?.click()}
           aria-label="파일 첨부"
           className="icon-btn"
@@ -137,6 +177,7 @@ export default function Composer({
           onChange={(e) => {
             take(e.target.files);
             e.target.value = "";
+            restoreKeyboard();
           }}
         />
 
