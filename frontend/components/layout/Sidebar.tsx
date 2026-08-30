@@ -15,6 +15,106 @@ import type { Conversation, User } from "@/lib/types";
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+/** A glyph per function, keyed by the route it stands for.
+ *
+ * Inline SVG on `currentColor`, exactly the way ThemeToggle.tsx already does
+ * it, and deliberately NOT an icon package: a dozen paths do not justify a
+ * dependency, a bundle, or a second source of truth for what "에이전트" looks
+ * like. The agent shield is the same path the composer's agent control draws,
+ * because they mean the same thing and a user should not have to learn two.
+ *
+ * Every one of these is DECORATIVE. The label beside it is the accessible name
+ * and the icon repeats it, so the <svg> is aria-hidden and contributes nothing
+ * to the name - a link that announced "문서 문서" would be the alternative.
+ *
+ * The conversation history rows deliberately get none. They are titles, not
+ * functions: one identical glyph repeated down twenty rows says nothing that
+ * distinguishes them, and it would spend 32px of a 224px row on decoration in
+ * the one place where the text already truncates. */
+const NAV_ICON: Record<string, React.ReactNode> = {
+  // 새 대화 - a pencil, the compose mark.
+  "/chat": (
+    <>
+      <path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17Z" />
+      <path d="M14.5 7.5 16.5 9.5" />
+    </>
+  ),
+  // 문서 - a page with a folded corner.
+  "/documents": (
+    <>
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" />
+      <path d="M14 3v5h5" />
+      <path d="M9 13h6M9 17h4" />
+    </>
+  ),
+  // 분류 관리 - a folder, which is what a collection is.
+  "/collections": <path d="M3 8a2 2 0 0 1 2-2h3.2l1.8 2H19a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
+  // 사용자 관리 - two people.
+  "/users": (
+    <>
+      <path d="M15 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-4A3.5 3.5 0 0 0 4 18.5V20" />
+      <circle cx="9.5" cy="8" r="3.2" />
+      <path d="M17 11.2a3 3 0 0 0 0-6" />
+      <path d="M20 20v-1.5a3.5 3.5 0 0 0-2.6-3.4" />
+    </>
+  ),
+  // 프롬프트 관리 - a speech bubble with lines in it: the text the system says.
+  "/prompts": (
+    <>
+      <path d="M20 12a7 7 0 0 1-7 7H8.5L4 22v-4.2A7 7 0 0 1 4 12v-.5A6.5 6.5 0 0 1 10.5 5h3A6.5 6.5 0 0 1 20 11.5Z" />
+      <path d="M8.5 10.5h7M8.5 14h4" />
+    </>
+  ),
+  // 에이전트 관리 - the shield-check the composer's agent control uses.
+  "/agents": (
+    <>
+      <path d="M12 3 4 7v5c0 4.4 3.2 8.2 8 9 4.8-.8 8-4.6 8-9V7l-8-4Z" />
+      <path d="m9 12 2 2 4-4" />
+    </>
+  ),
+  // MCP 서버 관리 - a two-unit server rack with its status lamps.
+  "/mcp": (
+    <>
+      <rect x="3.5" y="4" width="17" height="6.5" rx="1.8" />
+      <rect x="3.5" y="13.5" width="17" height="6.5" rx="1.8" />
+      <path d="M7 7.2h.01M7 16.7h.01" />
+    </>
+  ),
+  // 고급 설정 - sliders, not a cog: these are values an admin tunes.
+  "/settings": (
+    <>
+      <path d="M4 7h6M14 7h6M4 17h10M18 17h2" />
+      <circle cx="12" cy="7" r="2" />
+      <circle cx="16" cy="17" r="2" />
+    </>
+  ),
+  // 로그아웃 - out through the door.
+  logout: (
+    <>
+      <path d="M15 12H4" />
+      <path d="m7.5 8.5-3.5 3.5 3.5 3.5" />
+      <path d="M11 5h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-6" />
+    </>
+  ),
+};
+
+function NavIcon({ name }: { name: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      className="h-5 w-5 shrink-0"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {NAV_ICON[name]}
+    </svg>
+  );
+}
+
 export default function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
@@ -214,12 +314,18 @@ export default function Sidebar() {
         onClick={() => setOpen(false)}
         // The background alone said "you are here" to sighted users only.
         aria-current={active ? "page" : undefined}
-        className={`rounded-full px-4 py-2 text-label transition-colors duration-150 ${
+        // gap-3 (12px) beside a 20px icon inside px-4 leaves 224 - 32 = 192px
+        // for the label in a 280px sidebar. The longest is MCP 서버 관리 at
+        // ~84px, so nothing here comes near truncating; no `truncate` class,
+        // because a label that cannot overflow does not need one and one that
+        // could should be shortened instead.
+        className={`flex items-center gap-3 rounded-full px-4 py-2 text-label transition-colors duration-150 ${
           active
             ? "bg-primary-container font-medium text-on-primary-container"
             : "text-on-surface-variant hover:bg-surface-container-high"
         }`}
       >
+        <NavIcon name={link.href} />
         {link.label}
       </Link>
     );
@@ -406,7 +512,8 @@ export default function Sidebar() {
         {/* type="button" on every button in this file: the default is
             "submit", which is a live bug the moment one of them ends up
             inside a <form>. */}
-        <button type="button" onClick={() => void handleLogout()} className="btn-tonal w-full">
+        <button type="button" onClick={() => void handleLogout()} className="btn-tonal w-full gap-2">
+          <NavIcon name="logout" />
           로그아웃
         </button>
       </div>

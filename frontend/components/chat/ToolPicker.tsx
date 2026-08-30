@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { McpToolOption, PendingToolCall } from "@/lib/types";
 
 /** Picking ONE MCP tool to run before the next question is answered.
@@ -8,8 +8,12 @@ import type { McpToolOption, PendingToolCall } from "@/lib/types";
  * A native <dialog> opened with showModal(), for the same reason ConfirmDialog
  * and ModelPicker use one: the focus trap, Escape, the inert background and
  * top-layer stacking are all the platform's, and none of it has to be written
- * here. Unlike ModelPicker this really is a modal - it has a form in it - so it
- * keeps the scrim on desktop too.
+ * here. Unlike the two pickers this really is a modal - it has a form in it, it
+ * is centred rather than anchored, and it keeps the scrim on desktop - which is
+ * why it does NOT use PopoverSheet.
+ *
+ * Controlled like the other two: the composer's + menu is the only way in, and
+ * the menu closes before this opens.
  *
  * The argument fields are generated from the tool's own `input_schema`, which is
  * discovered at runtime and therefore cannot be a compile-time form. Only
@@ -42,13 +46,20 @@ function requiredOf(schema: Record<string, unknown>): string[] {
 export default function ToolPicker({
   tools,
   onSelect,
+  open,
+  onClose,
 }: {
   tools: McpToolOption[];
   onSelect: (call: PendingToolCall) => void;
+  open: boolean;
+  /** A dismissal, a 취소 or a committed 추가. Focus return belongs to the
+   * composer's `closeSheet`, which is the one owner of it - see PopoverSheet. */
+  onClose: () => void;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const [open, setOpen] = useState(false);
+  // Same reasoning as PopoverSheet's: a close the OWNER asked for by flipping
+  // `open` must not fire onClose back at it.
+  const closingRef = useRef(false);
   const [selectedId, setSelectedId] = useState("");
   // Keyed by tool id AND property name, so switching tools in the same dialog
   // does not carry a value across into a field that happens to share a name.
@@ -65,15 +76,24 @@ export default function ToolPicker({
     return [...groups.entries()];
   }, [tools]);
 
-  // Nothing to pick from: an admin has registered no server, or every tool is
-  // disabled. A dead button that opens an empty list is worse than no button.
-  if (tools.length === 0) return null;
-
-  function openPicker() {
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog || tools.length === 0) return;
+    if (!open) {
+      if (dialog.open) {
+        closingRef.current = true;
+        dialog.close();
+      }
+      return;
+    }
+    if (dialog.open) return;
     setSelectedId((current) => current || tools[0].id);
-    dialogRef.current?.showModal();
-    setOpen(true);
-  }
+    dialog.showModal();
+  }, [open, tools]);
+
+  // Nothing to pick from: an admin has registered no server, or every tool is
+  // disabled. The + menu drops its 도구 사용 row for the same reason.
+  if (tools.length === 0) return null;
 
   function commit() {
     if (!selected || missing.length > 0) return;
@@ -95,7 +115,7 @@ export default function ToolPicker({
       args[name] = raw;
     }
     onSelect({ tool: selected, arguments: args });
-    dialogRef.current?.close();
+    onClose();
   }
 
   const required = selected ? requiredOf(selected.input_schema) : [];
@@ -110,156 +130,128 @@ export default function ToolPicker({
     : [];
 
   return (
-    <>
-      <button
-        ref={triggerRef}
-        type="button"
-        // Same reason as the + button: reaching for a tool is the user still
-        // composing, and a pointer press that moves focus off the textarea
-        // dismisses the phone keyboard under them.
-        onMouseDown={(event) => event.preventDefault()}
-        onClick={openPicker}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        aria-label="도구 사용"
-        className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full px-2 text-label text-on-surface-variant transition-colors duration-150 hover:bg-surface-container-high sm:px-3"
-      >
-        <svg
-          aria-hidden="true"
-          viewBox="0 0 24 24"
-          className="h-4 w-4 shrink-0"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-        >
-          <path d="M14.5 5.5a3.5 3.5 0 0 0 4.6 4.6l-8.9 8.9a2.2 2.2 0 0 1-3.1-3.1z" />
-          <path d="M5 5l3 3" />
-        </svg>
-        <span aria-hidden="true" className="hidden sm:inline">
-          도구
-        </span>
-      </button>
-
-      <dialog
-        ref={dialogRef}
-        aria-labelledby="tool-picker-title"
-        onClose={() => {
-          setOpen(false);
-          triggerRef.current?.focus();
+    <dialog
+      ref={dialogRef}
+      aria-labelledby="tool-picker-title"
+      onClose={() => {
+        if (closingRef.current) {
+          closingRef.current = false;
+          return;
+        }
+        onClose();
+      }}
+      className="m-auto w-[min(32rem,calc(100vw-2rem))] rounded-lg bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim"
+    >
+      {/* A div, not a form - see `missing` above. Enter inside a field commits
+          the tool, which is the one thing a form would otherwise have given
+          for free, and preventDefault is what stops that Enter from reaching
+          the composer form as an implicit submit. */}
+      <div
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" || !(event.target instanceof HTMLInputElement)) return;
+          event.preventDefault();
+          commit();
         }}
-        className="m-auto w-[min(32rem,calc(100vw-2rem))] rounded-lg bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim"
+        className="space-y-4 p-6"
       >
-        {/* A div, not a form - see `missing` above. Enter inside a field commits
-            the tool, which is the one thing a form would otherwise have given
-            for free, and preventDefault is what stops that Enter from reaching
-            the composer form as an implicit submit. */}
-        <div
-          onKeyDown={(event) => {
-            if (event.key !== "Enter" || !(event.target instanceof HTMLInputElement)) return;
-            event.preventDefault();
-            commit();
-          }}
-          className="space-y-4 p-6"
-        >
-          <h2 id="tool-picker-title" className="text-title font-medium">
-            도구 사용
-          </h2>
+        <h2 id="tool-picker-title" className="text-title font-medium">
+          도구 사용
+        </h2>
 
-          <div>
-            <label htmlFor="tool-picker-select" className="text-label font-medium text-on-surface-variant">
-              도구
-            </label>
-            <select
-              id="tool-picker-select"
-              value={selectedId}
-              onChange={(e) => setSelectedId(e.target.value)}
-              className="field mt-1 w-full"
-            >
-              {byServer.map(([server, group]) => (
-                <optgroup key={server} label={server}>
-                  {group.map((tool) => (
-                    <option key={tool.id} value={tool.id}>
-                      {tool.name} · {RISK_LABEL[tool.risk_level] ?? tool.risk_level}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
-          </div>
+        <div>
+          <label htmlFor="tool-picker-select" className="text-label font-medium text-on-surface-variant">
+            도구
+          </label>
+          <select
+            id="tool-picker-select"
+            value={selectedId}
+            onChange={(e) => setSelectedId(e.target.value)}
+            className="field mt-1 w-full"
+          >
+            {byServer.map(([server, group]) => (
+              <optgroup key={server} label={server}>
+                {group.map((tool) => (
+                  <option key={tool.id} value={tool.id}>
+                    {tool.name} · {RISK_LABEL[tool.risk_level] ?? tool.risk_level}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+        </div>
 
-          {selected && (
-            <>
-              {selected.description && (
-                <p className="text-body text-on-surface-variant">{selected.description}</p>
-              )}
-              {propertiesOf(selected.input_schema).length === 0 ? (
-                <p className="text-caption text-on-surface-variant">입력값이 필요 없는 도구입니다.</p>
-              ) : (
-                propertiesOf(selected.input_schema).map(([name, property]) => {
-                  const key = `${selected.id}:${name}`;
-                  const id = `tool-arg-${name}`;
-                  if (property.type === "boolean") {
-                    return (
-                      <label key={key} className="flex items-center gap-2 text-body">
-                        <input
-                          id={id}
-                          type="checkbox"
-                          checked={values[key] === "true"}
-                          onChange={(e) =>
-                            setValues((prev) => ({ ...prev, [key]: String(e.target.checked) }))
-                          }
-                          className="h-4 w-4 accent-primary"
-                        />
-                        {property.title ?? name}
-                      </label>
-                    );
-                  }
+        {selected && (
+          <>
+            {selected.description && (
+              <p className="text-body text-on-surface-variant">{selected.description}</p>
+            )}
+            {propertiesOf(selected.input_schema).length === 0 ? (
+              <p className="text-caption text-on-surface-variant">입력값이 필요 없는 도구입니다.</p>
+            ) : (
+              propertiesOf(selected.input_schema).map(([name, property]) => {
+                const key = `${selected.id}:${name}`;
+                const id = `tool-arg-${name}`;
+                if (property.type === "boolean") {
                   return (
-                    <div key={key}>
-                      <label htmlFor={id} className="text-label font-medium text-on-surface-variant">
-                        {property.title ?? name}
-                        {required.includes(name) && <span className="text-error"> *</span>}
-                      </label>
+                    <label key={key} className="flex items-center gap-2 text-body">
                       <input
                         id={id}
-                        type={property.type === "number" || property.type === "integer" ? "number" : "text"}
-                        value={values[key] ?? ""}
-                        onChange={(e) => setValues((prev) => ({ ...prev, [key]: e.target.value }))}
-                        aria-required={required.includes(name) || undefined}
-                        className="field mt-1 w-full"
+                        type="checkbox"
+                        checked={values[key] === "true"}
+                        onChange={(e) =>
+                          setValues((prev) => ({ ...prev, [key]: String(e.target.checked) }))
+                        }
+                        className="h-4 w-4 accent-primary"
                       />
-                      {property.description && (
-                        <p className="mt-1 text-caption text-on-surface-variant">{property.description}</p>
-                      )}
-                    </div>
+                      {property.title ?? name}
+                    </label>
                   );
-                })
-              )}
-              {/* Said out loud, on the screen where the call is made: the result
-                  is third-party text this system treats as reference data, never
-                  as an instruction. */}
-              <p className="rounded-sm bg-surface-container-high p-3 text-caption text-on-surface-variant">
-                도구가 돌려준 결과는 외부에서 온 참고 자료로만 쓰이며, 그 안의 지시는 따르지
-                않습니다.
-              </p>
-            </>
-          )}
+                }
+                return (
+                  <div key={key}>
+                    <label htmlFor={id} className="text-label font-medium text-on-surface-variant">
+                      {property.title ?? name}
+                      {required.includes(name) && <span className="text-error"> *</span>}
+                    </label>
+                    <input
+                      id={id}
+                      type={property.type === "number" || property.type === "integer" ? "number" : "text"}
+                      value={values[key] ?? ""}
+                      onChange={(e) => setValues((prev) => ({ ...prev, [key]: e.target.value }))}
+                      aria-required={required.includes(name) || undefined}
+                      className="field mt-1 w-full"
+                    />
+                    {property.description && (
+                      <p className="mt-1 text-caption text-on-surface-variant">{property.description}</p>
+                    )}
+                  </div>
+                );
+              })
+            )}
+            {/* Said out loud, on the screen where the call is made: the result
+                is third-party text this system treats as reference data, never
+                as an instruction. */}
+            <p className="rounded-sm bg-surface-container-high p-3 text-caption text-on-surface-variant">
+              도구가 돌려준 결과는 외부에서 온 참고 자료로만 쓰이며, 그 안의 지시는 따르지
+              않습니다.
+            </p>
+          </>
+        )}
 
-          <div className="flex justify-end gap-2">
-            <button type="button" onClick={() => dialogRef.current?.close()} className="btn-text">
-              취소
-            </button>
-            <button
-              type="button"
-              onClick={commit}
-              disabled={missing.length > 0}
-              className="btn-filled"
-            >
-              추가
-            </button>
-          </div>
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="btn-text">
+            취소
+          </button>
+          <button
+            type="button"
+            onClick={commit}
+            disabled={missing.length > 0}
+            className="btn-filled"
+          >
+            추가
+          </button>
         </div>
-      </dialog>
-    </>
+      </div>
+    </dialog>
   );
 }

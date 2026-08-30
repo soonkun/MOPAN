@@ -57,16 +57,6 @@ const ORCHESTRATOR_STORAGE_KEY = "mopan.orchestrator";
 // exactly as it behaved before agents existed - the safe direction.
 const AGENT_STORAGE_KEY = "mopan.agent";
 
-// §8: 3-4 chips that fill the composer when clicked. Deliberately about
-// documents and not about the corpus that happens to be loaded - this is a
-// document-QA product and the corpus is incidental to it.
-const SUGGESTIONS = [
-  "이 문서의 핵심 내용을 세 줄로 요약해 주세요",
-  "첨부한 파일에서 주요 수치를 표로 정리해 주세요",
-  "두 문서의 내용이 어긋나는 부분을 찾아 주세요",
-  "규정에서 담당자의 의무가 무엇인지 알려 주세요",
-];
-
 function rejection(file: File): string | null {
   // Same rule as validation.py's extension_of: no dot means no extension, not
   // "the whole name is the extension".
@@ -611,11 +601,6 @@ export default function ChatWindow({
     }
   }
 
-  function fill(text: string) {
-    setInput(text);
-    textareaRef.current?.focus();
-  }
-
   const hasFiles = (e: React.DragEvent) => e.dataTransfer.types.includes("Files");
 
   // h-full, not h-screen: this fills `main`, and the (app) layout's h-screen
@@ -663,44 +648,72 @@ export default function ChatWindow({
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-transcript space-y-8 px-4 py-8 sm:px-6">
           {loaded && !error && messages.length === 0 && !sending && (
-            // §8 empty state: centred, `display` size, the greeting in the
-            // brand gradient, then 3-4 suggestion chips that fill the composer.
-            // break-keep (word-break: keep-all) because at 36px in a 343px
-            // column the browser's default breaks Korean between syllables -
-            // measured at 375px, "무엇이든" split across two lines as 무 / 엇이든.
-            // keep-all breaks at spaces instead, which is how the language
-            // reads. Only needed at display size; at 14-16px it is invisible.
-            <div className="mt-12">
+            // The masthead. It replaced a one-line invitation - "등록된 문서에
+            // 대해 무엇이든 물어보세요." - and four suggestion chips, both
+            // removed on the owner's instruction: the chips guessed at
+            // questions nobody had, and the line described a document-QA
+            // chatbot, which is not what this is.
+            //
+            // What it says instead is the product's own name, twice. 모판 is
+            // the seedling tray a rice farmer raises one crop in and
+            // transplants into any number of different fields, and it is what
+            // the mascot is carrying; MOPAN is Modular Orchestration Platform
+            // for Agent Nexus. The two readings say the same thing from
+            // opposite ends, which is why both are on screen and neither needs
+            // a sentence explaining it.
+            //
+            // §2 puts the gradient on the wordmark. It is on 모판 alone here -
+            // NOT on the body text under it, which is where it used to be: a
+            // whole sentence in a three-stop gradient is a surface treatment
+            // wearing a wordmark's clothes.
+            <div className="mt-12 flex flex-col items-center text-center">
               {/* See the note at the top of this file for why this is a plain
-                  <img> and why it is decorative. mt-12 rather than mt-24: the
-                  mascot occupies the space the old top margin was holding, and
-                  on a 390px phone the greeting was already close to the fold. */}
+                  <img> and why it is decorative. */}
               <img
                 src="/mascot.png"
                 alt=""
                 aria-hidden="true"
                 width={720}
                 height={631}
-                className="mx-auto mb-6 h-auto w-48 md:w-60"
+                className="mb-6 h-auto w-40 md:w-56"
               />
-              {/* 36px is the display size for a desktop column. On a 390px
-                  phone the same string wraps to two lines and eats the top
-                  half of the screen, so it steps down below md. */}
-              <p className="break-keep text-center text-headline md:text-display">
-                <span className="text-gradient-brand">등록된 문서에 대해 무엇이든 물어보세요.</span>
+              {/* h1 because this screen has none otherwise, and the transcript
+                  that replaces it has none either - a page whose only heading
+                  is the sidebar's would announce as unstructured.
+                  Two characters at 36px, so unlike the sentence it replaced
+                  there is nothing here that can wrap at 390px. */}
+              <h1 className="text-display font-medium">
+                <span className="text-gradient-brand">모판</span>
+              </h1>
+              {/* The English reading, with the five letters the name is built
+                  from carried at full contrast so the acronym is legible
+                  without a gloss. 45 Latin characters at 12px is ~270px, which
+                  clears a 390px phone's 358px column on one line - measured. */}
+              <p className="mt-1 text-caption tracking-wide text-on-surface-variant">
+                <b className="font-medium text-on-surface">M</b>odular{" "}
+                <b className="font-medium text-on-surface">O</b>rchestration{" "}
+                <b className="font-medium text-on-surface">P</b>latform for{" "}
+                <b className="font-medium text-on-surface">A</b>gent{" "}
+                <b className="font-medium text-on-surface">N</b>exus
               </p>
-              <div className="mt-10 flex flex-wrap justify-center gap-2">
-                {SUGGESTIONS.map((text) => (
-                  <button
-                    key={text}
-                    type="button"
-                    onClick={() => fill(text)}
-                    className="break-keep rounded-full bg-surface-container px-4 py-2 text-label text-on-surface-variant transition-colors duration-150 hover:bg-surface-container-high"
-                  >
-                    {text}
-                  </button>
-                ))}
-              </div>
+              {/* The one rule on this screen, and it is doing a masthead's job:
+                  separating the name from what the name means. §1 allows a
+                  border where it carries meaning. w-12 rather than full width -
+                  a full-width rule would read as a section divider. */}
+              <hr className="my-5 w-12 border-t border-outline-variant" />
+              {/* break-keep (word-break: keep-all): the browser's default
+                  breaks Korean between syllables, and at 390px that split
+                  words mid-word in the line below. keep-all breaks at spaces
+                  instead, which is how the language reads. */}
+              <p className="max-w-[32rem] break-keep text-body-lg text-on-surface">
+                한 판에서 길러 어느 논에나 옮겨 심습니다.
+              </p>
+              {/* 32rem, not 28: at 28 the line below broke after 베이스 and left
+                  시스템입니다. alone on a second line. It is one line on a
+                  desktop column now and two on a phone, where it has to be. */}
+              <p className="mt-2 max-w-[32rem] break-keep text-body text-on-surface-variant">
+                RAG · MCP · LLM · 에이전트를 직접 등록하고 조합하는 베이스 시스템입니다.
+              </p>
             </div>
           )}
           {messages.map((m) => (

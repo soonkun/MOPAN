@@ -30,6 +30,7 @@ PLANS = [
     "docs/superpowers/plans/2026-08-30-slice-4-agents.md",
     "docs/superpowers/plans/2026-08-30-neighbour-expansion.md",
     "docs/superpowers/plans/2026-08-30-prompt-budget.md",
+    "docs/superpowers/plans/2026-08-31-ui-masthead-composer-sidebar.md",
 ]
 
 missing = [p for p in PLANS if not (REPO / p).exists()]
