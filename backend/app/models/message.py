@@ -7,6 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.attachment import Attachment
 from app.models.base import Base
+from app.models.feedback import MessageFeedback
 
 MESSAGE_ROLES = ("user", "assistant")
 
@@ -36,6 +37,17 @@ class Message(Base):
         lazy="selectin", order_by=Attachment.created_at, viewonly=True
     )
 
+    # A list, not uselist=False, even though a message can only ever carry one
+    # rating today: a conversation is owner-scoped, so the only person who can
+    # rate this message is its owner, and uq_message_feedback_message_user makes
+    # that one row. Modelling it as one-to-one would bake that reasoning into the
+    # mapper, and the day an admin view is allowed to rate somebody else's answer
+    # a second row would raise inside serialisation instead of being ignored.
+    # viewonly and selectin for the same two reasons `attachments` is: the write
+    # is a single ON CONFLICT statement whose constraint is the guard, and a lazy
+    # load at attribute access raises MissingGreenlet on an async session.
+    feedback: Mapped[list[MessageFeedback]] = relationship(lazy="selectin", viewonly=True)
+
     # Observability seam (Slice 5 reads these; Slice 4 fills prompt_version).
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     prompt_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -45,6 +57,23 @@ class Message(Base):
     )
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     retrieval_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # What the columns above could NOT hold, and the reason the trace screen was
+    # not free: `citations` records only the evidence the model actually cited,
+    # and the per-stage scores Slice 1 kept separate (`vector_rank`,
+    # `keyword_rank`, `rrf_score`, `rerank_score`) live in Evidence.metadata in
+    # memory and reached no column at all. Above all, evidence that was RETRIEVED
+    # and then CUT by ANSWER_CONTEXT_TOKEN_BUDGET left no record anywhere - and
+    # "it was rank 9 and the budget stopped at 8" is the single most common
+    # answer to "why did it not use my document".
+    #
+    # JSONB, not a `trace_evidence` table, and that is the Slice 3 seam: an
+    # execution plan and its MCP steps are a new key in this object, not a
+    # migration. The shape is written by chat.service.build_trace and read by
+    # app/schemas/observability.py, which tolerates {} for every message written
+    # before this column existed.
+    trace: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
 
     # clock_timestamp(), NOT now(): now() is transaction start time, so the user
     # and assistant messages written in one commit would share a timestamp and

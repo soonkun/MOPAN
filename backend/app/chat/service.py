@@ -8,9 +8,10 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.attachments.service import claim as claim_attachments
-from app.chat.prompt import build_prompt, get_prompt, new_nonce
+from app.chat.prompt import PromptTemplate, build_prompt, get_prompt, new_nonce
 from app.core.config import Settings
 from app.core.logging import log_event
+from app.core.tokens import count_tokens
 from app.llm.base import LLMProvider
 from app.models.conversation import Conversation
 from app.models.message import Message
@@ -37,6 +38,10 @@ class ChatAnswer:
     latency_ms: int = 0
     prompt_name: str = ""
     prompt_version: str = ""
+    # Everything the columns cannot hold: every retrieved item with its per-stage
+    # scores, and whether the token budget let it reach the prompt. See
+    # build_trace and app/models/message.py:Message.trace.
+    trace: dict = field(default_factory=dict)
 
 
 async def retrieve(
@@ -117,6 +122,86 @@ def _citations_from(answer_text: str, used: list[Evidence]) -> list[dict]:
     return citations
 
 
+TRACE_VERSION = 1
+
+
+def build_trace(
+    evidence: list[Evidence],
+    used: list[Evidence],
+    *,
+    settings: Settings,
+    prompt: PromptTemplate,
+) -> dict:
+    """Everything that was retrieved, and whether it reached the prompt.
+
+    THE CUT ITEMS ARE THE POINT. `citations` records only what the model cited,
+    so an item that was retrieved at rank 9 and dropped by
+    ANSWER_CONTEXT_TOKEN_BUDGET used to leave no record anywhere - and "why did
+    it not answer from the document I uploaded" is almost always that. `used` is
+    what `build_prompt` reports actually fitting, so `included` is measured, not
+    inferred from the budget arithmetic a second time.
+
+    Identity, not position: `build_prompt` currently stops at the first item that
+    does not fit, so `used` is a prefix and `index < len(used)` would agree - but
+    a later change to skip-and-continue would silently make that wrong, and the
+    per-item scores here would then be attached to the wrong rows.
+
+    `index` numbers ALL retrieved evidence from 1, and for the included items it
+    is the same number the model saw and cited, because `build_prompt` enumerates
+    the same list in the same order.
+
+    Slice 3 adds `plan` and its steps as new keys here, and MCP items arrive in
+    `evidence` with `source_type="mcp"`. Neither needs a migration - that is what
+    the JSONB column is for.
+    """
+    used_ids = {id(item) for item in used}
+    items = []
+    for index, item in enumerate(evidence, start=1):
+        metadata = item.metadata
+        items.append(
+            {
+                "index": index,
+                "source_type": item.source_type,
+                "ref": item.ref,
+                # .get throughout: an attachment or MCP item carries none of the
+                # RAG keys and still has to appear in the trace.
+                "chunk_id": metadata.get("chunk_id"),
+                "document_id": metadata.get("document_id"),
+                "filename": metadata.get("filename"),
+                "page": metadata.get("page"),
+                "section": metadata.get("section"),
+                # The four Slice 1 kept SEPARATE rather than collapsing into one
+                # score, for exactly this screen.
+                "vector_rank": metadata.get("vector_rank"),
+                "keyword_rank": metadata.get("keyword_rank"),
+                "rrf_score": metadata.get("rrf_score"),
+                "rerank_score": metadata.get("rerank_score"),
+                "score": item.score,
+                "tokens": count_tokens(item.content),
+                "snippet": item.content[:SNIPPET_CHARS],
+                "included": id(item) in used_ids,
+            }
+        )
+    return {
+        "version": TRACE_VERSION,
+        "retrieval": {
+            "top_n": settings.retrieval_top_n,
+            "candidate_limit": settings.retrieval_candidate_limit,
+            "rrf_k": settings.rrf_k,
+            "sparse_weight": settings.sparse_weight,
+            "token_budget": settings.answer_context_token_budget,
+            "evidence_count": len(evidence),
+            "included_count": len(used),
+        },
+        # Duplicated from the columns on purpose, and only these two: the trace
+        # has to stay readable as one object when it is pulled out of the
+        # database by hand, and a prompt version that was later deleted is still
+        # named here.
+        "prompt": {"name": prompt.name, "version": prompt.version},
+        "evidence": items,
+    }
+
+
 async def answer(
     llm_provider: LLMProvider,
     question: str,
@@ -176,6 +261,7 @@ async def answer(
         latency_ms=latency_ms,
         prompt_name=template.name,
         prompt_version=template.version,
+        trace=build_trace(evidence, used_evidence, settings=settings, prompt=template),
     )
 
 
@@ -205,7 +291,11 @@ async def persist_turn(
     chat_answer: ChatAnswer,
     retrieval_ms: int,
     attachment_ids: list[uuid.UUID] | None = None,
-) -> None:
+) -> uuid.UUID:
+    """Returns the ASSISTANT message's id, which the SSE `done` frame carries so
+    that the answer on screen can be rated and traced without a reload. Before
+    this the client fabricated an id from a timestamp, and the 👍/👎 and 추적
+    controls on a just-streamed answer had nothing real to point at."""
     # No flush between the two adds. SQLAlchemy does emit them as ONE executemany
     # INSERT, but asyncpg executes it as a Bind/Execute per parameter set and
     # clock_timestamp() is re-evaluated per execution, so the rows land ~1.7ms
@@ -215,31 +305,32 @@ async def persist_turn(
     # test_the_two_messages_of_a_turn_never_share_a_timestamp guards it.
     user_message = Message(conversation_id=conversation.id, role="user", content=question, citations=[])
     db.add(user_message)
-    db.add(
-        Message(
-            conversation_id=conversation.id,
+    assistant_message = Message(
+        conversation_id=conversation.id,
             role="assistant",
-            content=chat_answer.content,
-            citations=chat_answer.citations,
-            model=chat_answer.model,
-            prompt_name=chat_answer.prompt_name,
-            prompt_version=chat_answer.prompt_version,
-            usage=chat_answer.usage,
-            latency_ms=chat_answer.latency_ms,
-            retrieval_ms=retrieval_ms,
-        )
+        content=chat_answer.content,
+        citations=chat_answer.citations,
+        model=chat_answer.model,
+        prompt_name=chat_answer.prompt_name,
+        prompt_version=chat_answer.prompt_version,
+        usage=chat_answer.usage,
+        latency_ms=chat_answer.latency_ms,
+        retrieval_ms=retrieval_ms,
+        trace=chat_answer.trace,
     )
+    db.add(assistant_message)
+    # AFTER both adds, so they still flush as one executemany and keep their
+    # distinct clock_timestamp()s. Message.id's `default=uuid.uuid4` is a
+    # FLUSH-time default, so before this both ids are None - which is why the
+    # attachment claim below would otherwise quietly write message_id = NULL,
+    # match its own `IS NULL` predicate, and report a rowcount that looks like
+    # success. It is now unconditional because the assistant id is returned to
+    # the caller whether or not the turn carried a file.
+    await db.flush()
     # In the SAME transaction as the two messages: an attachment is either part of
     # a persisted turn or still unclaimed, never pointing at a message that was
     # rolled back.
     if attachment_ids:
-        # AFTER both adds, so they still flush as one executemany and keep their
-        # distinct clock_timestamp()s. The flush is not optional: Message.id's
-        # `default=uuid.uuid4` is a *flush-time* default, so before it
-        # user_message.id is None - and the claim below would then quietly write
-        # message_id = NULL, match its own `IS NULL` predicate, and report a
-        # rowcount that looks like success.
-        await db.flush()
         await claim_attachments(db, attachment_ids, conversation.user_id, user_message.id)
     # Without this the sidebar is frozen in creation order: `onupdate` only fires
     # when some column on the conversation row itself changes.
@@ -247,3 +338,7 @@ async def persist_turn(
         update(Conversation).where(Conversation.id == conversation.id).values(updated_at=func.now())
     )
     await db.commit()
+    # Readable after the commit because make_sessionmaker sets
+    # expire_on_commit=False; without that this would emit a SELECT on a closed
+    # session.
+    return assistant_message.id

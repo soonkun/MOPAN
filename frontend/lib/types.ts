@@ -43,6 +43,66 @@ export interface PromptVersion {
   created_at: string;
 }
 
+/** How dangerous a tool is, and the reason the column exists from the MCP
+ * registry's first migration: Slice 3's human-approval gate reads it. A newly
+ * discovered tool is `write`, never `read` - an unclassified tool must not be
+ * the cheap one. */
+export type McpRiskLevel = "read" | "write" | "destructive";
+
+/** GET /api/mcp/servers/{id}'s tools, and the rows of the MCP 관리 table. */
+export interface McpTool {
+  id: string;
+  server_id: string;
+  name: string;
+  description: string | null;
+  input_schema: Record<string, unknown>;
+  risk_level: McpRiskLevel;
+  /** False on a tool an admin turned off AND on one the server stopped listing
+   * - a tombstone, kept because messages.citations names it. */
+  enabled: boolean;
+  discovered_at: string;
+}
+
+/** GET /api/mcp/servers. Admin only. Note what is NOT here: the auth token. The
+ * API accepts one on create/update and never returns it; `has_auth_token` is
+ * the only thing the screen can know about it. */
+export interface McpServer {
+  id: string;
+  name: string;
+  base_url: string;
+  auth_kind: "none" | "bearer";
+  has_auth_token: boolean;
+  enabled: boolean;
+  created_by_email: string | null;
+  created_at: string;
+  updated_at: string;
+  tools: McpTool[];
+  /** Set when the server could not be reached. The row still exists so a
+   * mistyped port can be corrected; this is what stops an empty tool list from
+   * reading as "this server has no tools". */
+  discovery_error: string | null;
+}
+
+/** GET /api/mcp/tools - what the composer's tool picker lists. Readable by any
+ * authenticated user, and deliberately narrower than McpTool: no base_url and
+ * nothing about whether the server carries a token. */
+export interface McpToolOption {
+  id: string;
+  server_name: string;
+  name: string;
+  description: string | null;
+  input_schema: Record<string, unknown>;
+  risk_level: McpRiskLevel;
+}
+
+/** One tool call the user picked for the next message, with the arguments they
+ * typed. Slice 2 is MANUAL invocation only - the model is never asked which
+ * tool to call; that is Slice 3. */
+export interface PendingToolCall {
+  tool: McpToolOption;
+  arguments: Record<string, unknown>;
+}
+
 export type DocumentStatus =
   | "uploaded"
   | "parsing"
@@ -127,6 +187,96 @@ export interface Conversation {
   updated_at: string;
 }
 
+/** PUT /api/messages/{id}/feedback, and the `feedback` field of a
+ * MessageResponse. Always the CALLER's own rating - a conversation has exactly
+ * one reader - so there is no user field. */
+export interface Feedback {
+  rating: "up" | "down";
+  comment: string | null;
+  updated_at: string;
+}
+
+/** One retrieved item in GET /api/messages/{id}/trace.
+ *
+ * `included: false` is the field the whole trace screen exists for: the item was
+ * retrieved and then dropped because the answer's token budget ran out before
+ * it, so the model never saw it. A null rank means the item was absent from that
+ * ranking entirely, which is a fact worth showing rather than a zero. */
+export interface TraceEvidence {
+  index: number;
+  source_type: "rag" | "mcp" | "attachment";
+  ref: string;
+  chunk_id: string | null;
+  document_id: string | null;
+  filename: string | null;
+  page: number | null;
+  section: string | null;
+  vector_rank: number | null;
+  keyword_rank: number | null;
+  rrf_score: number | null;
+  rerank_score: number | null;
+  score: number | null;
+  tokens: number;
+  snippet: string;
+  included: boolean;
+}
+
+export interface TraceRetrieval {
+  top_n: number | null;
+  candidate_limit: number | null;
+  rrf_k: number | null;
+  sparse_weight: number | null;
+  token_budget: number | null;
+  evidence_count: number;
+  included_count: number;
+}
+
+/** GET /api/messages/{id}/trace. Owner-scoped: someone else's is a 404, never a
+ * 403. `has_trace` is false for an answer written before the trace column
+ * existed - the columns above it are still real. */
+export interface MessageTrace {
+  message_id: string;
+  conversation_id: string;
+  created_at: string;
+  model: string | null;
+  prompt_name: string | null;
+  prompt_version: string | null;
+  latency_ms: number | null;
+  retrieval_ms: number | null;
+  usage: Record<string, number>;
+  has_trace: boolean;
+  retrieval: TraceRetrieval;
+  evidence: TraceEvidence[];
+}
+
+/** One row of GET /api/settings. `env_value` is what removing the override would
+ * restore, which is what makes 기본값으로 되돌리기 a promise the screen keeps. */
+export interface RuntimeSetting {
+  key: string;
+  label: string;
+  help: string;
+  group: string;
+  kind: "int" | "float";
+  minimum: number;
+  maximum: number;
+  value: number;
+  env_value: number;
+  overridden: boolean;
+}
+
+/** A value deliberately NOT editable at runtime, with the reason. Served by the
+ * API so the reason lives beside the decision in the settings store. */
+export interface EnvOnlySetting {
+  key: string;
+  label: string;
+  reason: string;
+}
+
+export interface SettingsPayload {
+  settings: RuntimeSetting[];
+  env_only: EnvOnlySetting[];
+}
+
 export interface Message {
   id: string;
   role: "user" | "assistant";
@@ -138,17 +288,28 @@ export interface Message {
   // ("gpt-4o-2024-08-06"). Null on every user turn, and on assistant turns
   // written before the model became a per-question choice.
   model: string | null;
+  // The caller's own 👍/👎, null until they rate this answer. It rides the
+  // transcript so a reload does not lose it, and so opening a conversation is
+  // one request rather than one per assistant message.
+  feedback: Feedback | null;
   created_at: string;
 }
 
 /** SSE payloads from POST /api/chat. `token` is reserved for Slice 3. */
 export type ChatEvent =
-  | { type: "status"; status: "searching" | "answering" }
+  // "calling_tool" is emitted only when the turn carried tool_calls, and always
+  // before "searching": the MCP round trip happens first so the user sees the
+  // slow, visible thing they asked for happening.
+  | { type: "status"; status: "searching" | "answering" | "calling_tool" }
   | { type: "token"; text: string }
   | { type: "citations"; citations: Citation[] }
   | {
       type: "done";
       conversation_id: string;
+      // The real assistant row id, so the just-streamed answer can be rated and
+      // traced without a reload. The client used to fabricate one from a
+      // timestamp, which pointed at nothing.
+      message_id: string;
       content: string;
       citations: Citation[];
       model: string | null;

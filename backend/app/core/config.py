@@ -159,6 +159,22 @@ class Settings(BaseSettings):
     # None -> derived from ANSWER_MODEL via VISION_CAPABLE_MODEL_PREFIXES.
     answer_model_supports_vision: bool | None = None
 
+    # --- MCP -----------------------------------------------------------------
+    # Discovery and tool calls fetch a URL an ADMIN typed, which makes the
+    # backend an SSRF proxy for everything on the internal network unless
+    # something says otherwise - starting with 169.254.169.254, which hands out
+    # cloud instance credentials to whoever asks. Default false; the flag exists
+    # because local development registers a server on 127.0.0.1 and there is no
+    # honest way around that. app/mcp/client.py:check_url is the enforcement.
+    mcp_allow_private_networks: bool = False
+    # Shorter than LLM_TIMEOUT_SECONDS on purpose: an MCP call sits in front of
+    # the model call rather than replacing it, so its budget is additive to a
+    # question the user is already waiting on.
+    mcp_timeout_seconds: float = 15.0
+    # A manual turn names its own tools, so this is a bound on one request, not
+    # on a planner. Slice 3's orchestrator gets its own ceiling.
+    max_tool_calls_per_message: int = 3
+
     @property
     def selectable_models(self) -> list[str]:
         """The allowlist as the app reads it. ANSWER_MODEL is always first and
@@ -266,6 +282,13 @@ class Settings(BaseSettings):
             raise ValueError("MAX_ATTACHMENT_SIZE_MB must be >= 1")
         if self.max_attachments_per_message < 1:
             raise ValueError("MAX_ATTACHMENTS_PER_MESSAGE must be >= 1")
+        # Same shape again: zero or negative does not error, it just makes every
+        # manual tool call impossible with a message that blames the user's
+        # request, and a non-positive timeout makes httpx raise on connect.
+        if self.max_tool_calls_per_message < 1:
+            raise ValueError("MAX_TOOL_CALLS_PER_MESSAGE must be >= 1")
+        if self.mcp_timeout_seconds <= 0:
+            raise ValueError("MCP_TIMEOUT_SECONDS must be > 0")
         return self
 
 
@@ -274,8 +297,30 @@ def get_settings() -> Settings:
     return Settings()
 
 
-def get_app_settings(request: Request) -> Settings:
+async def get_app_settings(request: Request) -> Settings:
     """Request-path dependency. get_settings() is lru_cached, so a route that
     depends on it ignores the live Settings the lifespan put on app.state (and
-    the one tests swap in there). Same rule as get_db_session/get_redis."""
-    return request.app.state.settings
+    the one tests swap in there). Same rule as get_db_session/get_redis.
+
+    On top of that it now applies the `app_settings` overrides, so a value an
+    admin changes reaches the NEXT request with no restart. This is the single
+    indirection every route already goes through, which is what makes "every
+    setting keeps its .env value as the fallback" true without asking each
+    caller to remember - an empty table returns exactly `app.state.settings`.
+
+    The session comes from `app.core.db.current_sessionmaker`, set per request by
+    RequestContextMiddleware, for the same reason `get_prompt` reads it from
+    there: this must not become another parameter on `Settings`, and a
+    `Depends(get_db_session)` here would put a second session on every request
+    that already has one. Imported inside the function because `app.core.db`
+    imports this module.
+    """
+    base: Settings = request.app.state.settings
+    from app.core.db import current_sessionmaker
+    from app.core.settings_store import effective_settings
+
+    sessionmaker = current_sessionmaker.get()
+    if sessionmaker is None:
+        return base
+    async with sessionmaker() as session:
+        return await effective_settings(session, base)

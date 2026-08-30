@@ -198,6 +198,8 @@ export default function Sidebar() {
     { href: "/collections", label: "분류 관리" },
     { href: "/users", label: "사용자 관리" },
     { href: "/prompts", label: "프롬프트 관리" },
+    { href: "/mcp", label: "MCP 서버 관리" },
+    { href: "/settings", label: "고급 설정" },
   ];
 
   // Same markup for both groups: the active styling and aria-current below are

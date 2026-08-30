@@ -187,6 +187,11 @@ export async function streamChat(
      * which is what the composer sends before its list has loaded. Anything not
      * on the allowlist comes back as a Korean 400 before a row is written. */
     model?: string;
+    /** Ids from GET /api/mcp/tools, with the arguments the user typed. An
+     * unknown id, a tool an admin disabled, or one classified `destructive` is
+     * refused with a Korean 4xx BEFORE the conversation is created - so it
+     * arrives here as a rejected fetch, not as an error frame inside a 200. */
+    tool_calls?: { tool_id: string; arguments: Record<string, unknown> }[];
   },
   onEvent: (event: ChatEvent) => void,
   signal?: AbortSignal,

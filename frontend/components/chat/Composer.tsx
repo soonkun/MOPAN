@@ -3,7 +3,8 @@
 import { useEffect, useRef } from "react";
 import AttachmentChip from "@/components/chat/AttachmentChip";
 import ModelPicker from "@/components/chat/ModelPicker";
-import type { AnswerModel, Attachment } from "@/lib/types";
+import ToolPicker from "@/components/chat/ToolPicker";
+import type { AnswerModel, Attachment, McpToolOption, PendingToolCall } from "@/lib/types";
 
 /** One file the user has chosen. It exists on screen from the moment it is
  * picked, before POST /api/attachments has answered, so that a refusal can be
@@ -56,6 +57,10 @@ export default function Composer({
   models,
   model,
   onModelChange,
+  tools,
+  toolCall,
+  onToolSelect,
+  onToolRemove,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -69,6 +74,14 @@ export default function Composer({
   models: AnswerModel[];
   model: string;
   onModelChange: (id: string) => void;
+  /** GET /api/mcp/tools. Empty for a deployment with no MCP server registered,
+   * which is what makes the 도구 button disappear rather than open nothing. */
+  tools: McpToolOption[];
+  /** ONE pending call. Slice 2 is manual invocation; a plan that runs several
+   * steps is Slice 3, and the backend already accepts a list. */
+  toolCall: PendingToolCall | null;
+  onToolSelect: (call: PendingToolCall) => void;
+  onToolRemove: () => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   // Chrome fires keydown(Enter) with isComposing=true while a Hangul syllable
@@ -129,6 +142,34 @@ export default function Composer({
       }}
       className="rounded-xl bg-surface-container p-2 outline-primary transition-colors duration-150 focus-within:outline focus-within:outline-2"
     >
+      {toolCall && (
+        <div className="flex flex-wrap gap-2 p-1 pb-2">
+          {/* Same row and same shape as an attachment chip: both are "something
+              extra this message carries", and the user removes either the same
+              way. Its own component would be 30 lines to render two spans. */}
+          <span className="inline-flex max-w-full items-center gap-2 rounded-md bg-surface-container-high px-3 py-1.5 text-label">
+            <span className="truncate">
+              {toolCall.tool.server_name} · {toolCall.tool.name}
+            </span>
+            {Object.keys(toolCall.arguments).length > 0 && (
+              <span className="truncate text-caption text-on-surface-variant">
+                {Object.entries(toolCall.arguments)
+                  .map(([k, v]) => `${k}=${v}`)
+                  .join(", ")}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={onToolRemove}
+              aria-label={`${toolCall.tool.name} 도구 제거`}
+              className="shrink-0 text-on-surface-variant"
+            >
+              ✕
+            </button>
+          </span>
+        </div>
+      )}
+
       {attachments.length > 0 && (
         <div className="flex flex-wrap gap-2 p-1 pb-2">
           {attachments.map((a) => (
@@ -234,6 +275,8 @@ export default function Composer({
             before the send button so that Tab order runs input -> model ->
             전송: the model is a property of the message being sent, so it
             belongs on the way to sending it rather than after. */}
+        <ToolPicker tools={tools} onSelect={onToolSelect} />
+
         <ModelPicker models={models} value={model} onChange={onModelChange} />
 
         {/* The two `key`s are load-bearing, and this was measured. Without them

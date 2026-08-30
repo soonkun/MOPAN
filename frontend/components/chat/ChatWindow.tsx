@@ -9,9 +9,16 @@ import Composer, {
   type PendingAttachment,
 } from "@/components/chat/Composer";
 import MessageBubble from "@/components/chat/MessageBubble";
-import type { AnswerModel, Attachment, Message } from "@/lib/types";
+import type {
+  AnswerModel,
+  Attachment,
+  McpToolOption,
+  Message,
+  PendingToolCall,
+} from "@/lib/types";
 
 const STATUS_LABEL: Record<string, string> = {
+  calling_tool: "도구 호출 중…",
   searching: "문서 검색 중…",
   answering: "답변 생성 중…",
 };
@@ -74,6 +81,13 @@ export default function ChatWindow({
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [models, setModels] = useState<AnswerModel[]>([]);
+  // Every enabled tool on every enabled server. Empty for a deployment with no
+  // MCP server registered, and the picker then renders nothing at all.
+  const [tools, setTools] = useState<McpToolOption[]>([]);
+  // ONE pending call. Slice 2 is manual invocation - the user picks the tool -
+  // so there is nothing here to plan with; the request body already takes a
+  // list because Slice 3's orchestrator will send several.
+  const [toolCall, setToolCall] = useState<PendingToolCall | null>(null);
   // "" until GET /api/models has answered. A send in that window carries no
   // `model` at all, which the server reads as its own default - so the picker
   // failing to load costs the user the choice, never the answer.
@@ -149,6 +163,12 @@ export default function ChatWindow({
         setModel(list.some((m) => m.id === stored) ? stored! : fallback);
       })
       .catch(() => setModels([]));
+    // Same rule as the model list: a deployment with no MCP server answers with
+    // [], and a failure here leaves the 도구 button hidden rather than putting a
+    // banner over a conversation that answers fine without it.
+    apiFetch<McpToolOption[]>("/api/mcp/tools")
+      .then(setTools)
+      .catch(() => setTools([]));
   }, []);
 
   useEffect(() => {
@@ -267,6 +287,7 @@ export default function ChatWindow({
 
     const question = input;
     const sent = attachments.filter((a) => a.attachment !== null).map((a) => a.attachment!);
+    const calls = toolCall ? [toolCall] : [];
     const pendingId = `temp-${Date.now()}`;
     const controller = new AbortController();
     abortRef.current = controller;
@@ -276,6 +297,10 @@ export default function ChatWindow({
     // so leaving the chips up would offer a 삭제 that now answers 409
     // 이미 전송된 첨부파일은 삭제할 수 없습니다.
     setAttachments([]);
+    // Cleared with the attachments and for the same reason: the call belongs to
+    // the turn that was just sent, and leaving the chip up would silently run
+    // the tool again on the next question.
+    setToolCall(null);
     setError(null);
     setAnnouncement("");
     setSending(true);
@@ -288,6 +313,7 @@ export default function ChatWindow({
         citations: [],
         attachments: sent,
         model: null,
+        feedback: null,
         created_at: new Date().toISOString(),
       },
     ]);
@@ -303,6 +329,9 @@ export default function ChatWindow({
           conversation_id: conversationId,
           message: question,
           attachment_ids: sent.map((a) => a.id),
+          ...(calls.length
+            ? { tool_calls: calls.map((c) => ({ tool_id: c.tool.id, arguments: c.arguments })) }
+            : {}),
           // Omitted, not sent empty, while the list is still loading: the
           // backend reads an absent `model` as ANSWER_MODEL and an unknown one
           // as a 400.
@@ -327,11 +356,16 @@ export default function ChatWindow({
             setMessages((prev) => [
               ...prev,
               {
-                id: `assistant-${Date.now()}`,
+                // The row id from the `done` frame, not a fabricated
+                // `assistant-${Date.now()}`: the 👍/👎 and 추적 controls call
+                // /api/messages/{id}/..., so a made-up id made both of them
+                // 404 on the answer that had just arrived.
+                id: event.message_id,
                 role: "assistant",
                 content: event.content,
                 citations: event.citations,
                 attachments: [],
+                feedback: null,
                 // From the frame, not from `model` state: the user may well
                 // switch the picker while this answer is still streaming, and
                 // the label has to name what actually answered.
@@ -548,6 +582,13 @@ export default function ChatWindow({
           models={models}
           model={model}
           onModelChange={chooseModel}
+          tools={tools}
+          toolCall={toolCall}
+          onToolSelect={(call) => {
+            setToolCall(call);
+            setNotice(`${call.tool.name} 도구를 이번 질문에 사용합니다.`);
+          }}
+          onToolRemove={() => setToolCall(null)}
         />
       </div>
     </div>

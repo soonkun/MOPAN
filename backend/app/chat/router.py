@@ -24,6 +24,7 @@ from app.core.config import MODEL_LABELS, Settings, get_app_settings
 from app.core.db import get_db_session
 from app.documents.storage import delete_document_files
 from app.llm.base import LLMError, LLMProvider
+from app.mcp.service import load_tool_calls, run_tool_calls
 from app.models.attachment import Attachment
 from app.models.conversation import Conversation
 from app.models.message import Message
@@ -125,6 +126,20 @@ async def chat(
     if images and not settings.model_supports_vision(model):
         raise HTTPException(status_code=400, detail=no_vision_message(model))
 
+    # Resolved here, before the conversation exists, for exactly the reason the
+    # attachment ids and the model are: an unknown tool id, a tool an admin
+    # disabled, or one classified `destructive` must be a real 4xx with a Korean
+    # detail, not an error frame inside a 200 after a titled empty conversation
+    # has been written to the sidebar. load_tool_calls returns detached targets,
+    # so nothing below holds a session across the network call.
+    tool_requests = payload.tool_calls or []
+    if len(tool_requests) > settings.max_tool_calls_per_message:
+        raise HTTPException(
+            status_code=400,
+            detail=f"도구는 한 번에 최대 {settings.max_tool_calls_per_message}개까지 호출할 수 있습니다.",
+        )
+    pending_tool_calls = await load_tool_calls(db, [(t.tool_id, t.arguments) for t in tool_requests])
+
     if payload.conversation_id is None:
         conversation = Conversation(user_id=user.id, title=payload.message[:80])
         db.add(conversation)
@@ -145,6 +160,16 @@ async def chat(
 
     async def stream() -> AsyncIterator[str]:
         try:
+            # Phase 0: the tools the user picked, if any. Before retrieval so the
+            # user sees the slow, visible thing happening first, and with NO
+            # session open - run_tool_calls takes detached targets on purpose.
+            # A tool that fails returns Evidence saying so rather than raising:
+            # the question is still worth answering from whatever else was found.
+            tool_evidence = []
+            if pending_tool_calls:
+                yield _sse({"type": "status", "status": "calling_tool"})
+                tool_evidence = await run_tool_calls(pending_tool_calls, settings=settings)
+
             # Phase 1: a short session for retrieval. Every session lives inside an
             # `async with`, so a client disconnect - which reaches this generator as
             # GeneratorExit/CancelledError at a yield - still returns the connection.
@@ -170,11 +195,18 @@ async def chat(
             # the user just attached. Note it is ONE list from here on - attachment
             # text competes for ANSWER_CONTEXT_TOKEN_BUDGET with the RAG evidence
             # rather than being added on top of it.
+            #
+            # MCP tool results join the SAME list, in the middle: the user's own
+            # files, then the tools they explicitly asked for, then the corpus.
+            # That single list is the entire security argument of Slice 2 - a
+            # tool result inherits the nonce fence, _strip_fence_markers and the
+            # one token budget structurally, because there is nowhere else for it
+            # to go. `answer()` is unchanged, which is the Slice 1 seam holding.
             chat_answer = await answer(
                 llm_provider,
                 payload.message,
                 history,
-                attachment_evidence + evidence,
+                attachment_evidence + tool_evidence + evidence,
                 settings=settings,
                 images=images,
                 model=model,
@@ -184,7 +216,7 @@ async def chat(
             # the ownership-checked object from above - detached, not expired - so
             # nothing here re-reads it by bare id.
             async with sessionmaker() as persist_db:
-                await persist_turn(
+                assistant_message_id = await persist_turn(
                     persist_db,
                     conversation,
                     payload.message,
@@ -198,6 +230,11 @@ async def chat(
                 {
                     "type": "done",
                     "conversation_id": str(conversation.id),
+                    # The REAL row id, so the 👍/👎 and 추적 controls work on a
+                    # just-streamed answer without a reload. The client used to
+                    # fabricate `assistant-${Date.now()}` here, which pointed at
+                    # nothing.
+                    "message_id": str(assistant_message_id),
                     "content": chat_answer.content,
                     "citations": chat_answer.citations,
                     # The provider's RESOLVED id ("gpt-4o-2024-08-06"), the same

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -191,8 +191,25 @@ def pair(step: Step) -> list[tuple[str, Block]] | None:
 def main(argv: list[str]) -> int:
     # The plan is UTF-8; a Windows console is often cp949. Do not die on an em-dash.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    plan_path = Path(argv[1]) if len(argv) > 1 else DEFAULT_PLAN
-    steps = parse(plan_path.read_text(encoding="utf-8"))
+    # Several plans are read as ONE ordered history, oldest first. Every rule
+    # below keys on `step.task`, an integer, so giving each plan a task-number
+    # range above the previous one is all "a later plan supersedes an earlier
+    # one" needs - rules 2 and 3 then work across plans with no change.
+    #
+    # Without this a file quoted whole by an early plan drifts the moment a
+    # later slice edits it, even though a later plan describes it correctly.
+    # The workaround was re-emitting the old block from disk, which makes that
+    # task's block show text the task never produced. Passing every plan in
+    # order says what is actually true instead.
+    plan_paths = [Path(a) for a in argv[1:]] or [DEFAULT_PLAN]
+    steps: list[Step] = []
+    offset = 0
+    for plan_path in plan_paths:
+        plan_steps = parse(plan_path.read_text(encoding="utf-8"))
+        if not plan_steps:
+            continue
+        steps.extend(replace(s, task=s.task + offset) for s in plan_steps)
+        offset = max(s.task for s in steps) + 1
 
     # Rule 2: a task is unrun until every file it claims to create exists.
     created: dict[int, list[str]] = {}
@@ -282,7 +299,7 @@ def main(argv: list[str]) -> int:
             print(f"  {row}")
 
     claiming = sum(1 for s in steps if s.paths and s.verb in WHOLE_FILE_VERBS | PARTIAL_VERBS)
-    print(f"plan: {plan_path}")
+    print("plan: " + ", ".join(str(x) for x in plan_paths))
     print(f"steps with a file claim: {claiming}")
     print(f"blocks compared against disk: {checked}")
     # Rule 3's ceiling, stated in the output rather than only in the docstring:

@@ -3,7 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import AttachmentChip from "@/components/chat/AttachmentChip";
 import Markdown from "@/components/chat/Markdown";
-import type { Message } from "@/lib/types";
+import TraceDialog from "@/components/chat/TraceDialog";
+import { apiFetch, errorMessage } from "@/lib/api";
+import type { Feedback, Message } from "@/lib/types";
 
 export default function MessageBubble({
   message,
@@ -16,6 +18,31 @@ export default function MessageBubble({
 }) {
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Seeded from the server and owned here afterwards. The transcript carries the
+  // caller's rating, so a reload shows it; a click updates this copy rather than
+  // refetching the whole conversation to change one row.
+  const [feedback, setFeedback] = useState<Feedback | null>(message.feedback);
+  const [commenting, setCommenting] = useState(false);
+  const [comment, setComment] = useState(message.feedback?.comment ?? "");
+  const [traceOpen, setTraceOpen] = useState(false);
+
+  async function rate(rating: "up" | "down", withComment?: string) {
+    try {
+      const saved = await apiFetch<Feedback>(`/api/messages/${message.id}/feedback`, {
+        method: "PUT",
+        body: JSON.stringify({ rating, comment: withComment ?? feedback?.comment ?? null }),
+      });
+      setFeedback(saved);
+      setComment(saved.comment ?? "");
+      // 👎 opens the comment box, 👍 does not: a complaint is the one that is
+      // worth a sentence, and asking every satisfied user to type something is
+      // how a feedback control stops being clicked at all.
+      setCommenting(rating === "down");
+      onNotify?.(rating === "up" ? "도움이 됨으로 표시했습니다." : "도움이 안 됨으로 표시했습니다.");
+    } catch (err) {
+      onNotify?.(errorMessage(err));
+    }
+  }
 
   useEffect(() => () => {
     if (timerRef.current) clearTimeout(timerRef.current);
@@ -135,6 +162,61 @@ export default function MessageBubble({
               names the exact snapshot, not just the family.
               Null on a user turn and on any answer written before the model
               became a per-question choice. */}
+          <button
+            type="button"
+            onClick={() => void rate("up")}
+            aria-label="도움이 됨"
+            aria-pressed={feedback?.rating === "up"}
+            className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-colors duration-150 hover:bg-surface-container ${
+              feedback?.rating === "up" ? "text-primary" : "text-on-surface-variant"
+            }`}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              className="h-4 w-4"
+              fill={feedback?.rating === "up" ? "currentColor" : "none"}
+              stroke="currentColor"
+              strokeWidth="1.5"
+            >
+              {/* Two subpaths, so the palm reads as a thumb rather than as the
+                  share arrow a single outline collapses into at 16px. */}
+              <path d="M7 10v12" />
+              <path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            onClick={() => void rate("down")}
+            aria-label="도움이 안 됨"
+            aria-pressed={feedback?.rating === "down"}
+            className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-colors duration-150 hover:bg-surface-container ${
+              feedback?.rating === "down" ? "text-error" : "text-on-surface-variant"
+            }`}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              className="h-4 w-4"
+              fill={feedback?.rating === "down" ? "currentColor" : "none"}
+              stroke="currentColor"
+              strokeWidth="1.5"
+            >
+              <path d="M17 14V2" />
+              <path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z" />
+            </svg>
+          </button>
+          {/* Quiet and always present, like 복사: the answer to "why did it not
+              use my document" has to be reachable from the answer itself. */}
+          <button
+            type="button"
+            onClick={() => setTraceOpen(true)}
+            className="inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-caption text-on-surface-variant transition-colors duration-150 hover:bg-surface-container"
+          >
+            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <circle cx="11" cy="11" r="7" />
+              <path d="M20 20l-4.5-4.5" />
+            </svg>
+            추적
+          </button>
           {message.model && (
             <span className="min-w-0 truncate text-caption text-on-surface-variant">
               <span className="sr-only">답변 모델 </span>
@@ -142,7 +224,39 @@ export default function MessageBubble({
             </span>
           )}
         </div>
+        {commenting && (
+          <form
+            className="mt-2 flex flex-wrap items-center gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void rate(feedback?.rating ?? "down", comment.trim());
+              setCommenting(false);
+            }}
+          >
+            <label htmlFor={`comment-${message.id}`} className="sr-only">
+              피드백 의견
+            </label>
+            <input
+              id={`comment-${message.id}`}
+              value={comment}
+              onChange={(event) => setComment(event.target.value)}
+              maxLength={1000}
+              placeholder="무엇이 잘못되었는지 알려주세요 (선택)"
+              className="field min-w-0 flex-1"
+            />
+            <button type="submit" className="btn-tonal btn-compact">
+              저장
+            </button>
+            <button type="button" onClick={() => setCommenting(false)} className="btn-text btn-compact">
+              닫기
+            </button>
+          </form>
+        )}
+        {!commenting && feedback?.comment && (
+          <p className="mt-2 text-caption text-on-surface-variant">의견: {feedback.comment}</p>
+        )}
       </div>
+      {traceOpen && <TraceDialog messageId={message.id} onClose={() => setTraceOpen(false)} />}
     </div>
   );
 }

@@ -22,11 +22,24 @@ from app.main import create_app
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 TABLES_IN_DELETE_ORDER = (
     "attachments",
+    # Before `messages`, which it points at. Truncated per test like every other
+    # row a test writes - and `app_settings` below is the one that MATTERS: a
+    # leftover override would silently change retrieval for every later test, and
+    # a "behaves like .env when the table is empty" test would pass with its
+    # guard removed because the table was never empty.
+    "message_feedback",
+    "app_settings",
     "messages",
     "conversations",
     "chunks",
     "documents",
     "collections",
+    # mcp_tools before mcp_servers, and both before users: mcp_servers.created_by
+    # is ON DELETE RESTRICT, so truncating users alone would fail. CASCADE on the
+    # statement covers it either way; the order is stated so the list still reads
+    # as a dependency order.
+    "mcp_tools",
+    "mcp_servers",
     "users",
 )
 

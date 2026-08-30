@@ -7,6 +7,7 @@ from arq.connections import RedisSettings
 from app.core.config import get_settings
 from app.core.db import make_engine, make_sessionmaker
 from app.core.logging import configure_logging
+from app.core.settings_store import effective_settings
 from app.llm.openai_provider import OpenAIProvider
 from app.models.document import TERMINAL_STATUSES, Document
 from app.rag.chunking import get_chunking_strategy
@@ -77,10 +78,17 @@ async def mark_failed(ctx: dict, document_id: str) -> None:
 
 
 async def process_document(ctx: dict, document_id: str) -> None:
-    settings = ctx["settings"]
     try:
         async with asyncio.timeout(PIPELINE_TIMEOUT):
             async with ctx["sessionmaker"]() as db:
+                # Per JOB, not per worker start. The chunking knobs are editable
+                # from the 고급 설정 screen, and this is what makes an edit apply
+                # to the next document instead of to the next deploy - the same
+                # "no restart, no invalidation message to lose" rule get_prompt
+                # follows. There is no middleware here to publish a sessionmaker
+                # into current_sessionmaker, so the job's own session is passed
+                # explicitly.
+                settings = await effective_settings(db, ctx["settings"])
                 await run_pipeline(
                     db,
                     PgVectorStore(db),
