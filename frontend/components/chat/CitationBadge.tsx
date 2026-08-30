@@ -93,7 +93,24 @@ export default function CitationBadge({ citation }: { citation: Citation }) {
                   닫기
                 </button>
               </div>
-              <ErrorBanner message={error} />
+              {/* The banner is only for a citation we can show NOTHING for.
+                  A chunk that no longer exists is the normal consequence of
+                  re-ingesting its document - the ids change - and the text that
+                  was actually cited is on the message, so the quotation below is
+                  still exactly what the answer was based on. Calling that a
+                  failure told users their own answer was broken when it was
+                  not. Measured here: 31 of 62 stored citations stopped
+                  resolving across two re-ingestions. */}
+              <ErrorBanner message={error && !citation.snippet ? error : null} />
+              {error && citation.snippet && (
+                <p
+                  role="note"
+                  className="mt-3 rounded-md bg-surface-container-high px-3 py-2 text-body text-on-surface-variant"
+                >
+                  이 문서는 이후 다시 색인되어 원본을 열 수 없습니다. 아래는 답변 당시 인용된
+                  내용입니다.
+                </p>
+              )}
               <p className="mt-3 whitespace-pre-wrap text-body-lg text-on-surface">
                 {chunk ? chunk.content : citation.snippet}
               </p>

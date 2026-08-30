@@ -2892,7 +2892,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import ErrorBanner from "@/components/ui/ErrorBanner";
-import ThemeToggle from "@/components/ui/ThemeToggle";
 import type { Conversation, User } from "@/lib/types";
 
 // The trap has to enumerate everything focusable inside the drawer, not just
@@ -2901,6 +2900,106 @@ import type { Conversation, User } from "@/lib/types";
 // about, so `last` stops being the real last stop and Tab escapes the dialog.
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** A glyph per function, keyed by the route it stands for.
+ *
+ * Inline SVG on `currentColor`, exactly the way ThemeToggle.tsx already does
+ * it, and deliberately NOT an icon package: a dozen paths do not justify a
+ * dependency, a bundle, or a second source of truth for what "에이전트" looks
+ * like. The agent shield is the same path the composer's agent control draws,
+ * because they mean the same thing and a user should not have to learn two.
+ *
+ * Every one of these is DECORATIVE. The label beside it is the accessible name
+ * and the icon repeats it, so the <svg> is aria-hidden and contributes nothing
+ * to the name - a link that announced "문서 문서" would be the alternative.
+ *
+ * The conversation history rows deliberately get none. They are titles, not
+ * functions: one identical glyph repeated down twenty rows says nothing that
+ * distinguishes them, and it would spend 32px of a 224px row on decoration in
+ * the one place where the text already truncates. */
+const NAV_ICON: Record<string, React.ReactNode> = {
+  // 새 대화 - a pencil, the compose mark.
+  "/chat": (
+    <>
+      <path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17Z" />
+      <path d="M14.5 7.5 16.5 9.5" />
+    </>
+  ),
+  // 문서 - a page with a folded corner.
+  "/documents": (
+    <>
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" />
+      <path d="M14 3v5h5" />
+      <path d="M9 13h6M9 17h4" />
+    </>
+  ),
+  // 분류 관리 - a folder, which is what a collection is.
+  "/collections": <path d="M3 8a2 2 0 0 1 2-2h3.2l1.8 2H19a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
+  // 사용자 관리 - two people.
+  "/users": (
+    <>
+      <path d="M15 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-4A3.5 3.5 0 0 0 4 18.5V20" />
+      <circle cx="9.5" cy="8" r="3.2" />
+      <path d="M17 11.2a3 3 0 0 0 0-6" />
+      <path d="M20 20v-1.5a3.5 3.5 0 0 0-2.6-3.4" />
+    </>
+  ),
+  // 프롬프트 관리 - a speech bubble with lines in it: the text the system says.
+  "/prompts": (
+    <>
+      <path d="M20 12a7 7 0 0 1-7 7H8.5L4 22v-4.2A7 7 0 0 1 4 12v-.5A6.5 6.5 0 0 1 10.5 5h3A6.5 6.5 0 0 1 20 11.5Z" />
+      <path d="M8.5 10.5h7M8.5 14h4" />
+    </>
+  ),
+  // 에이전트 생성 - the shield-check the composer's agent control uses.
+  "/agents": (
+    <>
+      <path d="M12 3 4 7v5c0 4.4 3.2 8.2 8 9 4.8-.8 8-4.6 8-9V7l-8-4Z" />
+      <path d="m9 12 2 2 4-4" />
+    </>
+  ),
+  // MCP 서버 관리 - a two-unit server rack with its status lamps.
+  "/mcp": (
+    <>
+      <rect x="3.5" y="4" width="17" height="6.5" rx="1.8" />
+      <rect x="3.5" y="13.5" width="17" height="6.5" rx="1.8" />
+      <path d="M7 7.2h.01M7 16.7h.01" />
+    </>
+  ),
+  // 고급 설정 - sliders, not a cog: these are values an admin tunes.
+  "/settings": (
+    <>
+      <path d="M4 7h6M14 7h6M4 17h10M18 17h2" />
+      <circle cx="12" cy="7" r="2" />
+      <circle cx="16" cy="17" r="2" />
+    </>
+  ),
+  // 로그아웃 - out through the door.
+  logout: (
+    <>
+      <path d="M15 12H4" />
+      <path d="m7.5 8.5-3.5 3.5 3.5 3.5" />
+      <path d="M11 5h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-6" />
+    </>
+  ),
+};
+
+function NavIcon({ name }: { name: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      className="h-5 w-5 shrink-0"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {NAV_ICON[name]}
+    </svg>
+  );
+}
 
 export default function Sidebar() {
   const pathname = usePathname();
@@ -3078,12 +3177,19 @@ export default function Sidebar() {
     { href: "/documents", label: "문서" },
   ];
 
-  // Rendered only for an admin. Both screens are admin-only on the server too -
+  // Rendered only for an admin. All three screens are admin-only on the server too -
   // every endpoint behind them answers 403 관리자 권한이 필요합니다. - so this is
   // about not offering a link that leads to a refusal, not about access.
   const adminLinks = [
     { href: "/collections", label: "분류 관리" },
     { href: "/users", label: "사용자 관리" },
+    { href: "/prompts", label: "프롬프트 관리" },
+    { href: "/mcp", label: "MCP 서버 관리" },
+    // After MCP on purpose: an agent is assembled out of the collections,
+    // prompts and MCP tools above it, so the order follows the order the work
+    // is actually done in.
+    { href: "/agents", label: "에이전트 생성" },
+    { href: "/settings", label: "고급 설정" },
   ];
 
   // Same markup for both groups: the active styling and aria-current below are
@@ -3097,12 +3203,18 @@ export default function Sidebar() {
         onClick={() => setOpen(false)}
         // The background alone said "you are here" to sighted users only.
         aria-current={active ? "page" : undefined}
-        className={`rounded-full px-4 py-2 text-label transition-colors duration-150 ${
+        // gap-3 (12px) beside a 20px icon inside px-4 leaves 224 - 32 = 192px
+        // for the label in a 280px sidebar. The longest is MCP 서버 관리 at
+        // ~84px, so nothing here comes near truncating; no `truncate` class,
+        // because a label that cannot overflow does not need one and one that
+        // could should be shortened instead.
+        className={`flex items-center gap-3 rounded-full px-4 py-2 text-label transition-colors duration-150 ${
           active
             ? "bg-primary-container font-medium text-on-primary-container"
             : "text-on-surface-variant hover:bg-surface-container-high"
         }`}
       >
+        <NavIcon name={link.href} />
         {link.label}
       </Link>
     );
@@ -3285,12 +3397,12 @@ export default function Sidebar() {
         <div className="truncate px-4 text-caption text-on-surface-variant">
           {user ? `${user.email}${user.role === "admin" ? " · 관리자" : ""}` : "\u00a0"}
         </div>
-        <ThemeToggle />
         {logoutError && <ErrorBanner message={logoutError} />}
         {/* type="button" on every button in this file: the default is
             "submit", which is a live bug the moment one of them ends up
             inside a <form>. */}
-        <button type="button" onClick={() => void handleLogout()} className="btn-tonal w-full">
+        <button type="button" onClick={() => void handleLogout()} className="btn-tonal w-full gap-2">
+          <NavIcon name="logout" />
           로그아웃
         </button>
       </div>
@@ -5988,16 +6100,29 @@ Attachment state, drag-and-drop with a depth counter, 중지, the §8 empty stat
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { apiFetch, errorMessage, streamChat } from "@/lib/api";
+import { apiFetch, approveChat, errorMessage, streamChat } from "@/lib/api";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import Composer, {
   ATTACHMENT_EXTENSIONS,
   type PendingAttachment,
 } from "@/components/chat/Composer";
 import MessageBubble from "@/components/chat/MessageBubble";
-import type { AnswerModel, Attachment, Message } from "@/lib/types";
+import PlanProgress from "@/components/chat/PlanProgress";
+import type {
+  AgentOption,
+  AnswerModel,
+  ApprovalRequest,
+  Attachment,
+  ChatEvent,
+  McpToolOption,
+  Message,
+  PendingToolCall,
+  PlanStep,
+} from "@/lib/types";
 
 const STATUS_LABEL: Record<string, string> = {
+  planning: "실행 계획 세우는 중…",
+  calling_tool: "도구 호출 중…",
   searching: "문서 검색 중…",
   answering: "답변 생성 중…",
 };
@@ -6016,15 +6141,19 @@ const MAX_ATTACHMENT_MB = 10;
 // default every time.
 const MODEL_STORAGE_KEY = "mopan.answer-model";
 
-// §8: 3-4 chips that fill the composer when clicked. Deliberately about
-// documents and not about the corpus that happens to be loaded - this is a
-// document-QA product and the corpus is incidental to it.
-const SUGGESTIONS = [
-  "이 문서의 핵심 내용을 세 줄로 요약해 주세요",
-  "첨부한 파일에서 주요 수치를 표로 정리해 주세요",
-  "두 문서의 내용이 어긋나는 부분을 찾아 주세요",
-  "규정에서 담당자의 의무가 무엇인지 알려 주세요",
-];
+// Whether the Super Agent plans the next question. Remembered the same way and
+// for the same reason as the model, and OFF by default: the direct RAG path is
+// the default until the orchestrator measures better on the eval set, and a
+// browser that refuses to store this starts on the default every time - which is
+// the safe direction.
+const ORCHESTRATOR_STORAGE_KEY = "mopan.orchestrator";
+
+// Which agent answers, remembered the same way and validated against the list
+// the same way the model is: an admin can disable or delete an agent, and a
+// stale id would then be a 404 or a 409 on every send that the user cannot act
+// on. The absence of a stored value is the DEFAULT AGENT, which is this app
+// exactly as it behaved before agents existed - the safe direction.
+const AGENT_STORAGE_KEY = "mopan.agent";
 
 function rejection(file: File): string | null {
   // Same rule as validation.py's extension_of: no dot means no extension, not
@@ -6060,10 +6189,32 @@ export default function ChatWindow({
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [models, setModels] = useState<AnswerModel[]>([]);
+  // Every enabled tool on every enabled server. Empty for a deployment with no
+  // MCP server registered, and the picker then renders nothing at all.
+  const [tools, setTools] = useState<McpToolOption[]>([]);
+  // ONE pending call. Slice 2 is manual invocation - the user picks the tool -
+  // so there is nothing here to plan with; the request body already takes a
+  // list because Slice 3's orchestrator will send several.
+  const [toolCall, setToolCall] = useState<PendingToolCall | null>(null);
   // "" until GET /api/models has answered. A send in that window carries no
   // `model` at all, which the server reads as its own default - so the picker
   // failing to load costs the user the choice, never the answer.
   const [model, setModel] = useState("");
+  // Slice 3, opt-in per question. False on the server too, so a client that
+  // never sends the flag gets the Slice 1 path unchanged.
+  const [orchestrator, setOrchestrator] = useState(false);
+  // Every ENABLED agent. Empty for a deployment with none configured, and the
+  // picker then renders nothing at all.
+  const [agents, setAgents] = useState<AgentOption[]>([]);
+  // null is the default agent, and a send then carries no `agent_id` - exactly
+  // the body this app sent before agents existed.
+  const [agentId, setAgentId] = useState<string | null>(null);
+  // The plan, as it runs. Keyed by step id and updated in place, because each
+  // step arrives twice - `running`, then its final state.
+  const [steps, setSteps] = useState<PlanStep[]>([]);
+  // Set by the terminal `approval_required` frame. While it is non-null the plan
+  // is paused, the tool has NOT been called, and nothing has been answered.
+  const [approval, setApproval] = useState<(ApprovalRequest & { pendingId: string }) | null>(null);
   const [dragging, setDragging] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -6135,6 +6286,40 @@ export default function ChatWindow({
         setModel(list.some((m) => m.id === stored) ? stored! : fallback);
       })
       .catch(() => setModels([]));
+    // Same rule as the model list: a deployment with no MCP server answers with
+    // [], and a failure here leaves the 도구 button hidden rather than putting a
+    // banner over a conversation that answers fine without it.
+    apiFetch<McpToolOption[]>("/api/mcp/tools")
+      .then(setTools)
+      .catch(() => setTools([]));
+    // Same rule again, and it matters most here: a deployment with no agents
+    // answers with [], the picker disappears, and every send carries no
+    // `agent_id` - which is the app as it was. A failure to load agents must
+    // never stop a question being asked.
+    apiFetch<AgentOption[]>("/api/agents/selectable")
+      .then((list) => {
+        setAgents(list);
+        let stored: string | null = null;
+        try {
+          stored = localStorage.getItem(AGENT_STORAGE_KEY);
+        } catch {
+          // Private mode, or site data blocked. Fall through to the default.
+        }
+        // Validated against the list, never trusted: an agent an admin disabled
+        // is absent from it, and a stale id would be a 409 on every send.
+        setAgentId(list.some((a) => a.id === stored) ? stored : null);
+      })
+      .catch(() => setAgents([]));
+    // Read HERE and not in a useState initialiser, for the same two reasons the
+    // model is: this component is server-rendered, where `window` does not
+    // exist, and reading during render would hydrate a different value than the
+    // server emitted.
+    try {
+      setOrchestrator(localStorage.getItem(ORCHESTRATOR_STORAGE_KEY) === "true");
+    } catch {
+      // Private mode, or site data blocked. The default is off, which is where
+      // this already is.
+    }
   }, []);
 
   useEffect(() => {
@@ -6244,59 +6429,47 @@ export default function ChatWindow({
     }
   }
 
-  async function handleSend() {
-    if (!input.trim() || sending) return;
-    if (attachments.some((a) => a.status === "uploading")) {
-      setError("첨부파일 업로드가 끝난 뒤에 보내 주세요.");
-      return;
-    }
-
-    const question = input;
-    const sent = attachments.filter((a) => a.attachment !== null).map((a) => a.attachment!);
-    const pendingId = `temp-${Date.now()}`;
+  /** One streamed turn, from either endpoint.
+   *
+   * `start` is `streamChat` for a new question and `approveChat` for the second
+   * half of a plan that paused. Everything after the request is identical - the
+   * same frames, the same `done` handling, the same abort and truncation rules -
+   * and two copies of it would have diverged on the first fix. */
+  async function run(
+    question: string,
+    pendingId: string,
+    start: (onEvent: (event: ChatEvent) => void, signal: AbortSignal) => Promise<void>,
+  ) {
     const controller = new AbortController();
     abortRef.current = controller;
     stoppedRef.current = false;
-    setInput("");
-    // Cleared here rather than on `done`: these rows are claimed by the send,
-    // so leaving the chips up would offer a 삭제 that now answers 409
-    // 이미 전송된 첨부파일은 삭제할 수 없습니다.
-    setAttachments([]);
     setError(null);
     setAnnouncement("");
+    // The pause is over the moment a new stream starts, whichever way it ends.
+    setApproval(null);
     setSending(true);
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: pendingId,
-        role: "user",
-        content: question,
-        citations: [],
-        attachments: sent,
-        model: null,
-        created_at: new Date().toISOString(),
-      },
-    ]);
 
     try {
       let newConversationId: string | null = null;
-      // Neither `token` nor `citations` gets a branch, both deliberately: Slice 1's
-      // answer() is a single non-streaming llm_provider.chat() call so `token` is
-      // never emitted at all (it is Slice 3's), and the `citations` frame carries
-      // the identical array that `done` carries one frame later.
-      await streamChat(
-        {
-          conversation_id: conversationId,
-          message: question,
-          attachment_ids: sent.map((a) => a.id),
-          // Omitted, not sent empty, while the list is still loading: the
-          // backend reads an absent `model` as ANSWER_MODEL and an unknown one
-          // as a 400.
-          ...(model ? { model } : {}),
-        },
-        (event) => {
+      // Neither `token` nor `citations` gets a branch, both deliberately:
+      // answer() is a single non-streaming llm_provider.chat() call so `token`
+      // is never emitted at all, and the `citations` frame carries the identical
+      // array that `done` carries one frame later.
+      await start((event) => {
           if (event.type === "status") {
             setStatus(STATUS_LABEL[event.status] ?? null);
+          } else if (event.type === "step") {
+            // Upsert: every step arrives twice, `running` then its final state.
+            setSteps((prev) => {
+              const next = prev.filter((s) => s.id !== event.id);
+              return [...next, event];
+            });
+          } else if (event.type === "approval_required") {
+            // TERMINAL. The plan stopped, the tool has not run and no answer is
+            // coming until this is answered - so the question bubble stays on
+            // screen and the card below the transcript takes over.
+            setApproval({ ...event, pendingId });
+            setNotice(`${event.step.tool} 도구 실행 승인이 필요합니다.`);
           } else if (event.type === "error") {
             setError(event.detail);
             // Take the question back off screen with it. An `error` frame means
@@ -6310,25 +6483,39 @@ export default function ChatWindow({
           } else if (event.type === "done") {
             newConversationId = event.conversation_id;
             setAnnouncement(event.content);
+            // The plan goes when the answer arrives, exactly as the status line
+            // does. It is rendered after the transcript, so leaving it up put
+            // "문서 검색: …" UNDER the answer it produced - seen in a screenshot,
+            // not in the markup - and it would then sit there through the next
+            // question. The permanent record is the 추적 dialog, which shows the
+            // plan with each step's timing and result.
+            setSteps([]);
             setMessages((prev) => [
               ...prev,
               {
-                id: `assistant-${Date.now()}`,
+                // The row id from the `done` frame, not a fabricated
+                // `assistant-${Date.now()}`: the 👍/👎 and 추적 controls call
+                // /api/messages/{id}/..., so a made-up id made both of them
+                // 404 on the answer that had just arrived.
+                id: event.message_id,
                 role: "assistant",
                 content: event.content,
                 citations: event.citations,
                 attachments: [],
+                feedback: null,
                 // From the frame, not from `model` state: the user may well
                 // switch the picker while this answer is still streaming, and
                 // the label has to name what actually answered.
                 model: event.model,
+                // From the frame for the same reason the model is: the picker
+                // may have moved while this answer was streaming, and the label
+                // has to name what actually produced it.
+                agent_name: event.agent_name,
                 created_at: new Date().toISOString(),
               },
             ]);
           }
-        },
-        controller.signal,
-      );
+      }, controller.signal);
 
       if (!conversationId && newConversationId) {
         setConversationId(newConversationId);
@@ -6385,6 +6572,122 @@ export default function ChatWindow({
     }
   }
 
+  async function handleSend() {
+    if (!input.trim() || sending) return;
+    if (attachments.some((a) => a.status === "uploading")) {
+      setError("첨부파일 업로드가 끝난 뒤에 보내 주세요.");
+      return;
+    }
+
+    const question = input;
+    const sent = attachments.filter((a) => a.attachment !== null).map((a) => a.attachment!);
+    const calls = toolCall ? [toolCall] : [];
+    const pendingId = `temp-${Date.now()}`;
+    setInput("");
+    // Cleared here rather than on `done`: these rows are claimed by the send,
+    // so leaving the chips up would offer a 삭제 that now answers 409
+    // 이미 전송된 첨부파일은 삭제할 수 없습니다.
+    setAttachments([]);
+    // Cleared with the attachments and for the same reason: the call belongs to
+    // the turn that was just sent, and leaving the chip up would silently run
+    // the tool again on the next question.
+    setToolCall(null);
+    // The previous turn's plan, not this one's. Cleared on SEND rather than in
+    // run(), so the steps of a paused plan survive the approval round trip and
+    // the user can still read what has already happened while deciding.
+    setSteps([]);
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: pendingId,
+        role: "user",
+        content: question,
+        citations: [],
+        attachments: sent,
+        model: null,
+        agent_name: null,
+        feedback: null,
+        created_at: new Date().toISOString(),
+      },
+    ]);
+
+    await run(question, pendingId, (onEvent, signal) =>
+      streamChat(
+        {
+          conversation_id: conversationId,
+          message: question,
+          attachment_ids: sent.map((a) => a.id),
+          ...(calls.length
+            ? { tool_calls: calls.map((c) => ({ tool_id: c.tool.id, arguments: c.arguments })) }
+            : {}),
+          // Omitted, not sent empty, while the list is still loading: the
+          // backend reads an absent `model` as ANSWER_MODEL and an unknown one
+          // as a 400.
+          ...(model ? { model } : {}),
+          // Omitted when off, so a turn that does not want a plan sends exactly
+          // the body Slice 1 sent.
+          ...(orchestrator ? { orchestrator: true } : {}),
+          // Omitted for the default agent, for the same reason: the request is
+          // then byte-identical to the one this app sent before agents existed.
+          ...(agentId ? { agent_id: agentId } : {}),
+        },
+        onEvent,
+        signal,
+      ),
+    );
+  }
+
+  /** 승인 / 거부 on a paused plan. The second request, carrying the token.
+   *
+   * `approved: false` is not "cancel" - the plan continues without that step and
+   * still answers from whatever else it finds, which is the same rule a failed
+   * step follows. The token is single-use server-side, so a double click is a
+   * Korean 404 rather than a second call to the tool. */
+  async function decide(approved: boolean) {
+    if (!approval || sending) return;
+    const { approval_token, pendingId, step } = approval;
+    setNotice(approved ? `${step.tool} 실행을 승인했습니다.` : `${step.tool} 실행을 거부했습니다.`);
+    await run(
+      messages.find((m) => m.id === pendingId)?.content ?? "",
+      pendingId,
+      (onEvent, signal) => approveChat({ approval_token, approved }, onEvent, signal),
+    );
+  }
+
+  function chooseOrchestrator(value: boolean) {
+    setOrchestrator(value);
+    setNotice(value ? "슈퍼 에이전트를 켰습니다." : "슈퍼 에이전트를 껐습니다.");
+    try {
+      localStorage.setItem(ORCHESTRATOR_STORAGE_KEY, String(value));
+    } catch {
+      // Same as the model: the choice applies to this session and just will not
+      // survive a reload.
+    }
+  }
+
+  /** Picking an agent also moves the MODEL picker to the agent's model.
+   *
+   * The server treats the agent's model as a default an explicit `model` still
+   * overrides, so leaving the picker where it was would send the old model and
+   * silently ignore the agent's - the user would have configured a model on the
+   * agent and never seen it used. Moving the visible control is what makes the
+   * two agree, and the user can still change it afterwards. */
+  function chooseAgent(id: string | null) {
+    setAgentId(id);
+    const agent = agents.find((a) => a.id === id) ?? null;
+    setNotice(`${agent?.name ?? "기본"} 에이전트로 답변합니다.`);
+    if (agent?.answer_model && models.some((m) => m.id === agent.answer_model)) {
+      setModel(agent.answer_model);
+    }
+    try {
+      if (id) localStorage.setItem(AGENT_STORAGE_KEY, id);
+      else localStorage.removeItem(AGENT_STORAGE_KEY);
+    } catch {
+      // The choice still applies to this session; it just will not survive a
+      // reload. Nothing to tell the user about.
+    }
+  }
+
   function chooseModel(id: string) {
     setModel(id);
     setNotice(`답변 모델을 ${models.find((m) => m.id === id)?.label ?? id}(으)로 바꿨습니다.`);
@@ -6394,11 +6697,6 @@ export default function ChatWindow({
       // The choice still applies to this session; it just will not survive a
       // reload. Nothing to tell the user about.
     }
-  }
-
-  function fill(text: string) {
-    setInput(text);
-    textareaRef.current?.focus();
   }
 
   const hasFiles = (e: React.DragEvent) => e.dataTransfer.types.includes("Files");
@@ -6448,37 +6746,91 @@ export default function ChatWindow({
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-transcript space-y-8 px-4 py-8 sm:px-6">
           {loaded && !error && messages.length === 0 && !sending && (
-            // §8 empty state: centred, `display` size, the greeting in the
-            // brand gradient, then 3-4 suggestion chips that fill the composer.
-            // break-keep (word-break: keep-all) because at 36px in a 343px
-            // column the browser's default breaks Korean between syllables -
-            // measured at 375px, "무엇이든" split across two lines as 무 / 엇이든.
-            // keep-all breaks at spaces instead, which is how the language
-            // reads. Only needed at display size; at 14-16px it is invisible.
-            <div className="mt-24">
-              {/* 36px is the display size for a desktop column. On a 390px
-                  phone the same string wraps to two lines and eats the top
-                  half of the screen, so it steps down below md. */}
-              <p className="break-keep text-center text-headline md:text-display">
-                <span className="text-gradient-brand">등록된 문서에 대해 무엇이든 물어보세요.</span>
+            // The masthead. It replaced a one-line invitation - "등록된 문서에
+            // 대해 무엇이든 물어보세요." - and four suggestion chips, both
+            // removed on the owner's instruction: the chips guessed at
+            // questions nobody had, and the line described a document-QA
+            // chatbot, which is not what this is.
+            //
+            // What it says instead is the product's own name, twice. 모판 is
+            // the seedling tray a rice farmer raises one crop in and
+            // transplants into any number of different fields, and it is what
+            // the mascot is carrying; MOPAN is Modular Orchestration Platform
+            // for Agent Nexus. The two readings say the same thing from
+            // opposite ends, which is why both are on screen and neither needs
+            // a sentence explaining it.
+            //
+            // §2 puts the gradient on the wordmark. It is on 모판 alone here -
+            // NOT on the body text under it, which is where it used to be: a
+            // whole sentence in a three-stop gradient is a surface treatment
+            // wearing a wordmark's clothes.
+            <div className="mt-12 flex flex-col items-center text-center">
+              {/* See the note at the top of this file for why this is a plain
+                  <img> and why it is decorative. */}
+              <img
+                src="/mascot.png"
+                alt=""
+                aria-hidden="true"
+                width={720}
+                height={631}
+                className="mb-6 h-auto w-40 md:w-56"
+              />
+              {/* h1 because this screen has none otherwise, and the transcript
+                  that replaces it has none either - a page whose only heading
+                  is the sidebar's would announce as unstructured.
+                  Two characters at 36px, so unlike the sentence it replaced
+                  there is nothing here that can wrap at 390px. */}
+              <h1 className="text-display font-medium">
+                <span className="text-gradient-brand">모판</span>
+                {/* The Latin half is deliberately outside the gradient: across
+                    ASCII glyphs at this size it reads as a rendering fault, and
+                    this parenthetical is here to be legible, not decorative. */}
+                <span className="text-on-surface">(MOPAN)</span>
+              </h1>
+              {/* The English reading, with the five letters the name is built
+                  from carried at full contrast so the acronym is legible
+                  without a gloss. 45 Latin characters at 12px is ~270px, which
+                  clears a 390px phone's 358px column on one line - measured. */}
+              <p className="mt-1 text-caption tracking-wide text-on-surface-variant">
+                <b className="font-medium text-on-surface">M</b>odular{" "}
+                <b className="font-medium text-on-surface">O</b>rchestration{" "}
+                <b className="font-medium text-on-surface">P</b>latform for{" "}
+                <b className="font-medium text-on-surface">A</b>gent{" "}
+                <b className="font-medium text-on-surface">N</b>exus
               </p>
-              <div className="mt-10 flex flex-wrap justify-center gap-2">
-                {SUGGESTIONS.map((text) => (
-                  <button
-                    key={text}
-                    type="button"
-                    onClick={() => fill(text)}
-                    className="break-keep rounded-full bg-surface-container px-4 py-2 text-label text-on-surface-variant transition-colors duration-150 hover:bg-surface-container-high"
-                  >
-                    {text}
-                  </button>
-                ))}
-              </div>
+              {/* The one rule on this screen, and it is doing a masthead's job:
+                  separating the name from what the name means. §1 allows a
+                  border where it carries meaning. w-12 rather than full width -
+                  a full-width rule would read as a section divider. */}
+              <hr className="my-5 w-12 border-t border-outline-variant" />
+              {/* break-keep (word-break: keep-all): the browser's default
+                  breaks Korean between syllables, and at 390px that split
+                  words mid-word in the line below. keep-all breaks at spaces
+                  instead, which is how the language reads. */}
+              <p className="max-w-[32rem] break-keep text-body-lg text-on-surface">
+                한 판에서 길러 어느 논에나 옮겨 심습니다.
+              </p>
+              {/* 32rem, not 28: at 28 the line below broke after 베이스 and left
+                  시스템입니다. alone on a second line. It is one line on a
+                  desktop column now and two on a phone, where it has to be. */}
+              <p className="mt-2 max-w-[32rem] break-keep text-body text-on-surface-variant">
+                RAG · MCP · LLM · 에이전트를 직접 등록하고 조합하는 베이스 시스템입니다.
+              </p>
             </div>
           )}
           {messages.map((m) => (
             <MessageBubble key={m.id} message={m} onNotify={setNotice} />
           ))}
+          {/* The plan as it runs, and the one question it stops to ask. Its own
+              component because ChatWindow is long enough already and because
+              neither half needs anything from this file but its props. */}
+          <PlanProgress
+            steps={steps}
+            approval={approval}
+            sending={sending}
+            onDecide={(approved) => void decide(approved)}
+          />
+
           {/* aria-live, because this line is the only feedback between pressing
               전송 and the answer landing, and it is never focused. The sparkle
               is the streaming indicator - the one looping animation in the app
@@ -6534,6 +6886,18 @@ export default function ChatWindow({
           models={models}
           model={model}
           onModelChange={chooseModel}
+          tools={tools}
+          toolCall={toolCall}
+          onToolSelect={(call) => {
+            setToolCall(call);
+            setNotice(`${call.tool.name} 도구를 이번 질문에 사용합니다.`);
+          }}
+          onToolRemove={() => setToolCall(null)}
+          orchestrator={orchestrator}
+          onOrchestratorChange={chooseOrchestrator}
+          agents={agents}
+          agentId={agentId}
+          onAgentChange={chooseAgent}
         />
       </div>
     </div>
@@ -6804,6 +7168,265 @@ export function formatSize(bytes: number): string {
 Rename inline in the row, delete through the existing `ConfirmDialog`. The dialog is rendered OUTSIDE `content`, which is rendered twice — docked and in the drawer — so one `showModal()` inside it would open two dialogs.
 
 ```tsx
+"use client";
+
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { apiFetch, errorMessage } from "@/lib/api";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import ErrorBanner from "@/components/ui/ErrorBanner";
+import type { Conversation, User } from "@/lib/types";
+
+// The trap has to enumerate everything focusable inside the drawer, not just
+// what happens to be in it today: with "a, button" the first <input> added to
+// the sidebar (a history filter) becomes an element the trap does not know
+// about, so `last` stops being the real last stop and Tab escapes the dialog.
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** A glyph per function, keyed by the route it stands for.
+ *
+ * Inline SVG on `currentColor`, exactly the way ThemeToggle.tsx already does
+ * it, and deliberately NOT an icon package: a dozen paths do not justify a
+ * dependency, a bundle, or a second source of truth for what "에이전트" looks
+ * like. The agent shield is the same path the composer's agent control draws,
+ * because they mean the same thing and a user should not have to learn two.
+ *
+ * Every one of these is DECORATIVE. The label beside it is the accessible name
+ * and the icon repeats it, so the <svg> is aria-hidden and contributes nothing
+ * to the name - a link that announced "문서 문서" would be the alternative.
+ *
+ * The conversation history rows deliberately get none. They are titles, not
+ * functions: one identical glyph repeated down twenty rows says nothing that
+ * distinguishes them, and it would spend 32px of a 224px row on decoration in
+ * the one place where the text already truncates. */
+const NAV_ICON: Record<string, React.ReactNode> = {
+  // 새 대화 - a pencil, the compose mark.
+  "/chat": (
+    <>
+      <path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17Z" />
+      <path d="M14.5 7.5 16.5 9.5" />
+    </>
+  ),
+  // 문서 - a page with a folded corner.
+  "/documents": (
+    <>
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" />
+      <path d="M14 3v5h5" />
+      <path d="M9 13h6M9 17h4" />
+    </>
+  ),
+  // 분류 관리 - a folder, which is what a collection is.
+  "/collections": <path d="M3 8a2 2 0 0 1 2-2h3.2l1.8 2H19a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
+  // 사용자 관리 - two people.
+  "/users": (
+    <>
+      <path d="M15 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-4A3.5 3.5 0 0 0 4 18.5V20" />
+      <circle cx="9.5" cy="8" r="3.2" />
+      <path d="M17 11.2a3 3 0 0 0 0-6" />
+      <path d="M20 20v-1.5a3.5 3.5 0 0 0-2.6-3.4" />
+    </>
+  ),
+  // 프롬프트 관리 - a speech bubble with lines in it: the text the system says.
+  "/prompts": (
+    <>
+      <path d="M20 12a7 7 0 0 1-7 7H8.5L4 22v-4.2A7 7 0 0 1 4 12v-.5A6.5 6.5 0 0 1 10.5 5h3A6.5 6.5 0 0 1 20 11.5Z" />
+      <path d="M8.5 10.5h7M8.5 14h4" />
+    </>
+  ),
+  // 에이전트 생성 - the shield-check the composer's agent control uses.
+  "/agents": (
+    <>
+      <path d="M12 3 4 7v5c0 4.4 3.2 8.2 8 9 4.8-.8 8-4.6 8-9V7l-8-4Z" />
+      <path d="m9 12 2 2 4-4" />
+    </>
+  ),
+  // MCP 서버 관리 - a two-unit server rack with its status lamps.
+  "/mcp": (
+    <>
+      <rect x="3.5" y="4" width="17" height="6.5" rx="1.8" />
+      <rect x="3.5" y="13.5" width="17" height="6.5" rx="1.8" />
+      <path d="M7 7.2h.01M7 16.7h.01" />
+    </>
+  ),
+  // 고급 설정 - sliders, not a cog: these are values an admin tunes.
+  "/settings": (
+    <>
+      <path d="M4 7h6M14 7h6M4 17h10M18 17h2" />
+      <circle cx="12" cy="7" r="2" />
+      <circle cx="16" cy="17" r="2" />
+    </>
+  ),
+  // 로그아웃 - out through the door.
+  logout: (
+    <>
+      <path d="M15 12H4" />
+      <path d="m7.5 8.5-3.5 3.5 3.5 3.5" />
+      <path d="M11 5h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-6" />
+    </>
+  ),
+};
+
+function NavIcon({ name }: { name: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      className="h-5 w-5 shrink-0"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {NAV_ICON[name]}
+    </svg>
+  );
+}
+
+export default function Sidebar() {
+  const pathname = usePathname();
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  // null means "not loaded yet", which is not the same as an empty list. With
+  // [] as the initial value every page load flashes "아직 대화가 없습니다."
+  // for the length of the fetch, including for users who do have conversations.
+  const [conversations, setConversations] = useState<Conversation[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // Separate from `error` on purpose. The history region is scrollable, so an
+  // ErrorBanner rendered at its top is off-screen for anyone with enough
+  // conversations to have scrolled - measured 0 visible pixels at 1280x800
+  // with 31 conversations. A logout failure has to report next to the button
+  // that was clicked. It is also cleared per attempt rather than by load().
+  const [logoutError, setLogoutError] = useState<string | null>(null);
+  // Which row's ⋯ menu is open, which row is being renamed, and which row the
+  // confirmation dialog is about. Three separate ids rather than one union,
+  // because a rename and a delete are never in flight at once but the menu that
+  // opened either of them has already closed by then.
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<Conversation | null>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const drawerRef = useRef<HTMLDivElement>(null);
+  // Escape discards a rename; a click away saves it. Both unmount the input, so
+  // this is what a blur fired during that removal is checked against.
+  const cancelRenameRef = useRef(false);
+
+  // allSettled, not all: these two requests are independent and Promise.all
+  // rejects the pair on the first failure, so a 500 from /api/conversations
+  // threw away a perfectly good /api/auth/me and left the footer showing the
+  // blank U+00A0 placeholder - a transient history-list error made the user
+  // look logged out. Each result is now applied on its own. The list is still set
+  // in the same tick as the user, so `conversations` stays null - never [] -
+  // until the fetch resolves, which is what keeps the empty state from
+  // flashing. The conversations failure is checked first because the banner
+  // renders in the history region, where its own error belongs.
+  const load = useCallback(async () => {
+    const [me, list] = await Promise.allSettled([
+      apiFetch<User>("/api/auth/me"),
+      apiFetch<Conversation[]>("/api/conversations"),
+    ]);
+    if (me.status === "fulfilled") setUser(me.value);
+    if (list.status === "fulfilled") setConversations(list.value);
+    const failed = [list, me].find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    setError(failed ? errorMessage(failed.reason) : null);
+  }, []);
+
+  // pathname is a dependency on purpose: the chat page creates a conversation
+  // and then router.replace()s to /chat/{id}, and the new title has to reach
+  // this list. Measured on `next start`, that particular navigation is a full
+  // document load, which remounts this component and reloads the list anyway;
+  // the dependency is what covers the soft navigations - every click between
+  // conversations - and what would still cover the replace if it became one.
+  useEffect(() => {
+    void load();
+  }, [load, pathname]);
+
+  // Without these the drawer is only technically keyboard-usable: nothing moves
+  // focus into it on open, so dismissing it means tabbing past every history
+  // link to reach the closing overlay - ~34 presses with 30 conversations.
+  // Escape closes it, and focus returns to the toggle that opened it.
+  useEffect(() => {
+    if (!open) return;
+    drawerRef.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
+    // aria-modal="true" is a promise that nothing outside the dialog is
+    // reachable; `inert` is what makes it true for the DOM rather than only
+    // for AT that honours the attribute - measured with the drawer open,
+    // <main> still held 4 focusable elements. It is set from here with
+    // setAttribute rather than as a JSX prop because `open` lives in this
+    // client component while <main> is rendered by (app)/layout.tsx, which is
+    // a server component. The body lock is the pointer half of the same bug:
+    // the drawer is `fixed`, so without it the page behind scrolls on touch.
+    const main = document.getElementById("app-main");
+    main?.setAttribute("inert", "");
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        return;
+      }
+      // The drawer covers the page but does not remove it from the tab order,
+      // so without this Tab walks into content hidden behind the overlay.
+      if (event.key !== "Tab") return;
+      const focusable = drawerRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE);
+      if (!focusable?.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      main?.removeAttribute("inert");
+      document.body.style.overflow = previousOverflow;
+      toggleRef.current?.focus();
+    };
+  }, [open]);
+
+  // `md:hidden` only stops the drawer from being *displayed* above 768px; the
+  // state stays true, so resizing 390 -> 1280 -> 390 with it open brought the
+  // drawer back on the way down without the user reopening it. 768px is
+  // Tailwind's `md`, the same breakpoint the classes use.
+  useEffect(() => {
+    const docked = window.matchMedia("(min-width: 768px)");
+    const onChange = () => {
+      if (docked.matches) setOpen(false);
+    };
+    docked.addEventListener("change", onChange);
+    return () => docked.removeEventListener("change", onChange);
+  }, []);
+
+  async function handleLogout() {
+    // Navigate only on success. A `finally` here lands the user on /login after
+    // a failed request - with mopan_session still in the browser and the Redis
+    // session still valid, because neither delete_cookie nor delete_session
+    // ran. "Logged out" with a live session is the worst outcome available, so
+    // a failure stays put and says so next to the button that was clicked.
+    setLogoutError(null);
+    try {
+      await apiFetch("/api/auth/logout", { method: "POST" });
+    } catch (err) {
+      setLogoutError(errorMessage(err));
+      return;
+    }
+    router.push("/login");
+    // The App Router caches rendered segments client-side. Without this the
+    // authenticated pages stay in that cache after the cookie is gone.
+    router.refresh();
+  }
+
   async function commitRename(id: string) {
     const title = renameValue.trim();
     setRenamingId(null);
@@ -6832,10 +7455,249 @@ Rename inline in the row, delete through the existing `ConfirmDialog`. The dialo
     if (pathname === `/chat/${conversation.id}`) router.push("/chat");
     await load();
   }
-```
 
+  const navLinks = [
+    { href: "/chat", label: "새 대화" },
+    { href: "/documents", label: "문서" },
+  ];
 
-```tsx
+  // Rendered only for an admin. All three screens are admin-only on the server too -
+  // every endpoint behind them answers 403 관리자 권한이 필요합니다. - so this is
+  // about not offering a link that leads to a refusal, not about access.
+  const adminLinks = [
+    { href: "/collections", label: "분류 관리" },
+    { href: "/users", label: "사용자 관리" },
+    { href: "/prompts", label: "프롬프트 관리" },
+    { href: "/mcp", label: "MCP 서버 관리" },
+    // After MCP on purpose: an agent is assembled out of the collections,
+    // prompts and MCP tools above it, so the order follows the order the work
+    // is actually done in.
+    { href: "/agents", label: "에이전트 생성" },
+    { href: "/settings", label: "고급 설정" },
+  ];
+
+  // Same markup for both groups: the active styling and aria-current below are
+  // the one thing a second copy would eventually get wrong.
+  const navLink = (link: { href: string; label: string }) => {
+    const active = pathname === link.href;
+    return (
+      <Link
+        key={link.href}
+        href={link.href}
+        onClick={() => setOpen(false)}
+        // The background alone said "you are here" to sighted users only.
+        aria-current={active ? "page" : undefined}
+        // gap-3 (12px) beside a 20px icon inside px-4 leaves 224 - 32 = 192px
+        // for the label in a 280px sidebar. The longest is MCP 서버 관리 at
+        // ~84px, so nothing here comes near truncating; no `truncate` class,
+        // because a label that cannot overflow does not need one and one that
+        // could should be shortened instead.
+        className={`flex items-center gap-3 rounded-full px-4 py-2 text-label transition-colors duration-150 ${
+          active
+            ? "bg-primary-container font-medium text-on-primary-container"
+            : "text-on-surface-variant hover:bg-surface-container-high"
+        }`}
+      >
+        <NavIcon name={link.href} />
+        {link.label}
+      </Link>
+    );
+  };
+
+  const content = (
+    // aria-label because the MOPAN line above is a <div>, so the landmark had
+    // no accessible name and announced as a bare "navigation". 대화 기록 stays
+    // a <div> rather than becoming a heading: the sidebar precedes <main> in
+    // the DOM, so a heading here would sit above every page's <h1>.
+    // No border-r. The sidebar separates from the page by tone -
+    // surface-container-low against surface - which is the whole §1 principle
+    // in one class. 280px per §6.
+    <nav
+      aria-label="주 메뉴"
+      className="flex h-full w-sidebar flex-col gap-1 bg-surface-container-low p-3"
+    >
+      {/* §2: the gradient is allowed on the wordmark and nowhere else on this
+          screen. */}
+      <div className="mb-4 px-4 pt-2 text-title font-medium">
+        <span className="text-gradient-brand">MOPAN</span>
+      </div>
+      {navLinks.map(navLink)}
+
+      {/* `user` is null until /api/auth/me lands, so a non-admin never sees this
+          appear and then vanish. flex-col on the wrapper because the links are
+          <a> elements: as direct children of this flex column they stack on
+          their own, but inside a plain div they would run side by side. */}
+      {user?.role === "admin" && (
+        <div className="mt-4">
+          <div className="mb-1 px-4 text-caption tracking-wide text-on-surface-variant">관리</div>
+          <div className="flex flex-col gap-1">{adminLinks.map(navLink)}</div>
+        </div>
+      )}
+
+      <div className="mt-6 flex-1 overflow-y-auto">
+        <div className="mb-1 px-4 text-caption tracking-wide text-on-surface-variant">
+          대화 기록
+        </div>
+        {error && <ErrorBanner message={error} />}
+        {!error && conversations?.length === 0 && (
+          <p className="px-4 py-2 text-caption text-on-surface-variant">아직 대화가 없습니다.</p>
+        )}
+        {/* Which conversation you are in is the one piece of state a history
+            list exists to convey, and the links carried only a hover style:
+            measured at /chat/c3, every link's computed background was
+            rgba(0,0,0,0). Same treatment as the nav links above. */}
+        {conversations?.map((c) => {
+          const active = pathname === `/chat/${c.id}`;
+
+          // The rename is an inline field in the row rather than a third
+          // dialog: the row is where the name is read, and a dialog to change
+          // one string would be two more focus transitions for the same edit.
+          if (renamingId === c.id) {
+            return (
+              <form
+                key={c.id}
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void commitRename(c.id);
+                }}
+                className="px-1 py-1"
+              >
+                <input
+                  autoFocus
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Escape") return;
+                    // stopPropagation, or the drawer's document-level Escape
+                    // handler closes the whole sidebar behind the cancel.
+                    e.stopPropagation();
+                    cancelRenameRef.current = true;
+                    setRenamingId(null);
+                  }}
+                  // Click-away saves. Escape is the only way to discard, and
+                  // the ref is what tells the two apart if a browser fires
+                  // blur while removing the focused input.
+                  onBlur={() => {
+                    if (cancelRenameRef.current) {
+                      cancelRenameRef.current = false;
+                      return;
+                    }
+                    void commitRename(c.id);
+                  }}
+                  aria-label={`대화 이름: ${c.title}`}
+                  maxLength={200}
+                  className="field w-full"
+                />
+              </form>
+            );
+          }
+
+          return (
+            <div
+              key={c.id}
+              // One blur handler for the row AND its menu: with it on the menu
+              // alone, clicking the toggle to close fired blur first, closed
+              // the menu, and the click then reopened it.
+              onBlur={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setMenuFor(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key !== "Escape" || menuFor !== c.id) return;
+                e.stopPropagation();
+                setMenuFor(null);
+              }}
+            >
+              <div
+                className={`flex items-center rounded-full transition-colors duration-150 ${
+                  active ? "bg-primary-container" : "hover:bg-surface-container-high"
+                }`}
+              >
+                <Link
+                  href={`/chat/${c.id}`}
+                  onClick={() => setOpen(false)}
+                  aria-current={active ? "page" : undefined}
+                  className={`min-w-0 flex-1 truncate rounded-full px-4 py-2 text-label ${
+                    active ? "font-medium text-on-primary-container" : "text-on-surface-variant"
+                  }`}
+                >
+                  {c.title}
+                </Link>
+                <button
+                  type="button"
+                  aria-label={`대화 메뉴: ${c.title}`}
+                  aria-expanded={menuFor === c.id}
+                  onClick={() => setMenuFor(menuFor === c.id ? null : c.id)}
+                  className="mr-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-on-surface-variant transition-colors duration-150 hover:bg-surface-container-highest"
+                >
+                  <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
+                    <circle cx="12" cy="5" r="1.6" />
+                    <circle cx="12" cy="12" r="1.6" />
+                    <circle cx="12" cy="19" r="1.6" />
+                  </svg>
+                </button>
+              </div>
+              {menuFor === c.id && (
+                // Inline, not an absolutely positioned popover: this list is
+                // the sidebar's `overflow-y-auto` region, which CLIPS an
+                // absolutely positioned child, so a floating menu on the last
+                // visible row would be cut in half.
+                <div className="my-1 flex flex-col rounded-md bg-surface-container py-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuFor(null);
+                      setRenameValue(c.title);
+                      setRenamingId(c.id);
+                    }}
+                    className="px-4 py-2 text-left text-label text-on-surface transition-colors duration-150 hover:bg-surface-container-high"
+                  >
+                    이름 변경
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuFor(null);
+                      setDeleteTarget(c);
+                    }}
+                    className="px-4 py-2 text-left text-label text-error transition-colors duration-150 hover:bg-surface-container-high"
+                  >
+                    삭제
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* The one surviving divider in the sidebar: it separates the account
+          block from a scrolling list, where a tonal step alone would read as
+          "the list continues". §1 - borders where they carry meaning. */}
+      <div className="mt-3 flex flex-col gap-2 border-t border-outline-variant pt-3">
+        {/* The placeholder is U+00A0, not an ASCII space: a plain space is
+            collapsible, so the line gets no line box and is 0px tall until
+            /api/auth/me lands - at which point it grows 16px and shoves
+            로그아웃 down under the pointer already resting on it. */}
+        <div className="truncate px-4 text-caption text-on-surface-variant">
+          {user ? `${user.email}${user.role === "admin" ? " · 관리자" : ""}` : "\u00a0"}
+        </div>
+        {logoutError && <ErrorBanner message={logoutError} />}
+        {/* type="button" on every button in this file: the default is
+            "submit", which is a live bug the moment one of them ends up
+            inside a <form>. */}
+        <button type="button" onClick={() => void handleLogout()} className="btn-tonal w-full gap-2">
+          <NavIcon name="logout" />
+          로그아웃
+        </button>
+      </div>
+    </nav>
+  );
+
+  return (
+    <>
+      {/* Outside `content`, which is rendered TWICE - once docked, once in the
+          drawer. Inside it, one showModal() call would open two dialogs and
+          only the second would be reachable. */}
       {deleteTarget && (
         <ConfirmDialog
           title="대화 삭제"
@@ -6845,6 +7707,629 @@ Rename inline in the row, delete through the existing `ConfirmDialog`. The dialo
           onClose={() => setDeleteTarget(null)}
         />
       )}
+      {/* Not rendered while the drawer is open: at z-20 it sits *under* the
+          z-30 drawer, so a pointer user cannot reach it while a keyboard user
+          can still focus it and press it for nothing. No aria-expanded either
+          - it only opens; the drawer closes via its overlay or Escape. */}
+      {!open && (
+        <button
+          ref={toggleRef}
+          type="button"
+          aria-label="메뉴 열기"
+          aria-controls="sidebar-drawer"
+          className="icon-btn fixed left-2 top-2 z-20 bg-surface-container text-title md:hidden"
+          onClick={() => setOpen(true)}
+        >
+          ☰
+        </button>
+      )}
+      <div className="hidden md:block">{content}</div>
+      {open && (
+        <div
+          id="sidebar-drawer"
+          ref={drawerRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="메뉴"
+          className="fixed inset-0 z-30 flex md:hidden"
+        >
+          <div className="relative">{content}</div>
+          {/* A button, not a div: this overlay is the only way to close the
+              drawer, and as a div it is unreachable without a pointer. */}
+          <button
+            type="button"
+            aria-label="메뉴 닫기"
+            className="flex-1 bg-scrim"
+            onClick={() => setOpen(false)}
+          />
+        </div>
+      )}
+    </>
+  );
+}
+```
+
+
+```tsx
+"use client";
+
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { apiFetch, errorMessage } from "@/lib/api";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import ErrorBanner from "@/components/ui/ErrorBanner";
+import type { Conversation, User } from "@/lib/types";
+
+// The trap has to enumerate everything focusable inside the drawer, not just
+// what happens to be in it today: with "a, button" the first <input> added to
+// the sidebar (a history filter) becomes an element the trap does not know
+// about, so `last` stops being the real last stop and Tab escapes the dialog.
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** A glyph per function, keyed by the route it stands for.
+ *
+ * Inline SVG on `currentColor`, exactly the way ThemeToggle.tsx already does
+ * it, and deliberately NOT an icon package: a dozen paths do not justify a
+ * dependency, a bundle, or a second source of truth for what "에이전트" looks
+ * like. The agent shield is the same path the composer's agent control draws,
+ * because they mean the same thing and a user should not have to learn two.
+ *
+ * Every one of these is DECORATIVE. The label beside it is the accessible name
+ * and the icon repeats it, so the <svg> is aria-hidden and contributes nothing
+ * to the name - a link that announced "문서 문서" would be the alternative.
+ *
+ * The conversation history rows deliberately get none. They are titles, not
+ * functions: one identical glyph repeated down twenty rows says nothing that
+ * distinguishes them, and it would spend 32px of a 224px row on decoration in
+ * the one place where the text already truncates. */
+const NAV_ICON: Record<string, React.ReactNode> = {
+  // 새 대화 - a pencil, the compose mark.
+  "/chat": (
+    <>
+      <path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17Z" />
+      <path d="M14.5 7.5 16.5 9.5" />
+    </>
+  ),
+  // 문서 - a page with a folded corner.
+  "/documents": (
+    <>
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" />
+      <path d="M14 3v5h5" />
+      <path d="M9 13h6M9 17h4" />
+    </>
+  ),
+  // 분류 관리 - a folder, which is what a collection is.
+  "/collections": <path d="M3 8a2 2 0 0 1 2-2h3.2l1.8 2H19a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
+  // 사용자 관리 - two people.
+  "/users": (
+    <>
+      <path d="M15 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-4A3.5 3.5 0 0 0 4 18.5V20" />
+      <circle cx="9.5" cy="8" r="3.2" />
+      <path d="M17 11.2a3 3 0 0 0 0-6" />
+      <path d="M20 20v-1.5a3.5 3.5 0 0 0-2.6-3.4" />
+    </>
+  ),
+  // 프롬프트 관리 - a speech bubble with lines in it: the text the system says.
+  "/prompts": (
+    <>
+      <path d="M20 12a7 7 0 0 1-7 7H8.5L4 22v-4.2A7 7 0 0 1 4 12v-.5A6.5 6.5 0 0 1 10.5 5h3A6.5 6.5 0 0 1 20 11.5Z" />
+      <path d="M8.5 10.5h7M8.5 14h4" />
+    </>
+  ),
+  // 에이전트 생성 - the shield-check the composer's agent control uses.
+  "/agents": (
+    <>
+      <path d="M12 3 4 7v5c0 4.4 3.2 8.2 8 9 4.8-.8 8-4.6 8-9V7l-8-4Z" />
+      <path d="m9 12 2 2 4-4" />
+    </>
+  ),
+  // MCP 서버 관리 - a two-unit server rack with its status lamps.
+  "/mcp": (
+    <>
+      <rect x="3.5" y="4" width="17" height="6.5" rx="1.8" />
+      <rect x="3.5" y="13.5" width="17" height="6.5" rx="1.8" />
+      <path d="M7 7.2h.01M7 16.7h.01" />
+    </>
+  ),
+  // 고급 설정 - sliders, not a cog: these are values an admin tunes.
+  "/settings": (
+    <>
+      <path d="M4 7h6M14 7h6M4 17h10M18 17h2" />
+      <circle cx="12" cy="7" r="2" />
+      <circle cx="16" cy="17" r="2" />
+    </>
+  ),
+  // 로그아웃 - out through the door.
+  logout: (
+    <>
+      <path d="M15 12H4" />
+      <path d="m7.5 8.5-3.5 3.5 3.5 3.5" />
+      <path d="M11 5h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-6" />
+    </>
+  ),
+};
+
+function NavIcon({ name }: { name: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      className="h-5 w-5 shrink-0"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {NAV_ICON[name]}
+    </svg>
+  );
+}
+
+export default function Sidebar() {
+  const pathname = usePathname();
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  // null means "not loaded yet", which is not the same as an empty list. With
+  // [] as the initial value every page load flashes "아직 대화가 없습니다."
+  // for the length of the fetch, including for users who do have conversations.
+  const [conversations, setConversations] = useState<Conversation[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // Separate from `error` on purpose. The history region is scrollable, so an
+  // ErrorBanner rendered at its top is off-screen for anyone with enough
+  // conversations to have scrolled - measured 0 visible pixels at 1280x800
+  // with 31 conversations. A logout failure has to report next to the button
+  // that was clicked. It is also cleared per attempt rather than by load().
+  const [logoutError, setLogoutError] = useState<string | null>(null);
+  // Which row's ⋯ menu is open, which row is being renamed, and which row the
+  // confirmation dialog is about. Three separate ids rather than one union,
+  // because a rename and a delete are never in flight at once but the menu that
+  // opened either of them has already closed by then.
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<Conversation | null>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const drawerRef = useRef<HTMLDivElement>(null);
+  // Escape discards a rename; a click away saves it. Both unmount the input, so
+  // this is what a blur fired during that removal is checked against.
+  const cancelRenameRef = useRef(false);
+
+  // allSettled, not all: these two requests are independent and Promise.all
+  // rejects the pair on the first failure, so a 500 from /api/conversations
+  // threw away a perfectly good /api/auth/me and left the footer showing the
+  // blank U+00A0 placeholder - a transient history-list error made the user
+  // look logged out. Each result is now applied on its own. The list is still set
+  // in the same tick as the user, so `conversations` stays null - never [] -
+  // until the fetch resolves, which is what keeps the empty state from
+  // flashing. The conversations failure is checked first because the banner
+  // renders in the history region, where its own error belongs.
+  const load = useCallback(async () => {
+    const [me, list] = await Promise.allSettled([
+      apiFetch<User>("/api/auth/me"),
+      apiFetch<Conversation[]>("/api/conversations"),
+    ]);
+    if (me.status === "fulfilled") setUser(me.value);
+    if (list.status === "fulfilled") setConversations(list.value);
+    const failed = [list, me].find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    setError(failed ? errorMessage(failed.reason) : null);
+  }, []);
+
+  // pathname is a dependency on purpose: the chat page creates a conversation
+  // and then router.replace()s to /chat/{id}, and the new title has to reach
+  // this list. Measured on `next start`, that particular navigation is a full
+  // document load, which remounts this component and reloads the list anyway;
+  // the dependency is what covers the soft navigations - every click between
+  // conversations - and what would still cover the replace if it became one.
+  useEffect(() => {
+    void load();
+  }, [load, pathname]);
+
+  // Without these the drawer is only technically keyboard-usable: nothing moves
+  // focus into it on open, so dismissing it means tabbing past every history
+  // link to reach the closing overlay - ~34 presses with 30 conversations.
+  // Escape closes it, and focus returns to the toggle that opened it.
+  useEffect(() => {
+    if (!open) return;
+    drawerRef.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
+    // aria-modal="true" is a promise that nothing outside the dialog is
+    // reachable; `inert` is what makes it true for the DOM rather than only
+    // for AT that honours the attribute - measured with the drawer open,
+    // <main> still held 4 focusable elements. It is set from here with
+    // setAttribute rather than as a JSX prop because `open` lives in this
+    // client component while <main> is rendered by (app)/layout.tsx, which is
+    // a server component. The body lock is the pointer half of the same bug:
+    // the drawer is `fixed`, so without it the page behind scrolls on touch.
+    const main = document.getElementById("app-main");
+    main?.setAttribute("inert", "");
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        return;
+      }
+      // The drawer covers the page but does not remove it from the tab order,
+      // so without this Tab walks into content hidden behind the overlay.
+      if (event.key !== "Tab") return;
+      const focusable = drawerRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE);
+      if (!focusable?.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      main?.removeAttribute("inert");
+      document.body.style.overflow = previousOverflow;
+      toggleRef.current?.focus();
+    };
+  }, [open]);
+
+  // `md:hidden` only stops the drawer from being *displayed* above 768px; the
+  // state stays true, so resizing 390 -> 1280 -> 390 with it open brought the
+  // drawer back on the way down without the user reopening it. 768px is
+  // Tailwind's `md`, the same breakpoint the classes use.
+  useEffect(() => {
+    const docked = window.matchMedia("(min-width: 768px)");
+    const onChange = () => {
+      if (docked.matches) setOpen(false);
+    };
+    docked.addEventListener("change", onChange);
+    return () => docked.removeEventListener("change", onChange);
+  }, []);
+
+  async function handleLogout() {
+    // Navigate only on success. A `finally` here lands the user on /login after
+    // a failed request - with mopan_session still in the browser and the Redis
+    // session still valid, because neither delete_cookie nor delete_session
+    // ran. "Logged out" with a live session is the worst outcome available, so
+    // a failure stays put and says so next to the button that was clicked.
+    setLogoutError(null);
+    try {
+      await apiFetch("/api/auth/logout", { method: "POST" });
+    } catch (err) {
+      setLogoutError(errorMessage(err));
+      return;
+    }
+    router.push("/login");
+    // The App Router caches rendered segments client-side. Without this the
+    // authenticated pages stay in that cache after the cookie is gone.
+    router.refresh();
+  }
+
+  async function commitRename(id: string) {
+    const title = renameValue.trim();
+    setRenamingId(null);
+    // Nothing to save, and the server would answer 422 for a blank title. The
+    // row keeps the name it had.
+    if (!title) return;
+    try {
+      await apiFetch(`/api/conversations/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ title }),
+      });
+    } catch (err) {
+      setError(errorMessage(err));
+      return;
+    }
+    // Reload rather than patching the array in place: PATCH bumps updated_at,
+    // and this list is ordered by it, so the renamed row moves.
+    await load();
+  }
+
+  async function confirmDelete(conversation: Conversation) {
+    await apiFetch(`/api/conversations/${conversation.id}`, { method: "DELETE" });
+    // Off the conversation that no longer exists, before the list reloads:
+    // staying put would leave /chat/{id} rendering a 404 banner over an empty
+    // transcript. push, not replace - Back should return to where they were.
+    if (pathname === `/chat/${conversation.id}`) router.push("/chat");
+    await load();
+  }
+
+  const navLinks = [
+    { href: "/chat", label: "새 대화" },
+    { href: "/documents", label: "문서" },
+  ];
+
+  // Rendered only for an admin. All three screens are admin-only on the server too -
+  // every endpoint behind them answers 403 관리자 권한이 필요합니다. - so this is
+  // about not offering a link that leads to a refusal, not about access.
+  const adminLinks = [
+    { href: "/collections", label: "분류 관리" },
+    { href: "/users", label: "사용자 관리" },
+    { href: "/prompts", label: "프롬프트 관리" },
+    { href: "/mcp", label: "MCP 서버 관리" },
+    // After MCP on purpose: an agent is assembled out of the collections,
+    // prompts and MCP tools above it, so the order follows the order the work
+    // is actually done in.
+    { href: "/agents", label: "에이전트 생성" },
+    { href: "/settings", label: "고급 설정" },
+  ];
+
+  // Same markup for both groups: the active styling and aria-current below are
+  // the one thing a second copy would eventually get wrong.
+  const navLink = (link: { href: string; label: string }) => {
+    const active = pathname === link.href;
+    return (
+      <Link
+        key={link.href}
+        href={link.href}
+        onClick={() => setOpen(false)}
+        // The background alone said "you are here" to sighted users only.
+        aria-current={active ? "page" : undefined}
+        // gap-3 (12px) beside a 20px icon inside px-4 leaves 224 - 32 = 192px
+        // for the label in a 280px sidebar. The longest is MCP 서버 관리 at
+        // ~84px, so nothing here comes near truncating; no `truncate` class,
+        // because a label that cannot overflow does not need one and one that
+        // could should be shortened instead.
+        className={`flex items-center gap-3 rounded-full px-4 py-2 text-label transition-colors duration-150 ${
+          active
+            ? "bg-primary-container font-medium text-on-primary-container"
+            : "text-on-surface-variant hover:bg-surface-container-high"
+        }`}
+      >
+        <NavIcon name={link.href} />
+        {link.label}
+      </Link>
+    );
+  };
+
+  const content = (
+    // aria-label because the MOPAN line above is a <div>, so the landmark had
+    // no accessible name and announced as a bare "navigation". 대화 기록 stays
+    // a <div> rather than becoming a heading: the sidebar precedes <main> in
+    // the DOM, so a heading here would sit above every page's <h1>.
+    // No border-r. The sidebar separates from the page by tone -
+    // surface-container-low against surface - which is the whole §1 principle
+    // in one class. 280px per §6.
+    <nav
+      aria-label="주 메뉴"
+      className="flex h-full w-sidebar flex-col gap-1 bg-surface-container-low p-3"
+    >
+      {/* §2: the gradient is allowed on the wordmark and nowhere else on this
+          screen. */}
+      <div className="mb-4 px-4 pt-2 text-title font-medium">
+        <span className="text-gradient-brand">MOPAN</span>
+      </div>
+      {navLinks.map(navLink)}
+
+      {/* `user` is null until /api/auth/me lands, so a non-admin never sees this
+          appear and then vanish. flex-col on the wrapper because the links are
+          <a> elements: as direct children of this flex column they stack on
+          their own, but inside a plain div they would run side by side. */}
+      {user?.role === "admin" && (
+        <div className="mt-4">
+          <div className="mb-1 px-4 text-caption tracking-wide text-on-surface-variant">관리</div>
+          <div className="flex flex-col gap-1">{adminLinks.map(navLink)}</div>
+        </div>
+      )}
+
+      <div className="mt-6 flex-1 overflow-y-auto">
+        <div className="mb-1 px-4 text-caption tracking-wide text-on-surface-variant">
+          대화 기록
+        </div>
+        {error && <ErrorBanner message={error} />}
+        {!error && conversations?.length === 0 && (
+          <p className="px-4 py-2 text-caption text-on-surface-variant">아직 대화가 없습니다.</p>
+        )}
+        {/* Which conversation you are in is the one piece of state a history
+            list exists to convey, and the links carried only a hover style:
+            measured at /chat/c3, every link's computed background was
+            rgba(0,0,0,0). Same treatment as the nav links above. */}
+        {conversations?.map((c) => {
+          const active = pathname === `/chat/${c.id}`;
+
+          // The rename is an inline field in the row rather than a third
+          // dialog: the row is where the name is read, and a dialog to change
+          // one string would be two more focus transitions for the same edit.
+          if (renamingId === c.id) {
+            return (
+              <form
+                key={c.id}
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void commitRename(c.id);
+                }}
+                className="px-1 py-1"
+              >
+                <input
+                  autoFocus
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Escape") return;
+                    // stopPropagation, or the drawer's document-level Escape
+                    // handler closes the whole sidebar behind the cancel.
+                    e.stopPropagation();
+                    cancelRenameRef.current = true;
+                    setRenamingId(null);
+                  }}
+                  // Click-away saves. Escape is the only way to discard, and
+                  // the ref is what tells the two apart if a browser fires
+                  // blur while removing the focused input.
+                  onBlur={() => {
+                    if (cancelRenameRef.current) {
+                      cancelRenameRef.current = false;
+                      return;
+                    }
+                    void commitRename(c.id);
+                  }}
+                  aria-label={`대화 이름: ${c.title}`}
+                  maxLength={200}
+                  className="field w-full"
+                />
+              </form>
+            );
+          }
+
+          return (
+            <div
+              key={c.id}
+              // One blur handler for the row AND its menu: with it on the menu
+              // alone, clicking the toggle to close fired blur first, closed
+              // the menu, and the click then reopened it.
+              onBlur={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setMenuFor(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key !== "Escape" || menuFor !== c.id) return;
+                e.stopPropagation();
+                setMenuFor(null);
+              }}
+            >
+              <div
+                className={`flex items-center rounded-full transition-colors duration-150 ${
+                  active ? "bg-primary-container" : "hover:bg-surface-container-high"
+                }`}
+              >
+                <Link
+                  href={`/chat/${c.id}`}
+                  onClick={() => setOpen(false)}
+                  aria-current={active ? "page" : undefined}
+                  className={`min-w-0 flex-1 truncate rounded-full px-4 py-2 text-label ${
+                    active ? "font-medium text-on-primary-container" : "text-on-surface-variant"
+                  }`}
+                >
+                  {c.title}
+                </Link>
+                <button
+                  type="button"
+                  aria-label={`대화 메뉴: ${c.title}`}
+                  aria-expanded={menuFor === c.id}
+                  onClick={() => setMenuFor(menuFor === c.id ? null : c.id)}
+                  className="mr-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-on-surface-variant transition-colors duration-150 hover:bg-surface-container-highest"
+                >
+                  <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
+                    <circle cx="12" cy="5" r="1.6" />
+                    <circle cx="12" cy="12" r="1.6" />
+                    <circle cx="12" cy="19" r="1.6" />
+                  </svg>
+                </button>
+              </div>
+              {menuFor === c.id && (
+                // Inline, not an absolutely positioned popover: this list is
+                // the sidebar's `overflow-y-auto` region, which CLIPS an
+                // absolutely positioned child, so a floating menu on the last
+                // visible row would be cut in half.
+                <div className="my-1 flex flex-col rounded-md bg-surface-container py-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuFor(null);
+                      setRenameValue(c.title);
+                      setRenamingId(c.id);
+                    }}
+                    className="px-4 py-2 text-left text-label text-on-surface transition-colors duration-150 hover:bg-surface-container-high"
+                  >
+                    이름 변경
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuFor(null);
+                      setDeleteTarget(c);
+                    }}
+                    className="px-4 py-2 text-left text-label text-error transition-colors duration-150 hover:bg-surface-container-high"
+                  >
+                    삭제
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* The one surviving divider in the sidebar: it separates the account
+          block from a scrolling list, where a tonal step alone would read as
+          "the list continues". §1 - borders where they carry meaning. */}
+      <div className="mt-3 flex flex-col gap-2 border-t border-outline-variant pt-3">
+        {/* The placeholder is U+00A0, not an ASCII space: a plain space is
+            collapsible, so the line gets no line box and is 0px tall until
+            /api/auth/me lands - at which point it grows 16px and shoves
+            로그아웃 down under the pointer already resting on it. */}
+        <div className="truncate px-4 text-caption text-on-surface-variant">
+          {user ? `${user.email}${user.role === "admin" ? " · 관리자" : ""}` : "\u00a0"}
+        </div>
+        {logoutError && <ErrorBanner message={logoutError} />}
+        {/* type="button" on every button in this file: the default is
+            "submit", which is a live bug the moment one of them ends up
+            inside a <form>. */}
+        <button type="button" onClick={() => void handleLogout()} className="btn-tonal w-full gap-2">
+          <NavIcon name="logout" />
+          로그아웃
+        </button>
+      </div>
+    </nav>
+  );
+
+  return (
+    <>
+      {/* Outside `content`, which is rendered TWICE - once docked, once in the
+          drawer. Inside it, one showModal() call would open two dialogs and
+          only the second would be reachable. */}
+      {deleteTarget && (
+        <ConfirmDialog
+          title="대화 삭제"
+          message={`"${deleteTarget.title}" 대화와 그 안의 모든 메시지가 삭제됩니다. 되돌릴 수 없습니다.`}
+          confirmLabel="삭제"
+          onConfirm={() => confirmDelete(deleteTarget)}
+          onClose={() => setDeleteTarget(null)}
+        />
+      )}
+      {/* Not rendered while the drawer is open: at z-20 it sits *under* the
+          z-30 drawer, so a pointer user cannot reach it while a keyboard user
+          can still focus it and press it for nothing. No aria-expanded either
+          - it only opens; the drawer closes via its overlay or Escape. */}
+      {!open && (
+        <button
+          ref={toggleRef}
+          type="button"
+          aria-label="메뉴 열기"
+          aria-controls="sidebar-drawer"
+          className="icon-btn fixed left-2 top-2 z-20 bg-surface-container text-title md:hidden"
+          onClick={() => setOpen(true)}
+        >
+          ☰
+        </button>
+      )}
+      <div className="hidden md:block">{content}</div>
+      {open && (
+        <div
+          id="sidebar-drawer"
+          ref={drawerRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="메뉴"
+          className="fixed inset-0 z-30 flex md:hidden"
+        >
+          <div className="relative">{content}</div>
+          {/* A button, not a div: this overlay is the only way to close the
+              drawer, and as a div it is unreachable without a pointer. */}
+          <button
+            type="button"
+            aria-label="메뉴 닫기"
+            className="flex-1 bg-scrim"
+            onClick={() => setOpen(false)}
+          />
+        </div>
+      )}
+    </>
+  );
+}
 ```
 
 
@@ -6868,6 +8353,72 @@ unaffected. The `typeof document` guard is for the server render, where this
 component's parent has no messages yet and it never runs anyway.
 
 ```tsx
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { apiFetch, errorMessage } from "@/lib/api";
+import ErrorBanner from "@/components/ui/ErrorBanner";
+import type { Chunk, Citation } from "@/lib/types";
+
+function label(citation: Citation): string {
+  const parts = [citation.filename ?? "출처"];
+  if (citation.page !== null) parts.push(`${citation.page}쪽`);
+  if (citation.section) parts.push(citation.section);
+  return parts.join(", ");
+}
+
+export default function CitationBadge({ citation }: { citation: Citation }) {
+  const [open, setOpen] = useState(false);
+  const [chunk, setChunk] = useState<Chunk | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    // chunk_id is null for an attachment citation (a file the user attached to
+    // their own turn - `filename` is set, everything else is null) and for the
+    // MCP citations Slice 2/3 adds. See lib/types.ts.
+    // Requesting /api/chunks/null is a 422, which would stack a red validation
+    // banner above the snippet this citation already carries - a snippet with
+    // nothing wrong with it.
+    if (!open || chunk || !citation.chunk_id) return;
+    // Fetch the FULL chunk, not the 300-char snippet already in the citation.
+    apiFetch<Chunk>(`/api/chunks/${citation.chunk_id}`)
+      .then(setChunk)
+      .catch((err) => setError(errorMessage(err)));
+  }, [open, chunk, citation.chunk_id]);
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => {
+          setOpen(true);
+          dialogRef.current?.showModal();
+        }}
+        title={label(citation)}
+        // Without this the accessible name is the literal "[1]", announced as
+        // punctuation. The badge is the only route to the source, so it has to
+        // say which source it is.
+        aria-label={`출처 ${citation.index}: ${label(citation)}`}
+        className="mx-0.5 rounded-xs bg-primary-container px-1.5 py-0.5 align-baseline text-caption font-medium text-on-primary-container transition-opacity duration-150 hover:opacity-80"
+      >
+        [{citation.index}]
+      </button>
+      {/* A native <dialog> opened with showModal(), not a fixed overlay div:
+          the focus trap, Escape-to-close, the inert background and top-layer
+          stacking all come with it. Hand-rolled, this modal had no close
+          button and no Escape handler, so a keyboard user who opened a
+          citation had no way back out of it. onClose - not just the button -
+          is what keeps React state in step when Escape closes it natively.
+
+          Portalled to <body>, because a badge now renders INSIDE a markdown
+          paragraph and `<dialog>` (with its <div>, <h2> and <p>) is not valid
+          inside a <p> - React reported all three as nesting errors, and the
+          HTML parser would break the paragraph apart around it on any path
+          that goes through parsed markup. A portal renders no DOM at the call
+          site at all, so the paragraph stays a paragraph and the dialog's
+          top-layer promotion is unaffected. */}
       {typeof document !== "undefined" &&
         createPortal(
           <dialog
@@ -6897,13 +8448,34 @@ component's parent has no messages yet and it never runs anyway.
                   닫기
                 </button>
               </div>
-              <ErrorBanner message={error} />
+              {/* The banner is only for a citation we can show NOTHING for.
+                  A chunk that no longer exists is the normal consequence of
+                  re-ingesting its document - the ids change - and the text that
+                  was actually cited is on the message, so the quotation below is
+                  still exactly what the answer was based on. Calling that a
+                  failure told users their own answer was broken when it was
+                  not. Measured here: 31 of 62 stored citations stopped
+                  resolving across two re-ingestions. */}
+              <ErrorBanner message={error && !citation.snippet ? error : null} />
+              {error && citation.snippet && (
+                <p
+                  role="note"
+                  className="mt-3 rounded-md bg-surface-container-high px-3 py-2 text-body text-on-surface-variant"
+                >
+                  이 문서는 이후 다시 색인되어 원본을 열 수 없습니다. 아래는 답변 당시 인용된
+                  내용입니다.
+                </p>
+              )}
               <p className="mt-3 whitespace-pre-wrap text-body-lg text-on-surface">
                 {chunk ? chunk.content : citation.snippet}
               </p>
             </div>
           </dialog>,
           document.body,
+        )}
+    </>
+  );
+}
 ```
 
 ### Task 15: Chat experience verification

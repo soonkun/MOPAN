@@ -147,7 +147,7 @@ export default function PromptsPage() {
       <form onSubmit={handleCreate} className="space-y-3 rounded-md bg-surface-container-low p-6">
         <h2 className="text-title font-medium">새 프롬프트</h2>
         <p className="text-body text-on-surface-variant">
-          에이전트마다 다른 답변 지침을 쓰려면 여기에서 새 프롬프트를 만든 뒤, 에이전트 관리에서
+          에이전트마다 다른 답변 지침을 쓰려면 여기에서 새 프롬프트를 만든 뒤, 에이전트 생성에서
           선택하세요. 기존 이름은 덮어쓰지 않습니다.
         </p>
         <div className="grid gap-3 sm:grid-cols-3">

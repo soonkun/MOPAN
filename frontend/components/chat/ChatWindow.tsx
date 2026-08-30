@@ -684,6 +684,10 @@ export default function ChatWindow({
                   there is nothing here that can wrap at 390px. */}
               <h1 className="text-display font-medium">
                 <span className="text-gradient-brand">모판</span>
+                {/* The Latin half is deliberately outside the gradient: across
+                    ASCII glyphs at this size it reads as a rendering fault, and
+                    this parenthetical is here to be legible, not decorative. */}
+                <span className="text-on-surface">(MOPAN)</span>
               </h1>
               {/* The English reading, with the five letters the name is built
                   from carried at full contrast so the acronym is legible

@@ -65,7 +65,7 @@ const NAV_ICON: Record<string, React.ReactNode> = {
       <path d="M8.5 10.5h7M8.5 14h4" />
     </>
   ),
-  // 에이전트 관리 - the shield-check the composer's agent control uses.
+  // 에이전트 생성 - the shield-check the composer's agent control uses.
   "/agents": (
     <>
       <path d="M12 3 4 7v5c0 4.4 3.2 8.2 8 9 4.8-.8 8-4.6 8-9V7l-8-4Z" />
@@ -298,8 +298,11 @@ export default function Sidebar() {
     { href: "/collections", label: "분류 관리" },
     { href: "/users", label: "사용자 관리" },
     { href: "/prompts", label: "프롬프트 관리" },
-  { href: "/agents", label: "에이전트 관리" },
     { href: "/mcp", label: "MCP 서버 관리" },
+    // After MCP on purpose: an agent is assembled out of the collections,
+    // prompts and MCP tools above it, so the order follows the order the work
+    // is actually done in.
+    { href: "/agents", label: "에이전트 생성" },
     { href: "/settings", label: "고급 설정" },
   ];
 
