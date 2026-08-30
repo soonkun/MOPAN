@@ -37,13 +37,15 @@ function StalledNote({ doc }: { doc: DocumentItem }) {
   const minutes = Math.floor((Date.now() - Date.parse(doc.updated_at)) / 60000);
   if (minutes < 1) return null;
   return (
-    <p className="mt-0.5 text-xs text-gray-500">
+    <p className="mt-0.5 text-caption text-on-surface-variant">
       {minutes}분째 {STATUS_LABEL[doc.status] ?? doc.status}
     </p>
   );
 }
 
-function formatSize(bytes: number): string {
+// Exported for the chat composer's attachment chips, which show the same fact in
+// the same units. One formatter, so 1.5 MB is never 1536.0 KB two screens over.
+export function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -51,32 +53,32 @@ function formatSize(bytes: number): string {
 
 export default function DocumentTable({ documents }: { documents: DocumentItem[] }) {
   if (documents.length === 0) {
-    return <p className="py-8 text-center text-sm text-gray-400">문서가 없습니다.</p>;
+    return <p className="py-8 text-center text-body text-on-surface-variant">문서가 없습니다.</p>;
   }
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-left text-sm">
+    <div className="overflow-x-auto rounded-sm">
+      <table className="w-full text-left text-body">
         <thead>
-          <tr className="border-b border-gray-200 text-gray-500">
-            <th scope="col" className="py-2 pr-3">문서명</th>
-            <th scope="col" className="py-2 pr-3">분류</th>
-            <th scope="col" className="py-2 pr-3">형식</th>
-            <th scope="col" className="py-2 pr-3">등록자</th>
-            <th scope="col" className="py-2 pr-3">등록일</th>
-            <th scope="col" className="py-2 pr-3 text-right">청크 수</th>
+          <tr className="bg-surface-container-low text-label font-medium text-on-surface-variant">
+            <th scope="col" className="px-3 py-3">문서명</th>
+            <th scope="col" className="px-3 py-3">분류</th>
+            <th scope="col" className="px-3 py-3">형식</th>
+            <th scope="col" className="px-3 py-3">등록자</th>
+            <th scope="col" className="px-3 py-3">등록일</th>
+            <th scope="col" className="px-3 py-3 text-right">청크 수</th>
             {/* One 상태 column, not the spec's separate Embedding/Index pair.
                 backend/app/rag/pipeline.py writes the vector and its row in one
                 vector_store.upsert, and both retrieval indexes are Postgres-
                 maintained on that insert, so no document can be embedded but not
                 indexed. Two columns would always show the same value. */}
-            <th scope="col" className="py-2 pr-3">상태</th>
-            <th scope="col" className="py-2 text-right">크기</th>
+            <th scope="col" className="px-3 py-3">상태</th>
+            <th scope="col" className="px-3 py-3 text-right">크기</th>
           </tr>
         </thead>
         <tbody>
           {documents.map((doc) => (
-            <tr key={doc.id} className="border-b border-gray-100 hover:bg-gray-50">
-              <td className="py-2 pr-3">
+            <tr key={doc.id} className="border-b border-outline-variant transition-colors duration-150 hover:bg-surface-container-low">
+              <td className="px-3 py-3">
                 {/* Bounded, or the 문서명 column starves every column after it.
                     Measured at 1280x900 with a 244-character filename: unbounded,
                     this cell took 2261px and left the 상태 cell 28px, rendering
@@ -90,28 +92,28 @@ export default function DocumentTable({ documents }: { documents: DocumentItem[]
                   {doc.filename}
                 </Link>
               </td>
-              <td className="py-2 pr-3 text-gray-500">{doc.collection_name ?? "-"}</td>
-              <td className="py-2 pr-3 text-gray-500">
+              <td className="px-3 py-3 text-on-surface-variant">{doc.collection_name ?? "-"}</td>
+              <td className="px-3 py-3 text-on-surface-variant">
                 {FILE_TYPE_LABEL[doc.file_type] ?? doc.file_type}
               </td>
-              <td className="py-2 pr-3 text-gray-500">{doc.uploader_email ?? "-"}</td>
-              <td className="py-2 pr-3 text-gray-500">
+              <td className="px-3 py-3 text-on-surface-variant">{doc.uploader_email ?? "-"}</td>
+              <td className="px-3 py-3 text-on-surface-variant">
                 {new Date(doc.created_at).toLocaleDateString()}
               </td>
-              <td className="py-2 pr-3 text-right text-gray-500">{doc.chunk_count}</td>
-              <td className="py-2 pr-3">
-                <span className={doc.status === "failed" ? "text-red-600" : "text-gray-700"}>
+              <td className="px-3 py-3 text-right text-on-surface-variant">{doc.chunk_count}</td>
+              <td className="px-3 py-3">
+                <span className={doc.status === "failed" ? "text-error" : "text-on-surface"}>
                   {STATUS_LABEL[doc.status] ?? doc.status}
                 </span>
                 {/* Why a document failed only ever appears here: the upload POST
                     returned 202 long before the worker failed, so no banner on
                     the page ever sees this message. */}
                 {doc.error_message && (
-                  <p className="mt-0.5 max-w-xs text-xs text-red-600">{doc.error_message}</p>
+                  <p className="mt-0.5 max-w-xs text-caption text-error">{doc.error_message}</p>
                 )}
                 <StalledNote doc={doc} />
               </td>
-              <td className="py-2 text-right text-gray-500">{formatSize(doc.size_bytes)}</td>
+              <td className="px-3 py-3 text-right text-on-surface-variant">{formatSize(doc.size_bytes)}</td>
             </tr>
           ))}
         </tbody>

@@ -21,6 +21,7 @@ from app.main import create_app
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 TABLES_IN_DELETE_ORDER = (
+    "attachments",
     "messages",
     "conversations",
     "chunks",

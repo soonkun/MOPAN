@@ -2199,7 +2199,10 @@ export interface Citation {
   // source_type and ref are the only two fields every citation carries - the
   // five below come from Evidence.metadata and a Slice 2/3 MCP citation has
   // none of them. See _citations_from in backend/app/chat/service.py.
-  source_type: "rag" | "mcp";
+  // "attachment" is a citation of a file the user attached to their own turn:
+  // `filename` is set and chunk_id/document_id/page/section are all null, so
+  // CitationBadge must not try to fetch a chunk for one.
+  source_type: "rag" | "mcp" | "attachment";
   ref: string;
   chunk_id: string | null;
   document_id: string | null;
@@ -2208,6 +2211,19 @@ export interface Citation {
   section: string | null;
   snippet: string;
   score: number | null;
+}
+
+/** POST /api/attachments, and the `attachments` array on a user MessageResponse.
+ * `has_text` is whether the parser got anything out of a document; the text
+ * itself is never sent to the browser. */
+export interface Attachment {
+  id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  kind: "image" | "document";
+  has_text: boolean;
+  created_at: string;
 }
 
 export interface Conversation {
@@ -2222,6 +2238,8 @@ export interface Message {
   role: "user" | "assistant";
   content: string;
   citations: Citation[];
+  // Populated on user turns only, and only for a turn that carried files.
+  attachments: Attachment[];
   created_at: string;
 }
 
@@ -2298,29 +2316,27 @@ export default function ConfirmDialog({
       // Escape closes a <dialog> natively without firing any click handler, so
       // this is what keeps the parent's `target` state in step with the DOM.
       onClose={onClose}
-      className="w-full max-w-md rounded border border-gray-200 bg-white p-0 text-gray-900 backdrop:bg-black/30"
+      // §4: a dialog is one of exactly two things in this app allowed a
+      // box-shadow, because it genuinely floats above the page.
+      className="w-full max-w-md rounded-lg bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim"
     >
-      <div className="p-4">
-        <h2 id="confirm-title" className="text-sm font-semibold">
+      <div className="p-6">
+        <h2 id="confirm-title" className="text-title font-medium">
           {title}
         </h2>
-        <p className="mt-2 text-sm text-gray-700">{message}</p>
-        <div className="mt-2">
+        <p className="mt-3 text-body text-on-surface-variant">{message}</p>
+        <div className="mt-3">
           <ErrorBanner message={error} />
         </div>
-        <div className="mt-4 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={() => dialogRef.current?.close()}
-            className="rounded border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-100"
-          >
+        <div className="mt-6 flex justify-end gap-2">
+          <button type="button" onClick={() => dialogRef.current?.close()} className="btn-text">
             취소
           </button>
           <button
             type="button"
             onClick={() => void confirm()}
             disabled={busy}
-            className="rounded border border-red-300 bg-red-50 px-3 py-1.5 text-sm text-red-700 hover:bg-red-100 disabled:opacity-50"
+            className="btn-danger"
           >
             {busy ? "처리 중..." : confirmLabel}
           </button>
@@ -2462,8 +2478,8 @@ export default function CollectionsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 p-6">
-      <h1 className="text-lg font-semibold">분류 관리</h1>
+    <div className="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6">
+      <h1 className="text-headline font-medium">분류 관리</h1>
       <ErrorBanner message={loadError} />
 
       {/* `user === null` is "not loaded yet", not "not an admin" - branching on
@@ -2472,14 +2488,14 @@ export default function CollectionsPage() {
           403 관리자 권한이 필요합니다. regardless; this only keeps buttons that
           cannot work off the screen. */}
       {user !== null && user.role !== "admin" ? (
-        <p className="text-sm text-gray-500">분류 관리는 관리자만 할 수 있습니다.</p>
+        <p className="text-body text-on-surface-variant">분류 관리는 관리자만 할 수 있습니다.</p>
       ) : (
         <>
           {user !== null && (
-            <form onSubmit={handleCreate} className="space-y-2 rounded border border-gray-200 p-4">
+            <form onSubmit={handleCreate} className="space-y-3 rounded-md bg-surface-container-low p-4">
               <div className="flex flex-wrap items-end gap-2">
                 <div className="flex flex-col gap-1">
-                  <label htmlFor="new-collection-name" className="text-sm text-gray-500">
+                  <label htmlFor="new-collection-name" className="text-body text-on-surface-variant">
                     분류 이름
                   </label>
                   <input
@@ -2488,24 +2504,24 @@ export default function CollectionsPage() {
                     onChange={(e) => setName(e.target.value)}
                     required
                     maxLength={255}
-                    className="rounded border border-gray-300 px-3 py-2 text-sm"
+                    className="field"
                   />
                 </div>
                 <div className="flex flex-1 flex-col gap-1">
-                  <label htmlFor="new-collection-description" className="text-sm text-gray-500">
+                  <label htmlFor="new-collection-description" className="text-body text-on-surface-variant">
                     설명 (선택)
                   </label>
                   <input
                     id="new-collection-description"
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
-                    className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+                    className="field w-full"
                   />
                 </div>
                 <button
                   type="submit"
                   disabled={creating}
-                  className="rounded border border-gray-300 px-3 py-2 text-sm hover:bg-gray-100 disabled:opacity-50"
+                  className="btn-tonal"
                 >
                   {creating ? "추가 중..." : "분류 추가"}
                 </button>
@@ -2517,58 +2533,58 @@ export default function CollectionsPage() {
           )}
 
           {collections === null ? (
-            <p className="py-8 text-center text-sm text-gray-400">불러오는 중...</p>
+            <p className="py-8 text-center text-body text-on-surface-variant">불러오는 중...</p>
           ) : collections.length === 0 ? (
-            <p className="py-8 text-center text-sm text-gray-400">분류가 없습니다.</p>
+            <p className="py-8 text-center text-body text-on-surface-variant">분류가 없습니다.</p>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
+            <div className="overflow-x-auto rounded-sm">
+              <table className="w-full text-left text-body">
                 <thead>
-                  <tr className="border-b border-gray-200 text-gray-500">
-                    <th scope="col" className="py-2 pr-3">분류 이름</th>
-                    <th scope="col" className="py-2 pr-3">설명</th>
-                    <th scope="col" className="py-2 pr-3 text-right">문서 수</th>
-                    <th scope="col" className="py-2 pr-3">등록일</th>
-                    <th scope="col" className="py-2">관리</th>
+                  <tr className="bg-surface-container-low text-label font-medium text-on-surface-variant">
+                    <th scope="col" className="px-3 py-3">분류 이름</th>
+                    <th scope="col" className="px-3 py-3">설명</th>
+                    <th scope="col" className="px-3 py-3 text-right">문서 수</th>
+                    <th scope="col" className="px-3 py-3">등록일</th>
+                    <th scope="col" className="px-3 py-3">관리</th>
                   </tr>
                 </thead>
                 <tbody>
                   {collections.map((c) => {
                     const editing = editingId === c.id;
                     return (
-                      <tr key={c.id} className="border-b border-gray-100 align-top">
-                        <td className="py-2 pr-3">
+                      <tr key={c.id} className="border-b border-outline-variant align-top">
+                        <td className="px-3 py-3">
                           {editing ? (
                             <input
                               value={editName}
                               onChange={(e) => setEditName(e.target.value)}
                               maxLength={255}
                               aria-label={`${c.name} 분류 이름`}
-                              className="w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                              className="field h-8 w-full px-2 text-caption"
                             />
                           ) : (
                             c.name
                           )}
                         </td>
-                        <td className="py-2 pr-3 text-gray-500">
+                        <td className="px-3 py-3 text-on-surface-variant">
                           {editing ? (
                             <input
                               value={editDescription}
                               onChange={(e) => setEditDescription(e.target.value)}
                               aria-label={`${c.name} 설명`}
-                              className="w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                              className="field h-8 w-full px-2 text-caption"
                             />
                           ) : (
                             (c.description ?? "-")
                           )}
                         </td>
-                        <td className="py-2 pr-3 text-right text-gray-500">
+                        <td className="px-3 py-3 text-right text-on-surface-variant">
                           {counts === null ? "-" : (counts[c.id] ?? 0)}
                         </td>
-                        <td className="py-2 pr-3 text-gray-500">
+                        <td className="px-3 py-3 text-on-surface-variant">
                           {new Date(c.created_at).toLocaleDateString()}
                         </td>
-                        <td className="py-2">
+                        <td className="px-3 py-3">
                           <div className="flex gap-2">
                             {editing ? (
                               <>
@@ -2576,7 +2592,7 @@ export default function CollectionsPage() {
                                   type="button"
                                   onClick={() => void handleSave(c.id)}
                                   disabled={saving}
-                                  className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-100 disabled:opacity-50"
+                                  className="btn-tonal btn-compact"
                                 >
                                   저장
                                 </button>
@@ -2586,7 +2602,7 @@ export default function CollectionsPage() {
                                     setEditingId(null);
                                     setRowError(null);
                                   }}
-                                  className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-100"
+                                  className="btn-tonal btn-compact"
                                 >
                                   취소
                                 </button>
@@ -2596,7 +2612,7 @@ export default function CollectionsPage() {
                                 <button
                                   type="button"
                                   onClick={() => startEdit(c)}
-                                  className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-100"
+                                  className="btn-tonal btn-compact"
                                 >
                                   수정
                                 </button>
@@ -2606,7 +2622,7 @@ export default function CollectionsPage() {
                                     setRowError(null);
                                     setDeleteTarget(c);
                                   }}
-                                  className="rounded border border-red-300 px-2 py-1 text-xs text-red-700 hover:bg-red-50"
+                                  className="btn-danger btn-compact"
                                 >
                                   삭제
                                 </button>
@@ -2740,36 +2756,36 @@ export default function UsersPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 p-6">
-      <h1 className="text-lg font-semibold">사용자 관리</h1>
+    <div className="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6">
+      <h1 className="text-headline font-medium">사용자 관리</h1>
       <ErrorBanner message={loadError} />
 
       {users === null ? (
-        !loadError && <p className="py-8 text-center text-sm text-gray-400">불러오는 중...</p>
+        !loadError && <p className="py-8 text-center text-body text-on-surface-variant">불러오는 중...</p>
       ) : users.length === 0 ? (
-        <p className="py-8 text-center text-sm text-gray-400">사용자가 없습니다.</p>
+        <p className="py-8 text-center text-body text-on-surface-variant">사용자가 없습니다.</p>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
+        <div className="overflow-x-auto rounded-sm">
+          <table className="w-full text-left text-body">
             <thead>
-              <tr className="border-b border-gray-200 text-gray-500">
-                <th scope="col" className="py-2 pr-3">이메일</th>
-                <th scope="col" className="py-2 pr-3">권한</th>
-                <th scope="col" className="py-2 pr-3">상태</th>
-                <th scope="col" className="py-2 pr-3">가입일</th>
-                <th scope="col" className="py-2">관리</th>
+              <tr className="bg-surface-container-low text-label font-medium text-on-surface-variant">
+                <th scope="col" className="px-3 py-3">이메일</th>
+                <th scope="col" className="px-3 py-3">권한</th>
+                <th scope="col" className="px-3 py-3">상태</th>
+                <th scope="col" className="px-3 py-3">가입일</th>
+                <th scope="col" className="px-3 py-3">관리</th>
               </tr>
             </thead>
             <tbody>
               {users.map((u) => (
-                <tr key={u.id} className="border-b border-gray-100 align-top">
-                  <td className="py-2 pr-3">
+                <tr key={u.id} className="border-b border-outline-variant align-top">
+                  <td className="px-3 py-3">
                     {u.email}
                     {/* Which row is you is what makes 자신의 권한은 변경할 수
                         없습니다. readable as an explanation instead of a riddle. */}
-                    {me?.id === u.id && <span className="ml-1 text-xs text-gray-400">(나)</span>}
+                    {me?.id === u.id && <span className="ml-1 text-caption text-on-surface-variant">(나)</span>}
                   </td>
-                  <td className="py-2 pr-3">
+                  <td className="px-3 py-3">
                     <select
                       value={u.role}
                       disabled={busyId === u.id}
@@ -2780,7 +2796,7 @@ export default function UsersPage() {
                       onChange={(e) => {
                         void patch(u.id, { role: e.target.value }).catch(() => undefined);
                       }}
-                      className="rounded border border-gray-300 px-2 py-1 text-sm disabled:opacity-50"
+                      className="field h-8 px-2 text-caption disabled:opacity-50"
                     >
                       {Object.entries(ROLE_LABEL).map(([value, label]) => (
                         <option key={value} value={value}>
@@ -2789,15 +2805,15 @@ export default function UsersPage() {
                       ))}
                     </select>
                   </td>
-                  <td className="py-2 pr-3">
-                    <span className={u.is_active ? "text-gray-700" : "text-red-600"}>
+                  <td className="px-3 py-3">
+                    <span className={u.is_active ? "text-on-surface" : "text-error"}>
                       {u.is_active ? "활성" : "비활성"}
                     </span>
                   </td>
-                  <td className="py-2 pr-3 text-gray-500">
+                  <td className="px-3 py-3 text-on-surface-variant">
                     {new Date(u.created_at).toLocaleDateString()}
                   </td>
-                  <td className="py-2">
+                  <td className="px-3 py-3">
                     {u.is_active ? (
                       <button
                         type="button"
@@ -2805,7 +2821,7 @@ export default function UsersPage() {
                           setRowError(null);
                           setDeactivateTarget(u);
                         }}
-                        className="rounded border border-red-300 px-2 py-1 text-xs text-red-700 hover:bg-red-50"
+                        className="btn-danger btn-compact"
                       >
                         비활성화
                       </button>
@@ -2818,7 +2834,7 @@ export default function UsersPage() {
                         onClick={() => {
                           void patch(u.id, { is_active: true }).catch(() => undefined);
                         }}
-                        className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-100 disabled:opacity-50"
+                        className="btn-tonal btn-compact"
                       >
                         활성화
                       </button>
@@ -2874,7 +2890,9 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import ErrorBanner from "@/components/ui/ErrorBanner";
+import ThemeToggle from "@/components/ui/ThemeToggle";
 import type { Conversation, User } from "@/lib/types";
 
 // The trap has to enumerate everything focusable inside the drawer, not just
@@ -2900,8 +2918,19 @@ export default function Sidebar() {
   // with 31 conversations. A logout failure has to report next to the button
   // that was clicked. It is also cleared per attempt rather than by load().
   const [logoutError, setLogoutError] = useState<string | null>(null);
+  // Which row's ⋯ menu is open, which row is being renamed, and which row the
+  // confirmation dialog is about. Three separate ids rather than one union,
+  // because a rename and a delete are never in flight at once but the menu that
+  // opened either of them has already closed by then.
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<Conversation | null>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
+  // Escape discards a rename; a click away saves it. Both unmount the input, so
+  // this is what a blur fired during that removal is checked against.
+  const cancelRenameRef = useRef(false);
 
   // allSettled, not all: these two requests are independent and Promise.all
   // rejects the pair on the first failure, so a 500 from /api/conversations
@@ -3015,6 +3044,35 @@ export default function Sidebar() {
     router.refresh();
   }
 
+  async function commitRename(id: string) {
+    const title = renameValue.trim();
+    setRenamingId(null);
+    // Nothing to save, and the server would answer 422 for a blank title. The
+    // row keeps the name it had.
+    if (!title) return;
+    try {
+      await apiFetch(`/api/conversations/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ title }),
+      });
+    } catch (err) {
+      setError(errorMessage(err));
+      return;
+    }
+    // Reload rather than patching the array in place: PATCH bumps updated_at,
+    // and this list is ordered by it, so the renamed row moves.
+    await load();
+  }
+
+  async function confirmDelete(conversation: Conversation) {
+    await apiFetch(`/api/conversations/${conversation.id}`, { method: "DELETE" });
+    // Off the conversation that no longer exists, before the list reloads:
+    // staying put would leave /chat/{id} rendering a 404 banner over an empty
+    // transcript. push, not replace - Back should return to where they were.
+    if (pathname === `/chat/${conversation.id}`) router.push("/chat");
+    await load();
+  }
+
   const navLinks = [
     { href: "/chat", label: "새 대화" },
     { href: "/documents", label: "문서" },
@@ -3039,8 +3097,10 @@ export default function Sidebar() {
         onClick={() => setOpen(false)}
         // The background alone said "you are here" to sighted users only.
         aria-current={active ? "page" : undefined}
-        className={`rounded px-3 py-2 text-sm hover:bg-gray-200 ${
-          active ? "bg-gray-200 font-medium" : ""
+        className={`rounded-full px-4 py-2 text-label transition-colors duration-150 ${
+          active
+            ? "bg-primary-container font-medium text-on-primary-container"
+            : "text-on-surface-variant hover:bg-surface-container-high"
         }`}
       >
         {link.label}
@@ -3053,11 +3113,18 @@ export default function Sidebar() {
     // no accessible name and announced as a bare "navigation". 대화 기록 stays
     // a <div> rather than becoming a heading: the sidebar precedes <main> in
     // the DOM, so a heading here would sit above every page's <h1>.
+    // No border-r. The sidebar separates from the page by tone -
+    // surface-container-low against surface - which is the whole §1 principle
+    // in one class. 280px per §6.
     <nav
       aria-label="주 메뉴"
-      className="flex h-full w-64 flex-col border-r border-gray-200 bg-gray-50 p-3"
+      className="flex h-full w-sidebar flex-col gap-1 bg-surface-container-low p-3"
     >
-      <div className="mb-4 px-3 text-sm font-semibold text-gray-500">MOPAN</div>
+      {/* §2: the gradient is allowed on the wordmark and nowhere else on this
+          screen. */}
+      <div className="mb-4 px-4 pt-2 text-title font-medium">
+        <span className="text-gradient-brand">MOPAN</span>
+      </div>
       {navLinks.map(navLink)}
 
       {/* `user` is null until /api/auth/me lands, so a non-admin never sees this
@@ -3066,16 +3133,18 @@ export default function Sidebar() {
           their own, but inside a plain div they would run side by side. */}
       {user?.role === "admin" && (
         <div className="mt-4">
-          <div className="mb-1 px-3 text-xs tracking-wide text-gray-400">관리</div>
-          <div className="flex flex-col">{adminLinks.map(navLink)}</div>
+          <div className="mb-1 px-4 text-caption tracking-wide text-on-surface-variant">관리</div>
+          <div className="flex flex-col gap-1">{adminLinks.map(navLink)}</div>
         </div>
       )}
 
-      <div className="mt-4 flex-1 overflow-y-auto">
-        <div className="mb-1 px-3 text-xs tracking-wide text-gray-400">대화 기록</div>
+      <div className="mt-6 flex-1 overflow-y-auto">
+        <div className="mb-1 px-4 text-caption tracking-wide text-on-surface-variant">
+          대화 기록
+        </div>
         {error && <ErrorBanner message={error} />}
         {!error && conversations?.length === 0 && (
-          <p className="px-3 py-2 text-xs text-gray-400">아직 대화가 없습니다.</p>
+          <p className="px-4 py-2 text-caption text-on-surface-variant">아직 대화가 없습니다.</p>
         )}
         {/* Which conversation you are in is the one piece of state a history
             list exists to convey, and the links carried only a hover style:
@@ -3083,39 +3152,145 @@ export default function Sidebar() {
             rgba(0,0,0,0). Same treatment as the nav links above. */}
         {conversations?.map((c) => {
           const active = pathname === `/chat/${c.id}`;
+
+          // The rename is an inline field in the row rather than a third
+          // dialog: the row is where the name is read, and a dialog to change
+          // one string would be two more focus transitions for the same edit.
+          if (renamingId === c.id) {
+            return (
+              <form
+                key={c.id}
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void commitRename(c.id);
+                }}
+                className="px-1 py-1"
+              >
+                <input
+                  autoFocus
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Escape") return;
+                    // stopPropagation, or the drawer's document-level Escape
+                    // handler closes the whole sidebar behind the cancel.
+                    e.stopPropagation();
+                    cancelRenameRef.current = true;
+                    setRenamingId(null);
+                  }}
+                  // Click-away saves. Escape is the only way to discard, and
+                  // the ref is what tells the two apart if a browser fires
+                  // blur while removing the focused input.
+                  onBlur={() => {
+                    if (cancelRenameRef.current) {
+                      cancelRenameRef.current = false;
+                      return;
+                    }
+                    void commitRename(c.id);
+                  }}
+                  aria-label={`대화 이름: ${c.title}`}
+                  maxLength={200}
+                  className="field w-full"
+                />
+              </form>
+            );
+          }
+
           return (
-            <Link
+            <div
               key={c.id}
-              href={`/chat/${c.id}`}
-              onClick={() => setOpen(false)}
-              aria-current={active ? "page" : undefined}
-              className={`block truncate rounded px-3 py-2 text-sm hover:bg-gray-200 ${
-                active ? "bg-gray-200 font-medium" : ""
-              }`}
+              // One blur handler for the row AND its menu: with it on the menu
+              // alone, clicking the toggle to close fired blur first, closed
+              // the menu, and the click then reopened it.
+              onBlur={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setMenuFor(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key !== "Escape" || menuFor !== c.id) return;
+                e.stopPropagation();
+                setMenuFor(null);
+              }}
             >
-              {c.title}
-            </Link>
+              <div
+                className={`flex items-center rounded-full transition-colors duration-150 ${
+                  active ? "bg-primary-container" : "hover:bg-surface-container-high"
+                }`}
+              >
+                <Link
+                  href={`/chat/${c.id}`}
+                  onClick={() => setOpen(false)}
+                  aria-current={active ? "page" : undefined}
+                  className={`min-w-0 flex-1 truncate rounded-full px-4 py-2 text-label ${
+                    active ? "font-medium text-on-primary-container" : "text-on-surface-variant"
+                  }`}
+                >
+                  {c.title}
+                </Link>
+                <button
+                  type="button"
+                  aria-label={`대화 메뉴: ${c.title}`}
+                  aria-expanded={menuFor === c.id}
+                  onClick={() => setMenuFor(menuFor === c.id ? null : c.id)}
+                  className="mr-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-on-surface-variant transition-colors duration-150 hover:bg-surface-container-highest"
+                >
+                  <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
+                    <circle cx="12" cy="5" r="1.6" />
+                    <circle cx="12" cy="12" r="1.6" />
+                    <circle cx="12" cy="19" r="1.6" />
+                  </svg>
+                </button>
+              </div>
+              {menuFor === c.id && (
+                // Inline, not an absolutely positioned popover: this list is
+                // the sidebar's `overflow-y-auto` region, which CLIPS an
+                // absolutely positioned child, so a floating menu on the last
+                // visible row would be cut in half.
+                <div className="my-1 flex flex-col rounded-md bg-surface-container py-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuFor(null);
+                      setRenameValue(c.title);
+                      setRenamingId(c.id);
+                    }}
+                    className="px-4 py-2 text-left text-label text-on-surface transition-colors duration-150 hover:bg-surface-container-high"
+                  >
+                    이름 변경
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuFor(null);
+                      setDeleteTarget(c);
+                    }}
+                    className="px-4 py-2 text-left text-label text-error transition-colors duration-150 hover:bg-surface-container-high"
+                  >
+                    삭제
+                  </button>
+                </div>
+              )}
+            </div>
           );
         })}
       </div>
 
-      <div className="mt-3 border-t border-gray-200 pt-3">
+      {/* The one surviving divider in the sidebar: it separates the account
+          block from a scrolling list, where a tonal step alone would read as
+          "the list continues". §1 - borders where they carry meaning. */}
+      <div className="mt-3 flex flex-col gap-2 border-t border-outline-variant pt-3">
         {/* The placeholder is U+00A0, not an ASCII space: a plain space is
             collapsible, so the line gets no line box and is 0px tall until
             /api/auth/me lands - at which point it grows 16px and shoves
             로그아웃 down under the pointer already resting on it. */}
-        <div className="truncate px-3 text-xs text-gray-500">
+        <div className="truncate px-4 text-caption text-on-surface-variant">
           {user ? `${user.email}${user.role === "admin" ? " · 관리자" : ""}` : "\u00a0"}
         </div>
+        <ThemeToggle />
         {logoutError && <ErrorBanner message={logoutError} />}
         {/* type="button" on every button in this file: the default is
             "submit", which is a live bug the moment one of them ends up
             inside a <form>. */}
-        <button
-          type="button"
-          onClick={() => void handleLogout()}
-          className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm hover:bg-gray-200"
-        >
+        <button type="button" onClick={() => void handleLogout()} className="btn-tonal w-full">
           로그아웃
         </button>
       </div>
@@ -3124,6 +3299,18 @@ export default function Sidebar() {
 
   return (
     <>
+      {/* Outside `content`, which is rendered TWICE - once docked, once in the
+          drawer. Inside it, one showModal() call would open two dialogs and
+          only the second would be reachable. */}
+      {deleteTarget && (
+        <ConfirmDialog
+          title="대화 삭제"
+          message={`"${deleteTarget.title}" 대화와 그 안의 모든 메시지가 삭제됩니다. 되돌릴 수 없습니다.`}
+          confirmLabel="삭제"
+          onConfirm={() => confirmDelete(deleteTarget)}
+          onClose={() => setDeleteTarget(null)}
+        />
+      )}
       {/* Not rendered while the drawer is open: at z-20 it sits *under* the
           z-30 drawer, so a pointer user cannot reach it while a keyboard user
           can still focus it and press it for nothing. No aria-expanded either
@@ -3134,7 +3321,7 @@ export default function Sidebar() {
           type="button"
           aria-label="메뉴 열기"
           aria-controls="sidebar-drawer"
-          className="fixed left-2 top-2 z-20 rounded border border-gray-300 bg-white px-2 py-1 text-sm md:hidden"
+          className="icon-btn fixed left-2 top-2 z-20 bg-surface-container text-title md:hidden"
           onClick={() => setOpen(true)}
         >
           ☰
@@ -3156,7 +3343,7 @@ export default function Sidebar() {
           <button
             type="button"
             aria-label="메뉴 닫기"
-            className="flex-1 bg-black/30"
+            className="flex-1 bg-scrim"
             onClick={() => setOpen(false)}
           />
         </div>
@@ -3208,3 +3395,2416 @@ What has to be seen, not inferred: a 분류 created; the same name refused with
 non-empty one refused with 문서 2개가 들어 있는 분류는 삭제할 수 없습니다.
 inside the dialog; a role change that survives a reload; the last-admin 409; and
 the 관리 section absent from a non-admin's sidebar.
+
+---
+
+### Task 12: Chat attachments
+
+**Files:**
+- Create: `backend/app/models/attachment.py`, `backend/alembic/versions/0003_chat_attachments.py`, `backend/app/attachments/service.py`, `backend/app/attachments/router.py`
+- Modify: the call sites listed step by step below.
+
+**Decisions:**
+
+**Attachments are per-message and per-user, not part of the shared RAG corpus.** That distinction is the whole permission model: `POST /api/documents` is admin-only precisely because those documents become the evidence base for every other user's answers, so an upload there is a corpus-poisoning vector. An attachment can only influence its own owner's answer, so any authenticated user may create one.
+
+**Two steps, because the UI must show a thumbnail before the message is sent.** `POST /api/attachments` stores the file and returns an id; `POST /api/chat` gains `attachment_ids` and claims them onto the user message it creates. An attachment uploaded and never referenced is an orphan, identified by `message_id IS NULL` - no `expires_at` column, because `created_at` plus a TTL already answers the same question without a second migration.
+
+**Extracted attachment text is UNTRUSTED, exactly like RAG evidence.** It is carried as `Evidence` so that it lands inside the same per-request nonce fence, goes through the same `_strip_fence_markers`, and competes for the same `ANSWER_CONTEXT_TOKEN_BUDGET` - never a second budget added on top.
+
+**404, not 403, on someone else's attachment**, matching `get_owned_conversation`: a 403 would confirm the id exists.
+
+- [ ] **Step 1: Write `backend/app/models/attachment.py`**
+
+The one nullable FK in the schema, and the whole orphan story. The composer has to show a thumbnail before the message exists, so the row is written at upload and claimed onto its message afterwards; `message_id IS NULL AND created_at < now() - <ttl>` is then already a complete cleanup predicate, which is why there is no `expires_at` column and no second migration when a cleanup job is finally written.
+
+```python
+import uuid
+from datetime import datetime
+
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, String, Text, func
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.models.base import Base
+
+ATTACHMENT_KINDS = ("image", "document")
+
+
+class Attachment(Base):
+    """A file attached to ONE user's chat turn - deliberately not part of the
+    shared RAG corpus. That is why any authenticated user may create one while
+    POST /api/documents is admin-only: a corpus document becomes the evidence base
+    for every other user's answers, so writing there is a corpus-poisoning vector,
+    whereas an attachment can only ever influence its own owner's answer."""
+
+    __tablename__ = "attachments"
+    __table_args__ = (CheckConstraint("kind in ('image', 'document')", name="ck_attachments_kind_valid"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # The only nullable FK in this schema, and the orphan story rests on it: the
+    # composer has to show a thumbnail before the message exists, so a file is
+    # stored first and claimed onto its message afterwards. NULL therefore means
+    # "uploaded, never sent", and `message_id IS NULL AND created_at < now() -
+    # <ttl>` is already a complete cleanup predicate - so no expires_at column and
+    # no second migration when a cleanup job is finally written.
+    # tests/test_schema.py:test_every_foreign_key_is_indexed_and_not_null carries
+    # this one pair as its single documented exception.
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("messages.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    storage_path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Extracted at UPLOAD time, not at answer time: the user is already waiting on
+    # the model then, and a 40-page PDF parse is seconds of that wait. NULL for
+    # kind 'image' - those reach the model as image parts, not as text.
+    extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+```
+
+- [ ] **Step 2: Write `backend/alembic/versions/0003_chat_attachments.py`**
+
+`0002` is the previous head. Both directions must work: `tests/conftest.py:migrated_database` runs `downgrade base` at the start of every pytest session, so a broken `downgrade()` breaks the whole suite. The indexes belong to the table and go with it, so `downgrade` drops only the table.
+
+```python
+"""chat attachments
+
+Revision ID: 0003
+Revises: 0002
+Create Date: 2026-08-30
+"""
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects import postgresql
+
+revision = "0003"
+down_revision = "0002"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "attachments",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("user_id", postgresql.UUID(as_uuid=True), nullable=False),
+        # Nullable on purpose: the row exists from the moment the file is stored,
+        # and is claimed onto its message only when the turn is persisted. NULL is
+        # what makes an orphan findable later without another migration.
+        sa.Column("message_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column("filename", sa.String(500), nullable=False),
+        sa.Column("content_type", sa.String(255), nullable=False),
+        sa.Column("size_bytes", sa.BigInteger(), nullable=False),
+        sa.Column("storage_path", sa.String(1000), nullable=False),
+        sa.Column("kind", sa.String(20), nullable=False),
+        sa.Column("extracted_text", sa.Text(), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.PrimaryKeyConstraint("id", name="pk_attachments"),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name="fk_attachments_user_id_users",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["message_id"],
+            ["messages.id"],
+            name="fk_attachments_message_id_messages",
+            ondelete="CASCADE",
+        ),
+        sa.CheckConstraint("kind in ('image', 'document')", name="ck_attachments_kind_valid"),
+    )
+    op.create_index("ix_attachments_user_id", "attachments", ["user_id"])
+    op.create_index("ix_attachments_message_id", "attachments", ["message_id"])
+
+
+def downgrade() -> None:
+    # No explicit drop_index: they belong to the table and go with it. Every
+    # pytest session starts with `downgrade base`, so this path runs constantly.
+    op.drop_table("attachments")
+```
+
+- [ ] **Step 3: Write `backend/app/attachments/service.py`**
+
+The part `/api/chat` needs, kept out of the router so `app.chat` does not import from another router. `to_evidence` is the security decision of this whole task: attachment text enters the prompt as ordinary `Evidence`, so it inherits the per-request nonce fence, `_strip_fence_markers` and the single `ANSWER_CONTEXT_TOKEN_BUDGET` for free instead of getting a parallel, more lenient path.
+
+```python
+import base64
+import uuid
+from pathlib import Path
+
+from fastapi import HTTPException
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.documents.storage import read_upload
+from app.documents.validation import IMAGE_MIME, extension_of
+from app.models.attachment import Attachment
+from app.models.user import User
+from app.retrieval.evidence import Evidence
+
+# 404 for missing, for someone else's, and for already-claimed alike - the same
+# rule get_owned_conversation follows, for the same reason: a 403 or a 409 here
+# would let an id probe confirm that an attachment exists.
+NOT_FOUND_MESSAGE = "첨부파일을 찾을 수 없습니다."
+FILE_GONE_MESSAGE = "첨부파일의 원본을 더 이상 찾을 수 없습니다."
+
+
+def attachment_root(upload_dir: Path) -> Path:
+    """A subdirectory of UPLOAD_DIR, reusing the documents per-id layout wholesale
+    (app/documents/storage.py). "attachments" can never collide with a document's
+    directory name because that name is always a UUID."""
+    return Path(upload_dir) / "attachments"
+
+
+async def get_owned_attachment(db: AsyncSession, attachment_id: uuid.UUID, user: User) -> Attachment:
+    attachment = await db.get(Attachment, attachment_id)
+    if attachment is None or attachment.user_id != user.id:
+        raise HTTPException(status_code=404, detail=NOT_FOUND_MESSAGE)
+    return attachment
+
+
+async def load_claimable(
+    db: AsyncSession, attachment_ids: list[uuid.UUID], user: User
+) -> list[Attachment]:
+    """Every id must resolve to an unclaimed attachment owned by this user, or the
+    whole request is refused. Called BEFORE /api/chat creates its conversation, so
+    a bad id cannot leave a titled, empty conversation in the sidebar."""
+    if not attachment_ids:
+        return []
+    unique = list(dict.fromkeys(attachment_ids))
+    rows = (
+        await db.scalars(
+            select(Attachment).where(
+                Attachment.id.in_(unique),
+                Attachment.user_id == user.id,
+                Attachment.message_id.is_(None),
+            )
+        )
+    ).all()
+    if len(rows) != len(unique):
+        raise HTTPException(status_code=404, detail=NOT_FOUND_MESSAGE)
+    by_id = {row.id: row for row in rows}
+    return [by_id[attachment_id] for attachment_id in unique]
+
+
+async def claim(
+    db: AsyncSession, attachment_ids: list[uuid.UUID], user_id: uuid.UUID, message_id: uuid.UUID
+) -> None:
+    """One conditional UPDATE, not a read-then-write: `message_id IS NULL` in the
+    WHERE clause is what makes a double claim lose a race instead of quietly
+    re-pointing an attachment that is already part of another turn."""
+    if not attachment_ids:
+        return
+    result = await db.execute(
+        update(Attachment)
+        .where(
+            Attachment.id.in_(attachment_ids),
+            Attachment.user_id == user_id,
+            Attachment.message_id.is_(None),
+        )
+        .values(message_id=message_id)
+    )
+    if result.rowcount != len(set(attachment_ids)):
+        raise HTTPException(status_code=404, detail=NOT_FOUND_MESSAGE)
+
+
+def to_evidence(attachments: list[Attachment]) -> list[Evidence]:
+    """Attachment text enters the prompt as ordinary Evidence, which is the whole
+    security argument: it lands inside the same nonce fence, goes through the same
+    _strip_fence_markers, and competes for the same token budget as corpus text. A
+    user pasting "ignore previous instructions" in a PDF therefore gets exactly as
+    far as an admin pasting it into a corpus document - nowhere."""
+    return [
+        Evidence(
+            source_type="attachment",
+            ref=f"attachment:{a.id}",
+            content=a.extracted_text,
+            # No retrieval score exists: nothing ranked this, the user chose it.
+            score=None,
+            metadata={"attachment_id": str(a.id), "filename": a.filename},
+        )
+        for a in attachments
+        if a.kind == "document" and a.extracted_text
+    ]
+
+
+async def to_image_urls(attachments: list[Attachment]) -> list[str]:
+    """data: URLs, not file paths or a public URL: the provider would have to be
+    able to reach this host to fetch a URL, and these files are owner-scoped."""
+    urls = []
+    for attachment in attachments:
+        if attachment.kind != "image":
+            continue
+        try:
+            raw = await read_upload(attachment.storage_path)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=FILE_GONE_MESSAGE) from exc
+        mime = IMAGE_MIME.get(extension_of(attachment.filename), attachment.content_type)
+        urls.append(f"data:{mime};base64,{base64.b64encode(raw).decode()}")
+    return urls
+```
+
+- [ ] **Step 4: Write `backend/app/attachments/router.py`**
+
+Any authenticated user may attach, unlike `POST /api/documents`. The admin gate there exists because a corpus document becomes the evidence base for every other user's answers; an attachment is scoped to one conversation owned by one user, so the corpus-poisoning argument does not apply to it. Validation reuses `app/documents/validation.py` with an `allowed=` set rather than a second validator.
+
+```python
+import logging
+import uuid
+from urllib.parse import quote
+
+from anyio import to_thread
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.attachments.service import attachment_root, get_owned_attachment
+from app.auth.dependencies import get_current_user
+from app.core.config import Settings, get_app_settings
+from app.core.db import get_db_session
+from app.core.logging import log_event
+from app.documents.storage import delete_document_files, save_upload_stream
+from app.documents.validation import (
+    ATTACHMENT_EXTENSIONS,
+    IMAGE_EXTENSIONS,
+    MAGIC_SNIFF_BYTES,
+    UploadTooLarge,
+    UploadValidationError,
+    validate_magic_bytes,
+    validate_upload_metadata,
+)
+from app.models.attachment import Attachment
+from app.models.user import User
+from app.rag.parsers import get_parser
+from app.schemas.chat import AttachmentResponse
+
+logger = logging.getLogger("mopan.attachments")
+router = APIRouter(prefix="/api", tags=["attachments"])
+
+UNREADABLE_MESSAGE = "첨부파일을 읽지 못했습니다. 파일이 손상되었는지 확인해 주세요."
+NO_TEXT_MESSAGE = "첨부한 문서에서 읽을 수 있는 텍스트를 찾지 못했습니다. 다른 파일을 첨부해 주세요."
+ALREADY_SENT_MESSAGE = "이미 전송된 첨부파일은 삭제할 수 없습니다."
+
+
+def _no_vision_message(model: str) -> str:
+    return (
+        f"현재 답변 모델({model})은 이미지를 읽을 수 없습니다. "
+        "이미지 대신 문서 파일을 첨부하거나 관리자에게 문의해 주세요."
+    )
+
+
+@router.post("/attachments", response_model=AttachmentResponse, status_code=201)
+async def upload_attachment(
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+    settings: Settings = Depends(get_app_settings),
+):
+    """Any authenticated user, unlike POST /api/documents. The admin gate there
+    exists because a corpus document becomes evidence for everybody's answers; an
+    attachment is scoped to one conversation owned by one user, so the poisoning
+    argument does not apply to it."""
+    filename = (file.filename or "").strip()
+    try:
+        extension = validate_upload_metadata(
+            filename,
+            file.content_type or "",
+            file.size or 0,
+            settings.max_attachment_size_mb,
+            allowed=ATTACHMENT_EXTENSIONS,
+        )
+    except UploadTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except UploadValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    kind = "image" if extension in IMAGE_EXTENSIONS else "document"
+    # Refused here rather than at answer time. Storing an image the model can
+    # never look at would let the user compose a whole message around a thumbnail
+    # and only then be told it was ignored - and it is the one check that makes it
+    # impossible for an image part to reach a text-only model at all.
+    if kind == "image" and not settings.answer_model_supports_vision:
+        raise HTTPException(status_code=400, detail=_no_vision_message(settings.answer_model))
+
+    head = await file.read(MAGIC_SNIFF_BYTES)
+    try:
+        validate_magic_bytes(extension, head)
+    except UploadValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await file.seek(0)
+
+    attachment = Attachment(
+        user_id=user.id,
+        filename=filename[:500],
+        content_type=(file.content_type or "application/octet-stream")[:255],
+        size_bytes=0,
+        storage_path="",
+        kind=kind,
+    )
+    db.add(attachment)
+    await db.flush()
+
+    root = attachment_root(settings.upload_dir)
+    try:
+        path, size = await save_upload_stream(
+            root,
+            str(attachment.id),
+            extension,
+            file,
+            max_bytes=settings.max_attachment_size_mb * 1024 * 1024,
+        )
+    except UploadTooLarge as exc:
+        await db.rollback()
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+
+    attachment.storage_path = str(path)
+    attachment.size_bytes = size
+
+    if kind == "document":
+        parser = get_parser(extension)
+        try:
+            parsed = await to_thread.run_sync(parser.parse, str(path))
+        except Exception as exc:
+            logger.exception("attachment parse failed")
+            await db.rollback()
+            await delete_document_files(root, str(attachment.id))
+            raise HTTPException(status_code=400, detail=UNREADABLE_MESSAGE) from exc
+        text = "\n".join(block.text for block in parsed.blocks if block.text.strip())
+        if not text.strip():
+            # A scanned PDF parses fine and yields nothing. Accepting it would put
+            # an attachment chip on screen that contributes literally nothing to
+            # the answer, with no way for the user to tell.
+            await db.rollback()
+            await delete_document_files(root, str(attachment.id))
+            raise HTTPException(status_code=400, detail=NO_TEXT_MESSAGE)
+        attachment.extracted_text = text
+
+    await db.commit()
+    log_event(logger, "attachment_uploaded", attachment_id=str(attachment.id), kind=kind, size_bytes=size)
+    return attachment
+
+
+@router.get("/attachments/{attachment_id}", response_model=AttachmentResponse)
+async def get_attachment(
+    attachment_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+):
+    return await get_owned_attachment(db, attachment_id, user)
+
+
+@router.get("/attachments/{attachment_id}/content")
+async def get_attachment_content(
+    attachment_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Backs the composer thumbnail and the attachment chips on a reloaded
+    transcript."""
+    attachment = await get_owned_attachment(db, attachment_id, user)
+    # .html is an accepted attachment type and /api/* is proxied same-origin by
+    # Next, so serving a stored file back under its own Content-Type would be
+    # stored XSS on the app's own origin. Only the four image types - none of them
+    # script-bearing, SVG is deliberately not in IMAGE_MIME - render inline;
+    # everything else is an octet-stream download. nosniff stops a browser
+    # second-guessing either one.
+    inline = attachment.kind == "image"
+    disposition = "inline" if inline else "attachment"
+    return FileResponse(
+        attachment.storage_path,
+        media_type=attachment.content_type if inline else "application/octet-stream",
+        headers={
+            "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(attachment.filename)}",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.delete("/attachments/{attachment_id}", status_code=204)
+async def delete_attachment(
+    attachment_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+    settings: Settings = Depends(get_app_settings),
+):
+    """The composer's X button. Without it every removed file would sit as an
+    orphan until a cleanup job that does not exist yet."""
+    attachment = await get_owned_attachment(db, attachment_id, user)
+    if attachment.message_id is not None:
+        # 409, not the 404 an unowned id gets: this row is the caller's own and
+        # they can see it, so there is nothing to conceal - only a transcript to
+        # avoid rewriting.
+        raise HTTPException(status_code=409, detail=ALREADY_SENT_MESSAGE)
+    await db.delete(attachment)
+    await db.commit()
+    await delete_document_files(attachment_root(settings.upload_dir), str(attachment_id))
+```
+
+- [ ] **Step 5: Modify `backend/app/models/__init__.py`**
+
+`alembic/env.py` imports `app.models`, so a model absent from here is invisible to `compare_metadata` and to `test_orm_matches_migrated_schema`.
+
+```python
+from app.models.attachment import ATTACHMENT_KINDS, Attachment
+```
+
+- [ ] **Step 6: Modify `backend/app/models/message.py`**
+
+`MessageResponse` serialises this so a reloaded transcript can show what was attached. `viewonly` because the claim is a conditional UPDATE whose `message_id IS NULL` predicate is the double-claim guard, and a writable relationship would offer a second path around it.
+
+```python
+    # viewonly: the claim is a single conditional UPDATE (app/attachments/service.py)
+    # whose `message_id IS NULL` predicate is the double-claim guard, and a writable
+    # relationship would offer a second path that skips it. lazy="selectin" because
+    # MessageResponse serialises this and the session is async, where a lazy load
+    # at attribute access raises MissingGreenlet.
+    attachments: Mapped[list[Attachment]] = relationship(
+        lazy="selectin", order_by=Attachment.created_at, viewonly=True
+    )
+```
+
+- [ ] **Step 7: Modify `backend/app/core/config.py`**
+
+A separate ceiling from `MAX_UPLOAD_SIZE_MB`, because the two files are spent differently: a corpus document is chunked and reaches the model a few hundred tokens at a time, an attachment reaches it whole in one request.
+
+```python
+    # 10MB, a fifth of a corpus document's 50MB, because the two files are spent
+    # differently. A corpus document is chunked and only ever reaches the model a
+    # few hundred tokens at a time; an attachment reaches it whole, in ONE request
+    # - an image base64-encoded (+33%, so 10MB of PNG is ~13.3MB on the wire,
+    # inside OpenAI's documented 20MB-per-image ceiling) and a document as text
+    # competing with the RAG evidence for ANSWER_CONTEXT_TOKEN_BUDGET.
+    max_attachment_size_mb: int = 10
+    max_attachments_per_message: int = 5
+    # None -> derived from ANSWER_MODEL via VISION_CAPABLE_MODEL_PREFIXES.
+    answer_model_supports_vision: bool | None = None
+```
+
+- [ ] **Step 8: Modify `backend/app/core/config.py`**
+
+Vision support has to be asserted, not discovered - there is no capability query, and a text-only model answers an image part with an opaque 400. Conservative on purpose: a false negative costs the operator one env var, a false positive is the raw provider error this exists to prevent.
+
+```python
+# There is no capability query on the chat endpoint - a model that cannot see
+# images answers an image part with an opaque 400 - so vision support has to be
+# asserted, not discovered. Deliberately a short, conservative PREFIX allowlist:
+# a false negative refuses an image upload with a Korean message naming the model,
+# which an operator fixes with one env var (ANSWER_MODEL_SUPPORTS_VISION=true),
+# while a false positive is the raw provider error this exists to prevent. Note
+# what is NOT here: the o1/o3/o4 reasoning families, whose -mini members are
+# text-only, so the whole family is left to the override.
+VISION_CAPABLE_MODEL_PREFIXES = ("gpt-4o", "gpt-4.1", "gpt-4-turbo", "gpt-4-vision", "gpt-5", "chatgpt-4o")
+```
+
+- [ ] **Step 9: Modify `backend/app/documents/validation.py`**
+
+Image types are kept out of `ALLOWED_EXTENSIONS` deliberately: that set gates `/api/documents`, and `app/rag/parsers` has no parser for an image, so an image in the corpus would pass upload and then fail in the worker with no route back.
+
+```python
+# Chat attachments only. Kept OUT of ALLOWED_EXTENSIONS on purpose: that set gates
+# /api/documents, and app/rag/parsers has no parser for an image, so an image in
+# the corpus would be accepted at upload and then fail in the worker with no
+# route back. Callers opt in by passing `allowed=` below.
+IMAGE_MIME = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+    "gif": "image/gif",
+}
+IMAGE_EXTENSIONS = set(IMAGE_MIME)
+ATTACHMENT_EXTENSIONS = ALLOWED_EXTENSIONS | IMAGE_EXTENSIONS
+```
+
+- [ ] **Step 10: Modify `backend/app/schemas/chat.py`**
+
+`extracted_text` is never returned - it is prompt input, sometimes megabytes. The composer only needs to know whether the file gave anything up.
+
+```python
+class AttachmentResponse(BaseModel):
+    id: uuid.UUID
+    filename: str
+    content_type: str
+    size_bytes: int
+    kind: str
+    # The text itself is never returned: it is prompt input, sometimes megabytes,
+    # and the composer only needs to know whether the file gave up anything.
+    has_text: bool = Field(validation_alias="extracted_text")
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+    @field_validator("has_text", mode="before")
+    @classmethod
+    def _has_text_from_extract(cls, value: object) -> bool:
+        return bool(value)
+
+
+class ConversationResponse(BaseModel):
+    id: uuid.UUID
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+```
+
+- [ ] **Step 11: Modify `backend/app/llm/base.py`**
+
+A plain string `content` stays a plain string on the wire, so every existing call site is untouched; only a message that actually carries an image becomes an OpenAI content array.
+
+```python
+    # data: URLs for chat attachments of kind 'image'. A plain string `content`
+    # stays a plain string on the wire, so every existing call site is untouched;
+    # only a message that actually carries an image becomes a content array.
+    images: list[str] | None = None
+
+    def to_openai(self) -> dict:
+        payload: dict = {"role": self.role, "content": self.content}
+        if self.images:
+            payload["content"] = [{"type": "text", "text": self.content}] + [
+                {"type": "image_url", "image_url": {"url": url}} for url in self.images
+            ]
+        if self.name is not None:
+            payload["name"] = self.name
+        if self.tool_call_id is not None:
+            payload["tool_call_id"] = self.tool_call_id
+        return payload
+```
+
+- [ ] **Step 12: Modify `backend/app/retrieval/evidence.py`**
+
+Widening the Literal rather than adding a parallel channel is what makes the fence, the stripping and the budget apply to attachment text automatically.
+
+```python
+# "attachment" is text the user attached to this one turn. It rides the Evidence
+# type rather than a parallel channel so that it inherits, for free, every defence
+# build_prompt already applies to corpus text: the per-request nonce fence,
+# _strip_fence_markers, and one shared token budget instead of a second one added
+# on top.
+SourceType = Literal["rag", "mcp", "attachment"]
+```
+
+- [ ] **Step 13: Modify `backend/app/chat/prompt.py`**
+
+Images are not charged against `token_budget`: an image's cost is the provider's tile arithmetic on dimensions this layer never sees. `MAX_ATTACHMENTS_PER_MESSAGE` x `MAX_ATTACHMENT_SIZE_MB` is what bounds them.
+
+```python
+    # Images ride the question's own message. They are NOT charged against
+    # token_budget: an image's cost is the provider's own tile arithmetic on
+    # dimensions this layer never sees, and tiktoken cannot count it. What bounds
+    # them instead is MAX_ATTACHMENTS_PER_MESSAGE x MAX_ATTACHMENT_SIZE_MB.
+    #
+    # RESIDUAL RISK, stated because it has no defence here: text rendered INSIDE an
+    # image cannot be fenced, and ANSWER_SYSTEM_PROMPT deliberately says nothing
+    # about it - measured, the shortest usable warning is 12 tokens and the system
+    # prompt is already 190 of a 6000-token budget whose mandatory floor four
+    # calibrated tests sit just under. Extracted DOCUMENT text has no such gap: it
+    # arrives as Evidence and is fenced, stripped and budgeted like corpus text.
+    messages.append(ChatMessage(role="user", content=question, images=images or None))
+```
+
+- [ ] **Step 14: Modify `backend/app/chat/service.py`**
+
+The flush is not optional. `Message.id`'s `default=uuid.uuid4` is a *flush-time* default, so before it `user_message.id` is None - and the claim would then write `message_id = NULL`, match its own `IS NULL` predicate and report a rowcount that looks like success. This was a real defect, found by `test_an_attachment_is_claimed_onto_the_user_message`.
+
+```python
+    if attachment_ids:
+        # AFTER both adds, so they still flush as one executemany and keep their
+        # distinct clock_timestamp()s. The flush is not optional: Message.id's
+        # `default=uuid.uuid4` is a *flush-time* default, so before it
+        # user_message.id is None - and the claim below would then quietly write
+        # message_id = NULL, match its own `IS NULL` predicate, and report a
+        # rowcount that looks like success.
+        await db.flush()
+        await claim_attachments(db, attachment_ids, conversation.user_id, user_message.id)
+```
+
+- [ ] **Step 15: Modify `backend/app/chat/router.py`**
+
+Before the `Conversation` is added, for the same reason the ownership check is: a bad attachment id must not leave a titled, empty conversation in the sidebar for the user to delete by hand.
+
+```python
+    # Before the conversation is created, for the same reason the ownership check
+    # is: a bad attachment id must not leave a titled, empty conversation in the
+    # sidebar that the user then has to delete by hand.
+    attachment_ids = payload.attachment_ids or []
+    if len(attachment_ids) > settings.max_attachments_per_message:
+        raise HTTPException(
+            status_code=400,
+            detail=f"첨부파일은 한 번에 최대 {settings.max_attachments_per_message}개까지 보낼 수 있습니다.",
+        )
+    attachments = await load_claimable(db, attachment_ids, user)
+    # Read off disk here, not inside the generator: a missing file is then a real
+    # 404 with a Korean detail rather than an error frame inside a 200.
+    images = await to_image_urls(attachments)
+    attachment_evidence = to_evidence(attachments)
+```
+
+- [ ] **Step 16: Modify `backend/app/main.py`**
+
+Amends Task 4's whole-file block with the new router.
+
+```python
+    from app.attachments.router import router as attachments_router
+    from app.auth.router import router as auth_router
+    from app.chat.router import router as chat_router
+    from app.documents.router import router as documents_router
+    from app.users.router import router as users_router
+
+    app.include_router(attachments_router)
+    app.include_router(auth_router)
+    app.include_router(chat_router)
+    app.include_router(documents_router)
+    app.include_router(users_router)
+```
+
+- [ ] **Step 17: Modify `backend/tests/conftest.py`**
+
+`attachments` first: it references `messages`, and the TRUNCATE runs CASCADE but the order is what documents the dependency.
+
+```python
+TABLES_IN_DELETE_ORDER = (
+    "attachments",
+    "messages",
+    "conversations",
+    "chunks",
+    "documents",
+    "collections",
+    "users",
+```
+
+- [ ] **Step 18: Modify `backend/tests/test_schema.py`**
+
+The exception is spelled out rather than dropped from the query, so adding a second nullable FK requires the same argument.
+
+```python
+# The single deliberate exception, spelled out rather than dropped from the query:
+# attachments.message_id is NULL for a file that has been uploaded but not yet
+# sent, which is the state the two-step attach flow exists to represent and the
+# predicate a cleanup job will use. Adding a row here should require the same
+# argument. NOT NULL is still enforced on the other half of the pair
+# (attachments.user_id), so an attachment always has an owner.
+NULLABLE_FK_EXCEPTIONS = {("attachments", "message_id")}
+```
+
+- [ ] **Step 19: Modify `backend/tests/test_documents_api.py`**
+
+Amends Task 5's whole-file block. Upload, validation, authorization and content-serving tests live beside the document upload tests they reuse the machinery of.
+
+```python
+# --- Chat attachments --------------------------------------------------------
+#
+# Same upload machinery as a corpus document (app/documents/validation.py,
+# app/documents/storage.py) and a deliberately DIFFERENT permission rule: writing
+# to /api/documents is admin-only because those documents become the evidence base
+# for everybody's answers, while an attachment can only ever influence its own
+# owner's answer. member_client below is a plain non-admin user throughout, and is
+# 403 on /api/documents in test_upload_requires_admin.
+
+# A real 1x1 PNG: `filetype` sniffs the signature, so a made-up byte string would
+# be rejected by validate_magic_bytes before any of these tests measured anything.
+PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+
+async def upload_attachment(client, name="note.txt", data=b"hello", content_type="text/plain"):
+    return await client.post("/api/attachments", files={"file": (name, data, content_type)})
+```
+
+- [ ] **Step 20: Modify `backend/tests/test_chat.py`**
+
+The end-to-end half: 404s, the fence, the shared budget, the claim and the conversation-delete sweep.
+
+```python
+async def test_an_unknown_attachment_id_creates_no_conversation(logged_in, db):
+    """The check runs before the Conversation is added, so a bad id cannot leave a
+    titled, empty conversation in the sidebar for the user to clean up."""
+    response = await logged_in.post(
+        "/api/chat", json={"message": "hi", "attachment_ids": [str(uuid.uuid4())]}
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "첨부파일을 찾을 수 없습니다."
+    assert (await logged_in.get("/api/conversations")).json() == []
+```
+
+- [ ] **Step 21: Modify `backend/tests/test_prompt.py`**
+
+The prompt-layer half of the security argument: a user pasting a PDF that says "ignore previous instructions" must not get one step further than an admin pasting the same sentence into a corpus document.
+
+```python
+async def test_a_fence_marker_in_attachment_text_is_neutralised(hostile):
+    """A user pasting a PDF that says "ignore previous instructions" must not get
+    one step further than an admin pasting the same sentence into a corpus
+    document. Same assertion shape as the chunk-content case above."""
+    template = await get_prompt("answer_agent")
+    messages, _ = build_prompt(
+        "question", [], [_attachment(hostile)], prompt=template, nonce=NONCE, token_budget=4000
+    )
+    fenced = fenced_message(messages).content
+
+    assert fenced.count(f"<<EVIDENCE {NONCE}>>") == 1
+    assert fenced.count(f"<<END EVIDENCE {NONCE}>>") == 1
+    # Twice total: the nonce leaks nowhere else, so nothing inside the fence can
+    # have reproduced it.
+    assert fenced.count(NONCE) == 2
+    # The instruction itself survives as text - it must, it may be the thing the
+    # user is asking about - but it is inside the fence the system prompt tells
+    # the model to treat as data, and it cannot close it.
+    assert fenced.index("<<EVIDENCE") < fenced.index("<<END EVIDENCE")
+```
+
+- [ ] **Step 22: Modify `backend/tests/test_llm_provider.py`**
+
+Paired with `test_chat_omits_the_tools_key_when_none_are_passed`, which asserts the text-only shape is unchanged.
+
+```python
+async def test_a_message_with_images_becomes_an_openai_content_array():
+    """Chat attachments of kind 'image'. The array form is the only way OpenAI
+    accepts an image, and the assertion in
+    test_chat_omits_the_tools_key_when_none_are_passed above is the other half of
+    this pair: a text-only message must stay a plain string, or every existing
+    call site changes shape for a feature it does not use."""
+    provider = _provider()
+    message = MagicMock(content="ok", tool_calls=None)
+    provider.client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(choices=[MagicMock(message=message)], usage=None, model="gpt-4o")
+    )
+
+    await provider.chat(
+        [
+            ChatMessage(role="system", content="rules"),
+            ChatMessage(role="user", content="what is this?", images=["data:image/png;base64,AAAA"]),
+        ]
+    )
+
+    sent = provider.client.chat.completions.create.await_args.kwargs["messages"]
+    assert sent[0] == {"role": "system", "content": "rules"}
+    assert sent[1] == {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "what is this?"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ],
+    }
+
+
+async def test_an_empty_image_list_leaves_the_content_a_plain_string():
+    """`images=[]` must not produce a one-element content array: an array with no
+    image is a shape change for nothing, and `[]` is what a turn with only document
+    attachments produces."""
+    assert ChatMessage(role="user", content="hi", images=[]).to_openai() == {
+        "role": "user",
+        "content": "hi",
+    }
+```
+
+- [ ] **Step 23: Modify `backend/tests/test_settings.py`**
+
+The allowlist is the one piece of guesswork in this task, so it is pinned.
+
+```python
+def test_vision_support_is_derived_from_the_answer_model(model, expected):
+    assert Settings(answer_model=model).answer_model_supports_vision is expected
+```
+
+- [ ] **Step 24: Modify `backend/tests/test_chat_service.py`**
+
+`images` is data, like `evidence`: no session and no retrieval collaborator, which is the property that test is actually about.
+
+```python
+    # `images` is data, like `evidence`: chat attachments of kind 'image', already
+    # read off disk by the caller. It carries no session and no retrieval
+    # collaborator, which is the property this test is actually about.
+    assert params == ["llm_provider", "question", "history", "evidence", "settings", "images"]
+```
+
+---
+
+### Task 13: Attachment verification
+
+- [ ] **Step 1: One pytest session, then ruff**
+
+```bash
+cd backend && python -m pytest && python -m ruff check .
+```
+
+ONE session, never `-n auto`: `migrated_database` runs `downgrade base`, and
+concurrent sessions corrupt `mopan_test`.
+
+- [ ] **Step 2: Stage each guard as a failure**
+
+Write the guard, comment it out, watch the named test fail, restore it. The guards
+staged this way: the ownership check in `get_owned_attachment`; the
+`message_id IS NULL` predicate in `load_claimable`; `_strip_fence_markers` on
+attachment text; merging attachment text into the evidence list rather than the
+question; the Content-Type/extension check; the vision gate; the pre-conversation
+attachment check; inline content serving; and the conversation-delete file sweep.
+
+- [ ] **Step 3: Drive the endpoints against the live stack**
+
+```bash
+docker compose up -d --build backend worker
+```
+
+`--build`, not `restart`: the image COPYs the source, there is no bind mount, so a
+restart runs the OLD code.
+
+---
+
+## Chat experience: attachments in the composer, markdown answers, and the rest
+
+### Task 14: The composer, markdown rendering and conversation management
+
+**Files:**
+- Create: `frontend/components/chat/Composer.tsx`, `frontend/components/chat/AttachmentChip.tsx`, `frontend/components/chat/Markdown.tsx`
+- Modify: `frontend/components/chat/ChatWindow.tsx`, `frontend/components/chat/MessageBubble.tsx`, `frontend/components/layout/Sidebar.tsx`, `frontend/lib/types.ts`, `frontend/lib/api.ts`, `frontend/app/globals.css`, `frontend/components/documents/DocumentTable.tsx`, `frontend/package.json`, `backend/app/chat/router.py`, `backend/tests/test_chat.py`
+
+**Interfaces:**
+- Consumes: Task 12's attachment API (`POST /api/attachments`, `GET /api/attachments/{id}/content`, `DELETE /api/attachments/{id}`, `attachment_ids` on `POST /api/chat`, `attachments` on `MessageResponse`).
+- Produces: `PATCH /api/conversations/{id}` — the only backend addition here.
+
+## Decisions
+
+**Markdown comes back, and its configuration IS the security argument.** Slice 1
+shipped no renderer at all and a reviewer praised that the XSS surface had been
+"designed away rather than configured away". Reopening it costs three specific
+commitments: no `rehype-raw` and no `dangerouslySetInnerHTML` anywhere, so
+react-markdown rewrites every `raw` hast node into a TEXT node and
+`<img src=x onerror=alert(1)>` in an answer is characters on screen; hrefs go
+through react-markdown's `defaultUrlTransform`, whose allowlist
+`/^(https?|ircs?|mailto|xmpp)$/i` empties a `javascript:` href; and the `[n]`
+badge pass runs on hast TEXT nodes rather than as a regex over rendered HTML.
+
+**The citation pass keeps its old failure mode exactly.** `renderContent`'s one
+security-load-bearing line was that an unresolvable `[9]` is skipped WITHOUT
+advancing the cursor, so a forged marker survives as inert text. `splitMarkers`
+below is that same loop; markdown only adds `inCode`, which leaves a `[1]` under
+`<code>` or `<pre>` alone so a fenced block is never linkified.
+
+**Uploads start on selection, not on send.** A refusal — `지원하지 않는 파일
+형식입니다: .mp4`, the 413, the no-vision 400 — has to be on screen while the
+user is still writing the question. It renders on the chip it belongs to and not
+in the page banner, because with five files in the row a banner cannot say which
+one it is about.
+
+**중지 puts the question back in the composer.** An abort lands before the
+router's phase 3, so `persist_turn` never runs and the backend has nothing. That
+is the same state an `error` frame leaves, and the existing code already removes
+the pending bubble there for the same reason: a question on screen that no reload
+can reproduce is worse than an empty composer.
+
+**The conversation menu is inline, not a popover.** The history list is the
+sidebar's `overflow-y-auto` region, which CLIPS an absolutely positioned child —
+a floating menu on the last visible row would be cut in half.
+
+**Rename is `PATCH`, and it bumps `updated_at`.** The list is ordered by that
+column, so a renamed conversation moves to the top. That is an update to the row
+the list is showing, not a bug.
+
+
+- [ ] **Step 1: Modify `backend/app/chat/router.py`**
+
+The one backend addition. 404 for a missing id and for someone else's alike — `get_owned_conversation`'s rule unchanged, so a rename cannot probe for ids the way a 403 would let it.
+
+```python
+class ConversationUpdate(BaseModel):
+    """The rename body. Local to this router rather than app/schemas/chat.py
+    because `title` is the whole thing and nothing else consumes it.
+
+    500 is the column width; 200 is the bound offered to a human. A sidebar row
+    truncates at ~30 characters, so anything past that is invisible in the one
+    place the title is read - and the auto-generated title is `message[:80]`, so
+    200 is already generous against the only other writer of this field."""
+
+    title: str = Field(min_length=1, max_length=200)
+
+    @field_validator("title")
+    @classmethod
+    def _stripped_and_not_blank(cls, value: str) -> str:
+        # min_length runs before this, so "   " gets past it. A whitespace-only
+        # title renders as an unclickable-looking blank row in the history list.
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("대화 제목을 입력해 주세요.")
+        return stripped
+```
+
+
+```python
+@router.patch("/conversations/{conversation_id}", response_model=ConversationResponse)
+async def rename_conversation(
+    conversation_id: uuid.UUID,
+    payload: ConversationUpdate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """The sidebar's 이름 변경. Auto-titling takes `message[:80]` of the first
+    question, which is a sentence fragment more often than it is a name.
+
+    404 for a missing id and for someone else's alike - get_owned_conversation's
+    rule, unchanged, so a rename cannot be used to probe for ids the way a 403
+    would let it. Note this bumps `updated_at`, so a renamed conversation moves to
+    the top of the history list: that list is ordered by updated_at, and a rename
+    is an update to the row the list is showing."""
+    conversation = await get_owned_conversation(db, conversation_id, user)
+    conversation.title = payload.title
+    await db.commit()
+    # `updated_at` is `onupdate=func.now()`, a SERVER-side expression, so the
+    # UPDATE leaves that one attribute expired whatever expire_on_commit says -
+    # and response serialisation then touches it outside the greenlet and raises
+    # MissingGreenlet. This is the load that makes the value real.
+    await db.refresh(conversation)
+    return conversation
+```
+
+
+- [ ] **Step 2: Modify `backend/tests/test_chat.py`**
+
+Three tests, plus the `PATCH` line added to the two route-enumerating auth tests above them. A whitespace-only title passes `min_length` and would render as an empty, unclickable-looking row in the history list.
+
+```python
+async def test_renaming_a_conversation_changes_the_title_in_the_list(logged_in):
+    """Auto-titling takes message[:80], which is a sentence fragment more often
+    than it is a name - the rename is the only way to fix that."""
+    conversation_id = await start_conversation(logged_in, "hello")
+
+    response = await logged_in.patch(f"/api/conversations/{conversation_id}", json={"title": "  분기 보고서  "})
+
+    assert response.status_code == 200
+    # Stripped, not stored verbatim: the sidebar row is `truncate`d, so leading
+    # whitespace is invisible padding the user cannot see or delete.
+    assert response.json()["title"] == "분기 보고서"
+    assert (await logged_in.get("/api/conversations")).json()[0]["title"] == "분기 보고서"
+
+
+async def test_renaming_an_unknown_conversation_is_404(logged_in):
+    """Indistinguishable from someone else's id, the same rule every other
+    conversation route follows."""
+    response = await logged_in.patch(f"/api/conversations/{uuid.uuid4()}", json={"title": "x"})
+    assert response.status_code == 404
+    assert response.json()["detail"] == "대화를 찾을 수 없습니다."
+
+
+@pytest.mark.parametrize("title", ["", "   ", "가" * 201])
+async def test_a_blank_or_overlong_title_is_refused(logged_in, title):
+    """A whitespace-only title passes min_length and would render as an empty,
+    unclickable-looking row in the history list."""
+    conversation_id = await start_conversation(logged_in)
+
+    response = await logged_in.patch(f"/api/conversations/{conversation_id}", json={"title": title})
+
+    assert response.status_code == 422
+    assert (await logged_in.get("/api/conversations")).json()[0]["title"] == "hello"
+```
+
+
+- [ ] **Step 3: Modify `frontend/lib/types.ts`**
+
+`source_type` gains the third source Task 12 shipped, and `Message` gains the array that a reloaded transcript renders its attachment chips from.
+
+```typescript
+export interface Attachment {
+  id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  kind: "image" | "document";
+  has_text: boolean;
+  created_at: string;
+}
+```
+
+
+```typescript
+  source_type: "rag" | "mcp" | "attachment";
+```
+
+
+```typescript
+  // Populated on user turns only, and only for a turn that carried files.
+  attachments: Attachment[];
+```
+
+
+- [ ] **Step 4: Modify `frontend/lib/api.ts`**
+
+`streamChat`'s body type only. Nothing else in the module changes.
+
+```typescript
+    conversation_id?: string | null;
+    message: string;
+    collection_ids?: string[];
+    attachment_ids?: string[];
+```
+
+
+- [ ] **Step 5: Write `frontend/components/chat/Markdown.tsx`**
+
+`react-markdown` + `remark-gfm`, and nothing else. The `citation` tag is produced only by the plugin in this file, so nothing an answer contains can reach that component override.
+
+```tsx
+"use client";
+
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
+import CitationBadge from "@/components/chat/CitationBadge";
+import type { Citation } from "@/lib/types";
+
+// Slice 1 shipped no markdown renderer at all, and a security reviewer praised
+// that the XSS surface had been "designed away rather than configured away".
+// This file puts it back, so the configuration IS the security argument:
+//
+//   - NO `rehype-raw` and NO dangerouslySetInnerHTML anywhere. Without
+//     rehype-raw, react-markdown rewrites every `raw` hast node into a TEXT
+//     node before rendering (react-markdown/lib/index.js:355), so
+//     `<img src=x onerror=alert(1)>` in an answer is characters on screen, not
+//     an element in the DOM.
+//   - Link hrefs go through react-markdown's `defaultUrlTransform`, whose
+//     protocol allowlist is /^(https?|ircs?|mailto|xmpp)$/i - a `javascript:`
+//     href is emptied before it ever reaches the anchor.
+//   - The `[n]` -> badge pass runs on the hast TEXT nodes below, never as a
+//     regex over rendered HTML, and it resolves each marker against the
+//     message's own citations array before emitting anything.
+const MARKER = /\[(\d{1,2})\]/g;
+
+/** The subset of hast this file touches. Declared locally rather than imported
+ * from @types/hast, which is only here as react-markdown's transitive dep. */
+type HastNode = {
+  type: string;
+  tagName?: string;
+  value?: string;
+  properties?: Record<string, unknown>;
+  children?: HastNode[];
+};
+
+/** The security-load-bearing half of MessageBubble's old renderContent, moved
+ * onto the markdown tree and otherwise unchanged in behaviour:
+ *
+ *   - a marker whose number is not in `byIndex` is skipped WITHOUT advancing the
+ *     cursor, so a forged "[9]" in an answer survives as literal text rather
+ *     than becoming a badge pointing at nothing;
+ *   - the badge is built from the resolved Citation object, so there is no path
+ *     from attacker-chosen text to a link target.
+ *
+ * `inCode` is the part markdown adds: a text node under <code> or <pre> is left
+ * alone, so `[1]` inside inline code or a fenced block stays visible source. */
+function splitMarkers(value: string, byIndex: Map<number, Citation>): HastNode[] {
+  const nodes: HastNode[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  MARKER.lastIndex = 0;
+
+  while ((match = MARKER.exec(value)) !== null) {
+    if (!byIndex.has(Number(match[1]))) continue;
+    if (match.index > cursor) nodes.push({ type: "text", value: value.slice(cursor, match.index) });
+    nodes.push({
+      type: "element",
+      tagName: "citation",
+      properties: { dataIndex: match[1] },
+      children: [],
+    });
+    cursor = match.index + match[0].length;
+  }
+  if (nodes.length === 0) return [{ type: "text", value }];
+  if (cursor < value.length) nodes.push({ type: "text", value: value.slice(cursor) });
+  return nodes;
+}
+
+function citationMarkers(citations: Citation[]) {
+  const byIndex = new Map(citations.map((c) => [c.index, c]));
+
+  function walk(node: HastNode, inCode: boolean): void {
+    if (!node.children) return;
+    const next: HastNode[] = [];
+    for (const child of node.children) {
+      if (child.type === "element") {
+        // `pre` as well as `code`: a fenced block is <pre><code>, and a `pre`
+        // with no `code` inside it is still preformatted source.
+        walk(child, inCode || child.tagName === "code" || child.tagName === "pre");
+        next.push(child);
+      } else if (child.type === "text" && !inCode && typeof child.value === "string") {
+        next.push(...splitMarkers(child.value, byIndex));
+      } else {
+        // `raw` nodes land here. They are rewritten to text by react-markdown
+        // AFTER every rehype plugin has run, so a `[1]` inside a would-be HTML
+        // tag is never linkified - the safe direction.
+        next.push(child);
+      }
+    }
+    node.children = next;
+  }
+
+  return () => (tree: HastNode) => walk(tree, false);
+}
+
+export default function Markdown({
+  content,
+  citations,
+}: {
+  content: string;
+  citations: Citation[];
+}) {
+  const byIndex = new Map(citations.map((c) => [c.index, c]));
+  // Cast: `citation` is not an HTML tag name, and hast-util-to-jsx-runtime's
+  // Components type is keyed on JSX.IntrinsicElements. The tag is produced only
+  // by the plugin above, so nothing else can reach this component.
+  const components = {
+    citation({ node }: { node?: HastNode }) {
+      const citation = byIndex.get(Number((node?.properties as { dataIndex?: string })?.dataIndex));
+      return citation ? <CitationBadge citation={citation} /> : null;
+    },
+    // rel on every link: these hrefs come out of a model answer, so an answer
+    // must not be able to hand a target window a reference back to this one.
+    a({ href, children }: { href?: string; children?: React.ReactNode }) {
+      return (
+        <a href={href} target="_blank" rel="noopener noreferrer nofollow">
+          {children}
+        </a>
+      );
+    },
+    // The one wrapper markdown cannot express: a GFM table wider than the 768px
+    // reading column has to scroll inside itself, or it scrolls the page (§9.8).
+    table({ children }: { children?: React.ReactNode }) {
+      return (
+        <div className="my-3 overflow-x-auto">
+          <table>{children}</table>
+        </div>
+      );
+    },
+  } as Components;
+
+  return (
+    <div className="markdown text-body-lg text-on-surface">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[citationMarkers(citations)]}
+        components={components}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+```
+
+
+- [ ] **Step 6: Write `frontend/components/chat/AttachmentChip.tsx`**
+
+One chip, used by the composer and by a sent user turn. The composer passes a `blob:` preview and an `onRemove`; a transcript passes `/api/attachments/{id}/content` and no remove. The filename IS the `alt` text.
+
+```tsx
+import { formatSize } from "@/components/documents/DocumentTable";
+
+/** One attached file, in the composer and on a sent user turn alike. The two
+ * differ only in what they pass: the composer passes a blob: preview and an
+ * onRemove, a transcript passes /api/attachments/{id}/content and no remove. */
+export default function AttachmentChip({
+  filename,
+  sizeBytes,
+  kind,
+  src,
+  status,
+  error,
+  onRemove,
+}: {
+  filename: string;
+  sizeBytes: number;
+  kind: "image" | "document";
+  src?: string | null;
+  status?: "uploading" | "ready";
+  error?: string | null;
+  onRemove?: () => void;
+}) {
+  return (
+    <div
+      className={`flex max-w-[17rem] items-center gap-2 rounded-md px-2 py-1.5 ${
+        error ? "bg-error-container text-on-error-container" : "bg-surface-container-high"
+      }`}
+    >
+      {kind === "image" && src && !error ? (
+        // The filename IS the alt text: "이미지" would tell a screen-reader user
+        // nothing they could act on, and the filename is the only thing
+        // distinguishing one attachment from the next in this row.
+        <img
+          src={src}
+          alt={filename}
+          className="h-10 w-10 shrink-0 rounded-xs object-cover"
+        />
+      ) : (
+        <span
+          aria-hidden="true"
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xs bg-surface-container text-on-surface-variant"
+        >
+          <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+            <path d="M14 3v5h5" />
+          </svg>
+        </span>
+      )}
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-caption font-medium text-on-surface" title={filename}>
+          {filename}
+        </div>
+        {/* The refusal renders HERE, on the attachment it belongs to, not as a
+            page-level banner: with five chips in the row a banner cannot say
+            which file it is about. A reason is the one line that must NOT be
+            truncated - "지원하지 않는 파일 형식입…" tells the user nothing they
+            can act on - so it wraps while a size stays on one line. */}
+        <div
+          className={
+            error ? "break-keep text-caption" : "truncate text-caption text-on-surface-variant"
+          }
+        >
+          {error ?? (status === "uploading" ? "업로드 중…" : formatSize(sizeBytes))}
+        </div>
+      </div>
+      {onRemove && (
+        <button
+          type="button"
+          onClick={onRemove}
+          aria-label={`첨부 삭제: ${filename}`}
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-on-surface-variant transition-colors duration-150 hover:bg-surface-container-highest"
+        >
+          <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+      )}
+    </div>
+  );
+}
+```
+
+
+- [ ] **Step 7: Write `frontend/components/chat/Composer.tsx`**
+
+§8's composer block. The IME guard is three checks because no single one is portable: `isComposing` is the standard, `keyCode === 229` is what the engines that predate it report, and the ref covers an engine that fires `compositionend` late. A Korean user pressing Enter to confirm a Hangul candidate must not send.
+
+```tsx
+"use client";
+
+import { useEffect, useRef } from "react";
+import AttachmentChip from "@/components/chat/AttachmentChip";
+import type { Attachment } from "@/lib/types";
+
+/** One file the user has chosen. It exists on screen from the moment it is
+ * picked, before POST /api/attachments has answered, so that a refusal can be
+ * rendered on the chip it belongs to rather than as a page-level banner. */
+export type PendingAttachment = {
+  /** Local, and NOT the attachment id: a chip exists before the server has
+   * given it one, and an upload that is refused never gets one at all. */
+  key: string;
+  filename: string;
+  sizeBytes: number;
+  kind: "image" | "document";
+  /** A blob: URL made from the File, so an image thumbnail appears immediately
+   * and without a second round trip. Revoked by ChatWindow. */
+  previewUrl: string | null;
+  status: "uploading" | "ready" | "error";
+  /** The server's row, once POST /api/attachments has answered. It is what the
+   * send carries (its id) and what the sent user turn renders from. */
+  attachment: Attachment | null;
+  error: string | null;
+};
+
+// backend/app/documents/validation.py: ALLOWED_EXTENSIONS | IMAGE_EXTENSIONS.
+export const ATTACHMENT_EXTENSIONS = [
+  "pdf",
+  "docx",
+  "txt",
+  "md",
+  "html",
+  "png",
+  "jpg",
+  "jpeg",
+  "webp",
+  "gif",
+];
+const ACCEPT = ATTACHMENT_EXTENSIONS.map((ext) => `.${ext}`).join(",");
+
+// 8 rows of body-lg (26px) plus the textarea's own 8px padding top and bottom.
+const MAX_HEIGHT = 8 * 26 + 16;
+
+export default function Composer({
+  value,
+  onChange,
+  onSubmit,
+  onFiles,
+  attachments,
+  onRemove,
+  sending,
+  onStop,
+  textareaRef,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  onFiles: (files: File[]) => void;
+  attachments: PendingAttachment[];
+  onRemove: (key: string) => void;
+  sending: boolean;
+  onStop: () => void;
+  textareaRef: React.RefObject<HTMLTextAreaElement | null>;
+}) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  // Chrome fires keydown(Enter) with isComposing=true while a Hangul syllable
+  // is still being composed, but not every engine does; this ref is the second
+  // half of the same guard, set from the composition events themselves.
+  const composingRef = useRef(false);
+
+  // Auto-grow, 1 to 8 rows. height:auto first, or scrollHeight only ever
+  // reports the height it already has and the box can never shrink again after
+  // the user deletes a line.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, MAX_HEIGHT)}px`;
+  }, [value, textareaRef]);
+
+  function take(list: FileList | null) {
+    if (!list?.length) return;
+    onFiles(Array.from(list));
+  }
+
+  return (
+    // §8: one surface-container block at --radius-xl, no border at rest, a 2px
+    // primary outline on focus-within, thumbnails in a row above the textarea
+    // and inside the same block.
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSubmit();
+      }}
+      className="rounded-xl bg-surface-container p-2 outline-primary transition-colors duration-150 focus-within:outline focus-within:outline-2"
+    >
+      {attachments.length > 0 && (
+        <div className="flex flex-wrap gap-2 p-1 pb-2">
+          {attachments.map((a) => (
+            <AttachmentChip
+              key={a.key}
+              filename={a.filename}
+              sizeBytes={a.sizeBytes}
+              kind={a.kind}
+              src={a.previewUrl}
+              status={a.status === "uploading" ? "uploading" : "ready"}
+              error={a.error}
+              onRemove={() => onRemove(a.key)}
+            />
+          ))}
+        </div>
+      )}
+
+      <div className="flex items-end gap-2">
+        {/* The keyboard-reachable equivalent of dropping a file on the
+            transcript, and the only one: a drop target cannot be focused or
+            activated from the keyboard at all. */}
+        <button
+          type="button"
+          onClick={() => fileRef.current?.click()}
+          aria-label="파일 첨부"
+          className="icon-btn"
+        >
+          <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          multiple
+          accept={ACCEPT}
+          className="hidden"
+          // Cleared after every pick, or choosing the SAME file twice in a row
+          // fires no change event and the second attachment never appears.
+          onChange={(e) => {
+            take(e.target.files);
+            e.target.value = "";
+          }}
+        />
+
+        <textarea
+          ref={textareaRef}
+          rows={1}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onCompositionStart={() => {
+            composingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            composingRef.current = false;
+          }}
+          onKeyDown={(e) => {
+            if (e.key !== "Enter" || e.shiftKey) return;
+            // A Korean user pressing Enter to CONFIRM a Hangul candidate must
+            // not send the message - that Enter belongs to the IME. Three
+            // checks because no single one is portable: `isComposing` is the
+            // standard, keyCode 229 is what the engines that predate it report,
+            // and the ref covers an engine that fires compositionend late.
+            if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229 || composingRef.current) {
+              return;
+            }
+            // Shift+Enter is handled by the early return above: it falls
+            // through to the textarea's own newline insertion.
+            e.preventDefault();
+            onSubmit();
+          }}
+          onPaste={(e) => {
+            // ONLY when the clipboard actually carries a file. Pasting text has
+            // to keep working, so an empty `files` list is left entirely alone -
+            // no preventDefault, no interception.
+            if (e.clipboardData.files.length === 0) return;
+            e.preventDefault();
+            take(e.clipboardData.files);
+          }}
+          placeholder="질문을 입력하세요"
+          // A placeholder is not an accessible name: it is dropped the moment
+          // the field has text, and some screen readers never announce it.
+          aria-label="질문"
+          style={{ maxHeight: MAX_HEIGHT }}
+          className="min-w-0 flex-1 resize-none bg-transparent px-2 py-2 text-body-lg text-on-surface placeholder:text-on-surface-variant focus:outline-none"
+        />
+
+        {/* The two `key`s are load-bearing, and this was measured. Without them
+            React reuses ONE <button> DOM node across the branch and only
+            rewrites its `type`. A click's activation behaviour reads `type`
+            AFTER the listeners have run, so pressing 중지 went: click ->
+            onStop -> abort -> the rejection's setState flushes -> the very same
+            node is now type="submit" -> the browser submits the form -> the
+            question that 중지 had just restored to the composer was sent
+            straight back out. Observed as a second `sending` render with no
+            second click, and the 중지 button never going away. Distinct keys
+            make React replace the node instead, and a detached button has no
+            form owner to submit. */}
+        {sending ? (
+          // The AbortController ChatWindow already held for unmount, surfaced.
+          <button
+            key="stop"
+            type="button"
+            onClick={onStop}
+            aria-label="답변 생성 중지"
+            className="h-10 shrink-0 rounded-full bg-surface-container-high px-5 text-label font-medium text-on-surface transition-colors duration-150 hover:bg-surface-container-highest"
+          >
+            중지
+          </button>
+        ) : (
+          // Filled when there is something to send, tonal when there is not -
+          // the button says whether the composer is ready without a word.
+          <button
+            key="send"
+            type="submit"
+            className={`h-10 shrink-0 rounded-full px-5 text-label font-medium transition-colors duration-150 ${
+              value.trim()
+                ? "bg-primary text-on-primary"
+                : "bg-surface-container-high text-on-surface-variant"
+            }`}
+          >
+            전송
+          </button>
+        )}
+      </div>
+    </form>
+  );
+}
+```
+
+
+- [ ] **Step 8: Write `frontend/components/chat/ChatWindow.tsx`**
+
+Attachment state, drag-and-drop with a depth counter, 중지, the §8 empty state and its suggestion chips. `pointer-events-none` on the drop overlay is load-bearing: an overlay that takes the pointer fires `dragleave` the instant it appears.
+
+```tsx
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { apiFetch, errorMessage, streamChat } from "@/lib/api";
+import ErrorBanner from "@/components/ui/ErrorBanner";
+import Composer, {
+  ATTACHMENT_EXTENSIONS,
+  type PendingAttachment,
+} from "@/components/chat/Composer";
+import MessageBubble from "@/components/chat/MessageBubble";
+import type { Attachment, Message } from "@/lib/types";
+
+const STATUS_LABEL: Record<string, string> = {
+  searching: "문서 검색 중…",
+  answering: "답변 생성 중…",
+};
+
+// settings.max_attachments_per_message and settings.max_attachment_size_mb. The
+// server is the real boundary and refuses both in Korean; these only spare the
+// user an upload that ends in a 400 or a 413, and they are worded identically to
+// the server's own refusals so the two can never read as different rules.
+const MAX_ATTACHMENTS = 5;
+const MAX_ATTACHMENT_MB = 10;
+
+// §8: 3-4 chips that fill the composer when clicked. Deliberately about
+// documents and not about the corpus that happens to be loaded - this is a
+// document-QA product and the corpus is incidental to it.
+const SUGGESTIONS = [
+  "이 문서의 핵심 내용을 세 줄로 요약해 주세요",
+  "첨부한 파일에서 주요 수치를 표로 정리해 주세요",
+  "두 문서의 내용이 어긋나는 부분을 찾아 주세요",
+  "규정에서 담당자의 의무가 무엇인지 알려 주세요",
+];
+
+function rejection(file: File): string | null {
+  // Same rule as validation.py's extension_of: no dot means no extension, not
+  // "the whole name is the extension".
+  const extension = file.name.includes(".") ? file.name.split(".").pop()!.toLowerCase() : "";
+  if (!ATTACHMENT_EXTENSIONS.includes(extension)) {
+    return `지원하지 않는 파일 형식입니다: .${extension}`;
+  }
+  if (file.size > MAX_ATTACHMENT_MB * 1024 * 1024) {
+    return `파일이 최대 크기 ${MAX_ATTACHMENT_MB}MB를 초과했습니다.`;
+  }
+  return null;
+}
+
+export default function ChatWindow({
+  initialConversationId,
+}: {
+  initialConversationId: string | null;
+}) {
+  const router = useRouter();
+  const [conversationId, setConversationId] = useState<string | null>(initialConversationId);
+  const [messages, setMessages] = useState<Message[]>([]);
+  // "no messages", "not loaded yet" and "the load failed" are three states, and
+  // the empty-state line below belongs to only the first - the same distinction
+  // the Sidebar draws for its conversation list, its `!error &&` included.
+  // Without `loaded`, every arrival at /chat/{id} flashes the greeting before
+  // the transcript lands: measured at 40ms over loopback, and it is a network
+  // round trip, so it is only ever longer in front of a real user. Without
+  // `!error`, a failed load shows that same invitation stacked on top of the
+  // error banner, because setLoaded runs in finally() and a rejected fetch is
+  // therefore loaded-and-empty.
+  const [loaded, setLoaded] = useState(!initialConversationId);
+  const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [dragging, setDragging] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // The answer, repeated into an off-screen live region - see the markup below
+  // for why the transcript itself cannot be the live region.
+  const [announcement, setAnnouncement] = useState("");
+  // A second region, for the things that are not the answer: an attachment
+  // added or removed, and 복사됨. Separate because the answer's region is only
+  // ever written on `done`, and mixing the two would re-announce an old answer
+  // every time a file was attached.
+  const [notice, setNotice] = useState("");
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  // Set only by 중지, so the shared AbortError catch below can tell "the user
+  // pressed stop" from "this component unmounted mid-answer".
+  const stoppedRef = useRef(false);
+  // One controller per in-flight upload, so removing a chip that is still
+  // uploading cancels its request instead of letting it land on a chip that no
+  // longer exists.
+  const uploadsRef = useRef(new Map<string, AbortController>());
+  // Every blob: URL handed to a thumbnail, revoked on unmount. Without this a
+  // session of attaching and removing images leaks one buffer per preview.
+  const previewUrlsRef = useRef<string[]>([]);
+  // dragenter/dragleave fire for every child element the pointer crosses, so a
+  // plain boolean flickers off the moment the cursor moves over a message. The
+  // depth counter is what makes the drop state survive the crossing.
+  const dragDepth = useRef(0);
+
+  // Abort an answer still in flight when this window stops being the one on
+  // screen. Without it streamChat outlived the component and its closure kept
+  // the old `router`: ask at /chat, click another conversation mid-answer, and
+  // ~3.5s later the abandoned stream's `done` frame ran router.replace and
+  // threw the browser onto a conversation the user never chose.
+  //
+  // Keyed on initialConversationId, not []: /chat/{a} -> /chat/{b} is the same
+  // component in the same slot, so React re-renders it with a new prop rather
+  // than unmounting it, and a []-keyed cleanup never runs for the case that
+  // actually reproduced.
+  useEffect(() => () => abortRef.current?.abort(), [initialConversationId]);
+
+  useEffect(() => {
+    const urls = previewUrlsRef.current;
+    return () => urls.forEach((url) => URL.revokeObjectURL(url));
+  }, []);
+
+  useEffect(() => {
+    if (!initialConversationId) return;
+    apiFetch<Message[]>(`/api/conversations/${initialConversationId}/messages`)
+      .then(setMessages)
+      .catch((err) => setError(errorMessage(err)))
+      .finally(() => setLoaded(true));
+  }, [initialConversationId]);
+
+  useEffect(() => {
+    // §7: under `reduce` the app must be fully usable with zero animation, and
+    // a CSS override cannot reach a behavior passed to scrollIntoView. The jump
+    // still lands on the same element - only the tween goes.
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    bottomRef.current?.scrollIntoView({ behavior: reduce ? "auto" : "smooth" });
+  }, [messages, status]);
+
+  async function upload(key: string, file: File) {
+    const controller = new AbortController();
+    uploadsRef.current.set(key, controller);
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      // apiFetch handles FormData correctly: it only sets a JSON Content-Type
+      // for string bodies, so the browser's multipart boundary survives.
+      const created = await apiFetch<Attachment>("/api/attachments", {
+        method: "POST",
+        body: form,
+        signal: controller.signal,
+      });
+      setAttachments((prev) =>
+        prev.map((a) =>
+          a.key === key
+            ? { ...a, status: "ready", attachment: created, sizeBytes: created.size_bytes }
+            : a,
+        ),
+      );
+      setNotice(`${created.filename} 첨부됨`);
+    } catch (err) {
+      // The chip was removed while this was in flight; there is nothing left to
+      // report the failure on.
+      if ((err as { name?: string } | null)?.name === "AbortError") return;
+      const message = errorMessage(err);
+      // Onto the chip, not into the page banner: with five files in the row a
+      // banner cannot say which one 지원하지 않는 파일 형식입니다 is about.
+      setAttachments((prev) =>
+        prev.map((a) => (a.key === key ? { ...a, status: "error", error: message } : a)),
+      );
+      setNotice(`${file.name} 첨부 실패: ${message}`);
+    } finally {
+      uploadsRef.current.delete(key);
+    }
+  }
+
+  function addFiles(files: File[]) {
+    setError(null);
+    const room = MAX_ATTACHMENTS - attachments.length;
+    if (files.length > room) {
+      // The one refusal that has no chip to live on, because the files it
+      // refuses never become chips. Same sentence the server answers with.
+      setError(`첨부파일은 한 번에 최대 ${MAX_ATTACHMENTS}개까지 보낼 수 있습니다.`);
+    }
+    for (const file of files.slice(0, Math.max(room, 0))) {
+      const key = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const refusal = rejection(file);
+      const isImage = file.type.startsWith("image/");
+      // A blob: URL, not a FileReader data: URL: it is synchronous, so the
+      // thumbnail is on screen in the same frame the file was chosen.
+      const previewUrl = isImage && !refusal ? URL.createObjectURL(file) : null;
+      if (previewUrl) previewUrlsRef.current.push(previewUrl);
+      setAttachments((prev) => [
+        ...prev,
+        {
+          key,
+          filename: file.name,
+          sizeBytes: file.size,
+          kind: isImage ? "image" : "document",
+          previewUrl,
+          status: refusal ? "error" : "uploading",
+          attachment: null,
+          error: refusal,
+        },
+      ]);
+      // The upload starts NOW, on selection, not on send: the thumbnail and any
+      // refusal have to be on screen while the user is still writing the
+      // question, not after they have pressed 전송.
+      if (!refusal) void upload(key, file);
+      else setNotice(`${file.name} 첨부 실패: ${refusal}`);
+    }
+  }
+
+  function removeAttachment(key: string) {
+    const entry = attachments.find((a) => a.key === key);
+    if (!entry) return;
+    uploadsRef.current.get(key)?.abort();
+    if (entry.previewUrl) URL.revokeObjectURL(entry.previewUrl);
+    setAttachments((prev) => prev.filter((a) => a.key !== key));
+    setNotice(`${entry.filename} 첨부 삭제됨`);
+    // Only a row that actually exists server-side. A refused file was never
+    // stored, and DELETE on its (absent) id would answer 404 and put a banner
+    // on screen for a removal that worked.
+    if (entry.attachment) {
+      apiFetch(`/api/attachments/${entry.attachment.id}`, { method: "DELETE" }).catch((err) =>
+        setError(errorMessage(err)),
+      );
+    }
+  }
+
+  async function handleSend() {
+    if (!input.trim() || sending) return;
+    if (attachments.some((a) => a.status === "uploading")) {
+      setError("첨부파일 업로드가 끝난 뒤에 보내 주세요.");
+      return;
+    }
+
+    const question = input;
+    const sent = attachments.filter((a) => a.attachment !== null).map((a) => a.attachment!);
+    const pendingId = `temp-${Date.now()}`;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    stoppedRef.current = false;
+    setInput("");
+    // Cleared here rather than on `done`: these rows are claimed by the send,
+    // so leaving the chips up would offer a 삭제 that now answers 409
+    // 이미 전송된 첨부파일은 삭제할 수 없습니다.
+    setAttachments([]);
+    setError(null);
+    setAnnouncement("");
+    setSending(true);
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: pendingId,
+        role: "user",
+        content: question,
+        citations: [],
+        attachments: sent,
+        created_at: new Date().toISOString(),
+      },
+    ]);
+
+    try {
+      let newConversationId: string | null = null;
+      // Neither `token` nor `citations` gets a branch, both deliberately: Slice 1's
+      // answer() is a single non-streaming llm_provider.chat() call so `token` is
+      // never emitted at all (it is Slice 3's), and the `citations` frame carries
+      // the identical array that `done` carries one frame later.
+      await streamChat(
+        {
+          conversation_id: conversationId,
+          message: question,
+          attachment_ids: sent.map((a) => a.id),
+        },
+        (event) => {
+          if (event.type === "status") {
+            setStatus(STATUS_LABEL[event.status] ?? null);
+          } else if (event.type === "error") {
+            setError(event.detail);
+            // Take the question back off screen with it. An `error` frame means
+            // the backend rolled the conversation back - a brand new one is
+            // deleted, an existing one keeps neither message - so leaving the
+            // bubble up shows a question that is not saved anywhere, and the
+            // next reload silently loses it. Only this branch does it: a
+            // truncated stream or a dropped connection throws instead, and
+            // there the backend may well have committed the exchange.
+            setMessages((prev) => prev.filter((m) => m.id !== pendingId));
+          } else if (event.type === "done") {
+            newConversationId = event.conversation_id;
+            setAnnouncement(event.content);
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `assistant-${Date.now()}`,
+                role: "assistant",
+                content: event.content,
+                citations: event.citations,
+                attachments: [],
+                created_at: new Date().toISOString(),
+              },
+            ]);
+          }
+        },
+        controller.signal,
+      );
+
+      if (!conversationId && newConversationId) {
+        setConversationId(newConversationId);
+        // router.replace, and NOT window.history.replaceState. Both were
+        // measured on `next start`, same clicks, only this line differing, with
+        // POST /api/chat answered by a stubbed SSE body naming an existing
+        // conversation.
+        //
+        // router.replace costs a full document load here (performance.timeOrigin
+        // changes; /api/auth/me and /api/conversations are requested again), so
+        // the answer that just rendered is off screen until the new page's
+        // transcript fetch lands: rAF frames of the new document at 31, 53 and
+        // 63ms hold no messages and the transcript is back at 80ms, ~76ms end to
+        // end over loopback. Everything downstream is then correct - Back
+        // re-requests /api/conversations/{id}/messages and restores the
+        // conversation, Forward returns to the one clicked in the sidebar, and
+        // reload matches both.
+        //
+        // window.history.replaceState removes that reload, and the Sidebar still
+        // refetches because usePathname() still changes. It also corrupts the
+        // history entry, which is worse. Next patches replaceState to re-run its
+        // router restore with the tree it already has, so the entry keeps the
+        // /chat (new-chat) tree while its URL becomes /chat/{id}. Measured: the
+        // next sidebar click degrades to a full page load, and Back then restores
+        // that entry making NO request at all - the transcript it showed was the
+        // two messages left in memory where the conversation has four, and
+        // nothing ever refetches it. 76ms of flicker is cosmetic; a history entry
+        // whose page disagrees with its URL is not.
+        router.replace(`/chat/${newConversationId}`);
+      }
+    } catch (err) {
+      // An abort is this component's own doing, not a failure: either the user
+      // pressed 중지, or they moved on and the unmount cleanup fired. Rendering
+      // it would put a red banner on the conversation they just opened, about
+      // the one they just left. Name check rather than `instanceof
+      // DOMException` - fetch and the stream reader are free to reject with
+      // either, and only the name is guaranteed.
+      if ((err as { name?: string } | null)?.name !== "AbortError") {
+        setError(errorMessage(err));
+      } else if (stoppedRef.current) {
+        // 중지 lands before phase 3, so the backend persisted nothing: the
+        // client disconnect cancels the generator at a yield, and persist_turn
+        // is downstream of that. Leaving the question in the transcript would
+        // show a turn that no reload can reproduce - the same reasoning the
+        // `error` frame above follows - so it goes back into the composer, where
+        // the user can edit it and ask again.
+        setMessages((prev) => prev.filter((m) => m.id !== pendingId));
+        setInput(question);
+        setNotice("답변 생성을 중지했습니다.");
+      }
+    } finally {
+      setStatus(null);
+      setSending(false);
+    }
+  }
+
+  function fill(text: string) {
+    setInput(text);
+    textareaRef.current?.focus();
+  }
+
+  const hasFiles = (e: React.DragEvent) => e.dataTransfer.types.includes("Files");
+
+  // h-full, not h-screen: this fills `main`, and the (app) layout's h-screen
+  // wrapper is what bounds it. h-screen here would be 100vh whatever main
+  // actually offers a child. Below md that is not the same number: main is a
+  // flex item stretched to the wrapper's 100vh with pt-12 on it, so its content
+  // box is 100vh - 3rem and a h-screen child overflows by exactly that padding.
+  return (
+    <div
+      className="relative flex h-full flex-col"
+      onDragEnter={(e) => {
+        if (!hasFiles(e)) return;
+        dragDepth.current += 1;
+        setDragging(true);
+      }}
+      onDragOver={(e) => {
+        // Without preventDefault on dragover the browser refuses the drop and
+        // navigates to the file instead, which loses the whole conversation.
+        if (hasFiles(e)) e.preventDefault();
+      }}
+      onDragLeave={() => {
+        dragDepth.current -= 1;
+        if (dragDepth.current <= 0) setDragging(false);
+      }}
+      onDrop={(e) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        dragDepth.current = 0;
+        setDragging(false);
+        addFiles(Array.from(e.dataTransfer.files));
+      }}
+    >
+      {dragging && (
+        // pointer-events-none is load-bearing: an overlay that takes the
+        // pointer fires dragleave on the container the instant it appears, so
+        // the drop state would flicker and the drop itself would land on the
+        // overlay instead of on the handler above.
+        <div className="pointer-events-none absolute inset-4 z-10 flex items-center justify-center rounded-lg bg-surface outline-dashed outline-2 outline-primary">
+          <p className="text-title text-primary">파일을 놓아 첨부하세요</p>
+        </div>
+      )}
+      {/* The scroll container is full-bleed; the 768px reading column (§6) is
+          the inner div. Putting max-width on the scroller instead would leave
+          the scrollbar floating in the middle of the page. */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-transcript space-y-8 px-4 py-8 sm:px-6">
+          {loaded && !error && messages.length === 0 && !sending && (
+            // §8 empty state: centred, `display` size, the greeting in the
+            // brand gradient, then 3-4 suggestion chips that fill the composer.
+            // break-keep (word-break: keep-all) because at 36px in a 343px
+            // column the browser's default breaks Korean between syllables -
+            // measured at 375px, "무엇이든" split across two lines as 무 / 엇이든.
+            // keep-all breaks at spaces instead, which is how the language
+            // reads. Only needed at display size; at 14-16px it is invisible.
+            <div className="mt-24">
+              <p className="break-keep text-center text-display">
+                <span className="text-gradient-brand">등록된 문서에 대해 무엇이든 물어보세요.</span>
+              </p>
+              <div className="mt-10 flex flex-wrap justify-center gap-2">
+                {SUGGESTIONS.map((text) => (
+                  <button
+                    key={text}
+                    type="button"
+                    onClick={() => fill(text)}
+                    className="break-keep rounded-full bg-surface-container px-4 py-2 text-label text-on-surface-variant transition-colors duration-150 hover:bg-surface-container-high"
+                  >
+                    {text}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {messages.map((m) => (
+            <MessageBubble key={m.id} message={m} onNotify={setNotice} />
+          ))}
+          {/* aria-live, because this line is the only feedback between pressing
+              전송 and the answer landing, and it is never focused. The sparkle
+              is the streaming indicator - the one looping animation in the app
+              (§7), and it exists only while `status` does. */}
+          <p aria-live="polite" className="flex items-center gap-4 text-body text-on-surface-variant">
+            {status && (
+              <span aria-hidden="true" className="sparkle sparkle-pulsing h-5 w-5 shrink-0" />
+            )}
+            {status}
+          </p>
+        {/* The answer itself, off screen, because a screen reader was told
+            문서 검색 중… and 답변 생성 중… and then nothing at all - the status
+            line is emptied the moment the answer lands, so the one thing the
+            user asked for was never announced.
+
+            A separate region rather than role="log" on the transcript above:
+            that container is populated by the transcript fetch AFTER mount, so
+            a live region wrapping it re-announces every message in the history
+            on arrival at /chat/{id}. This one only ever changes on `done`.
+
+            Measured in headless Edge against a stub origin: asking inside an
+            existing conversation leaves this region holding the answer while
+            the status line is empty. The very FIRST answer of a brand new
+            conversation is the exception - router.replace reloads the document
+            ~76ms later (see below) and takes this region with it, the same
+            reload the answer bubble itself survives only by being refetched. */}
+          <p aria-live="polite" className="sr-only">
+            {announcement}
+          </p>
+          <p aria-live="polite" className="sr-only">
+            {notice}
+          </p>
+          <div ref={bottomRef} />
+        </div>
+      </div>
+      {/* No border-t. The composer is a tonal block sitting on the page, and
+          the transcript above it ends where the block begins. */}
+      <div className="mx-auto w-full max-w-transcript space-y-3 px-4 pb-6 sm:px-6">
+        <ErrorBanner message={error} />
+        <Composer
+          value={input}
+          onChange={setInput}
+          onSubmit={() => void handleSend()}
+          onFiles={addFiles}
+          attachments={attachments}
+          onRemove={removeAttachment}
+          sending={sending}
+          onStop={() => {
+            stoppedRef.current = true;
+            abortRef.current?.abort();
+          }}
+          textareaRef={textareaRef}
+        />
+      </div>
+    </div>
+  );
+}
+```
+
+
+- [ ] **Step 9: Write `frontend/components/chat/MessageBubble.tsx`**
+
+`renderContent` is gone — its job moved into `Markdown.tsx` intact. The 복사 button copies the RAW markdown, and it is always in the DOM rather than revealed on `:hover`, which no keyboard or touch user can do.
+
+```tsx
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import AttachmentChip from "@/components/chat/AttachmentChip";
+import Markdown from "@/components/chat/Markdown";
+import type { Message } from "@/lib/types";
+
+export default function MessageBubble({
+  message,
+  onNotify,
+}: {
+  message: Message;
+  /** ChatWindow's shared live region. Announcing 복사됨 from a region inside
+   * this component would put one live region per message on the page. */
+  onNotify?: (text: string) => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+  }, []);
+
+  async function copy() {
+    try {
+      // The RAW markdown, not the rendered text: what the user wants out of an
+      // answer is the thing they can paste back into a document with its list
+      // and its code fence intact.
+      await navigator.clipboard.writeText(message.content);
+    } catch {
+      // writeText rejects on a non-secure origin and on a denied permission.
+      onNotify?.("복사하지 못했습니다.");
+      return;
+    }
+    setCopied(true);
+    onNotify?.("복사됨");
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => setCopied(false), 2000);
+  }
+
+  // §8, and the single biggest structural difference from a generic chat UI:
+  // only the USER's message is bubbled. The assistant's answer renders flat on
+  // the page surface at reading size with the gradient sparkle at its head, so
+  // it reads as a document rather than as a text message. Two return paths
+  // rather than one with ternaries everywhere, because the two are not the
+  // same shape any more.
+  if (message.role === "user") {
+    return (
+      <div className="flex flex-col items-end gap-2">
+        {message.attachments.length > 0 && (
+          // A reloaded transcript has no other record of what was sent with the
+          // question, so these render from message.attachments and not only
+          // from the live composer state.
+          <div className="flex max-w-[75%] flex-wrap justify-end gap-2">
+            {message.attachments.map((a) => (
+              <AttachmentChip
+                key={a.id}
+                filename={a.filename}
+                sizeBytes={a.size_bytes}
+                kind={a.kind}
+                // Owner-scoped and served `inline` with `nosniff` for images
+                // only; a document id here would download, which is why only an
+                // image gets a src.
+                src={a.kind === "image" ? `/api/attachments/${a.id}/content` : null}
+              />
+            ))}
+          </div>
+        )}
+        <div className="max-w-[75%] whitespace-pre-wrap rounded-md bg-surface-container px-4 py-3 text-body-lg text-on-surface">
+          {message.content}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="group flex gap-4">
+      {/* aria-hidden: decorative. The role is already carried by the layout and
+          by the off-screen live region in ChatWindow. */}
+      <span aria-hidden="true" className="sparkle mt-1 h-5 w-5 shrink-0" />
+      {/* min-w-0 so a long unbroken token wraps instead of widening the flex
+          row past the transcript column. */}
+      <div className="min-w-0 flex-1">
+        {/* No whitespace-pre-wrap any more: markdown owns the block structure,
+            and pre-wrap would double every blank line between paragraphs. */}
+        <Markdown content={message.content} citations={message.citations} />
+        {message.citations.length > 0 && (
+          <div className="mt-4 border-t border-outline-variant pt-3 text-caption text-on-surface-variant">
+            {message.citations.map((c) => (
+              // index, not chunk_id: chunk_id is null for an MCP citation, and
+              // two of them on one message would collide on a null key. index
+              // is unique per message by construction - the backend assigns it
+              // with enumerate(used, start=1).
+              <div key={c.index} className="truncate">
+                [{c.index}] {c.filename ?? "출처"}
+                {c.page !== null ? `, ${c.page}쪽` : ""}
+                {c.section ? `, ${c.section}` : ""}
+              </div>
+            ))}
+          </div>
+        )}
+        {/* Always in the DOM, never revealed by hover alone: a control that
+            appears only on :hover is unreachable by keyboard and invisible on
+            touch. It is quiet at rest and darkens on hover instead. */}
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={() => void copy()}
+            aria-label="답변 복사"
+            className="inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-caption text-on-surface-variant transition-colors duration-150 hover:bg-surface-container"
+          >
+            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <rect x="9" y="9" width="11" height="11" rx="2" />
+              <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+            </svg>
+            {copied ? "복사됨" : "복사"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+
+- [ ] **Step 10: Modify `frontend/app/globals.css`**
+
+Tailwind's preflight strips heading sizes and list markers, so every one of them is restated here. Scoped under `.markdown` so nothing outside an answer inherits it. Code blocks per §8: `surface-container-high`, `--radius-sm`, monospace, and no syntax highlighting — deliberately out of scope, so no colour appears inside a code block that is not a token.
+
+```css
+/* The assistant answer's markdown, rendered by components/chat/Markdown.tsx.
+   These are static class lists per element, which is what this @layer is for -
+   as ~20 `components` overrides in the TSX they would be the same strings with
+   a JSX function around each one. Tailwind's preflight strips heading sizes and
+   list markers, so every one of them has to be restated here.
+   Scoped under .markdown so nothing outside an answer inherits it. */
+@layer components {
+  .markdown {
+    @apply break-words;
+  }
+  .markdown > :first-child {
+    @apply mt-0;
+  }
+  .markdown > :last-child {
+    @apply mb-0;
+  }
+  .markdown p,
+  .markdown ul,
+  .markdown ol,
+  .markdown blockquote,
+  .markdown pre {
+    @apply my-3;
+  }
+  .markdown h1 {
+    @apply mb-2 mt-6 text-headline font-medium;
+  }
+  .markdown h2 {
+    @apply mb-2 mt-6 text-title font-medium;
+  }
+  .markdown h3,
+  .markdown h4,
+  .markdown h5,
+  .markdown h6 {
+    @apply mb-1 mt-4 text-body-lg font-medium;
+  }
+  .markdown ul {
+    @apply list-disc pl-6;
+  }
+  .markdown ol {
+    @apply list-decimal pl-6;
+  }
+  .markdown li {
+    @apply my-1;
+  }
+  .markdown li > ul,
+  .markdown li > ol {
+    @apply my-1;
+  }
+  .markdown a {
+    @apply text-primary underline;
+  }
+  .markdown blockquote {
+    @apply border-l-2 border-outline-variant pl-4 text-on-surface-variant;
+  }
+  .markdown hr {
+    @apply my-6 border-t border-outline-variant;
+  }
+  /* §8: code blocks on surface-container-high at --radius-sm, monospace. No
+     syntax highlighting - deliberately out of scope, so no colour appears
+     inside a code block that is not a token. */
+  .markdown code {
+    @apply rounded-xs bg-surface-container-high px-1.5 py-0.5 text-body;
+  }
+  .markdown pre {
+    @apply overflow-x-auto rounded-sm bg-surface-container-high p-4;
+  }
+  .markdown pre code {
+    @apply rounded-none bg-transparent p-0;
+  }
+  /* remark-gfm tables. The scrolling wrapper is in Markdown.tsx - a max-width
+     on the container is what `overflow-x-auto` needs to have something to
+     overflow, and the transcript column supplies it. */
+  .markdown table {
+    @apply w-full text-left text-body;
+  }
+  .markdown th {
+    @apply border-b border-outline-variant bg-surface-container-low px-3 py-2 text-label font-medium text-on-surface-variant;
+  }
+  .markdown td {
+    @apply border-b border-outline-variant px-3 py-2 align-top;
+  }
+}
+```
+
+
+- [ ] **Step 11: Modify `frontend/components/documents/DocumentTable.tsx`**
+
+One formatter, so 1.5 MB is never 1536.0 KB two screens over.
+
+```tsx
+// Exported for the chat composer's attachment chips, which show the same fact in
+// the same units. One formatter, so 1.5 MB is never 1536.0 KB two screens over.
+export function formatSize(bytes: number): string {
+```
+
+
+- [ ] **Step 12: Modify `frontend/components/layout/Sidebar.tsx`**
+
+Rename inline in the row, delete through the existing `ConfirmDialog`. The dialog is rendered OUTSIDE `content`, which is rendered twice — docked and in the drawer — so one `showModal()` inside it would open two dialogs.
+
+```tsx
+  async function commitRename(id: string) {
+    const title = renameValue.trim();
+    setRenamingId(null);
+    // Nothing to save, and the server would answer 422 for a blank title. The
+    // row keeps the name it had.
+    if (!title) return;
+    try {
+      await apiFetch(`/api/conversations/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ title }),
+      });
+    } catch (err) {
+      setError(errorMessage(err));
+      return;
+    }
+    // Reload rather than patching the array in place: PATCH bumps updated_at,
+    // and this list is ordered by it, so the renamed row moves.
+    await load();
+  }
+
+  async function confirmDelete(conversation: Conversation) {
+    await apiFetch(`/api/conversations/${conversation.id}`, { method: "DELETE" });
+    // Off the conversation that no longer exists, before the list reloads:
+    // staying put would leave /chat/{id} rendering a 404 banner over an empty
+    // transcript. push, not replace - Back should return to where they were.
+    if (pathname === `/chat/${conversation.id}`) router.push("/chat");
+    await load();
+  }
+```
+
+
+```tsx
+      {deleteTarget && (
+        <ConfirmDialog
+          title="대화 삭제"
+          message={`"${deleteTarget.title}" 대화와 그 안의 모든 메시지가 삭제됩니다. 되돌릴 수 없습니다.`}
+          confirmLabel="삭제"
+          onConfirm={() => confirmDelete(deleteTarget)}
+          onClose={() => setDeleteTarget(null)}
+        />
+      )}
+```
+
+
+- [ ] **Step 13: Modify `frontend/package.json`**
+
+Two dependencies, no more. `rehype-raw` is deliberately absent and must stay absent.
+
+```json
+    "react-markdown": "9.1.0",
+    "remark-gfm": "4.0.1"
+```
+
+
+- [ ] **Step 14: Modify `frontend/components/chat/CitationBadge.tsx`**
+
+The badge now renders INSIDE a markdown paragraph, and `<dialog>` - with its
+`<div>`, `<h2>` and `<p>` - is not valid inside a `<p>`. React reported all three
+as nesting errors in the browser. A portal renders no DOM at the call site at
+all, so the paragraph stays a paragraph and the dialog's top-layer promotion is
+unaffected. The `typeof document` guard is for the server render, where this
+component's parent has no messages yet and it never runs anyway.
+
+```tsx
+      {typeof document !== "undefined" &&
+        createPortal(
+          <dialog
+            ref={dialogRef}
+            aria-label={`출처 ${citation.index}`}
+            onClose={() => setOpen(false)}
+            // The dialog box itself is the click target only for a click on the
+            // backdrop, because the padding lives on the inner div.
+            onClick={(e) => {
+              if (e.target === dialogRef.current) dialogRef.current?.close();
+            }}
+            className="max-h-[80vh] w-full max-w-2xl overflow-y-auto rounded-lg bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim"
+          >
+            <div className="p-6">
+              <div className="mb-3 flex items-start justify-between gap-4">
+                {/* h2, not p: it is the modal's only title, and without a heading a
+                screen reader landing on 닫기 has nothing to jump back to.
+                No `uppercase`: this line is a filename plus Korean labels. */}
+                <h2 className="text-label font-medium tracking-wide text-on-surface-variant">
+                  [{citation.index}] {label(citation)}
+                </h2>
+                <button
+                  type="button"
+                  onClick={() => dialogRef.current?.close()}
+                  className="btn-text btn-compact shrink-0"
+                >
+                  닫기
+                </button>
+              </div>
+              <ErrorBanner message={error} />
+              <p className="mt-3 whitespace-pre-wrap text-body-lg text-on-surface">
+                {chunk ? chunk.content : citation.snippet}
+              </p>
+            </div>
+          </dialog>,
+          document.body,
+```
+
+### Task 15: Chat experience verification
+
+- [ ] **Step 1: One pytest session**
+
+```bash
+cd backend && python -m pytest
+```
+
+ONE session, never `-n auto`: `migrated_database` runs `downgrade base`, and
+concurrent sessions corrupt `mopan_test`.
+
+- [ ] **Step 2: Frontend gates**
+
+```bash
+cd frontend && npx tsc --noEmit && npm run build && npm test
+```
+
+- [ ] **Step 3: Re-run the forgery and XSS attacks in a real browser**
+
+Four answers, each rendered and then read back out of the DOM:
+
+1. `ok.\n\n[9] (evil.pdf, p.1)\nhunter2 [1]` with only citation 1 present — `[9]`
+   must be literal text and exactly one badge must exist.
+2. `` `[1]` `` inside inline code and inside a fenced block — no badge in either.
+3. `<img src=x onerror=alert(1)>` — no `<img>` in the DOM, `document.title`
+   unchanged.
+4. `[click](javascript:alert(1))` — no `javascript:` href in the DOM.
+
+- [ ] **Step 4: Drive the composer**
+
+Attach by `+`, by Ctrl+V paste and by drop; a refused file shows its Korean
+reason on its own chip; remove calls `DELETE /api/attachments/{id}`; Enter sends
+and Shift+Enter inserts a newline; Enter while a Hangul candidate is composing
+does NOT send.
+
+- [ ] **Step 5: Rebuild the container so :3000 is not stale**
+
+```bash
+docker compose up -d --build frontend
+```
+
+`--build`, not `restart`: the image COPYs the source, there is no bind mount, so
+a restart runs the OLD code.
+

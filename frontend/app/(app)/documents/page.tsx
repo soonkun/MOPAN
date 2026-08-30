@@ -88,8 +88,8 @@ export default function DocumentsPage() {
   }, [documents, search, statusFilter]);
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 p-6">
-      <h1 className="text-lg font-semibold">문서</h1>
+    <div className="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6">
+      <h1 className="text-headline font-medium">문서</h1>
       <ErrorBanner message={error} />
 
       {/* `user === null` is "not loaded yet", not "not an admin". Branching on
@@ -102,14 +102,14 @@ export default function DocumentsPage() {
             {/* htmlFor/id, not a bare <label>: a label that wraps nothing and
                 points at nothing names nothing, so the select was announced
                 only as a combo box with no idea what it selects. */}
-            <label htmlFor="collection-select" className="text-sm text-gray-500">
+            <label htmlFor="collection-select" className="text-body text-on-surface-variant">
               등록할 분류
             </label>
             <select
               id="collection-select"
               value={selectedCollectionId}
               onChange={(e) => setSelectedCollectionId(e.target.value)}
-              className="rounded border border-gray-300 px-2 py-1 text-sm"
+              className="field px-2"
             >
               {collections.map((c) => (
                 <option key={c.id} value={c.id}>
@@ -123,7 +123,7 @@ export default function DocumentsPage() {
           )}
         </div>
       ) : (
-        <p className="text-sm text-gray-500">문서 등록은 관리자만 할 수 있습니다.</p>
+        <p className="text-body text-on-surface-variant">문서 등록은 관리자만 할 수 있습니다.</p>
       )}
 
       <div className="flex flex-wrap items-center gap-2">
@@ -132,16 +132,16 @@ export default function DocumentsPage() {
           onChange={(e) => setSearch(e.target.value)}
           placeholder="문서명 / 분류 / 등록자 검색"
           aria-label="문서명 / 분류 / 등록자 검색"
-          className="min-w-56 flex-1 rounded border border-gray-300 px-3 py-2 text-sm"
+          className="field min-w-56 flex-1"
         />
-        <label htmlFor="collection-filter" className="text-sm text-gray-500">
+        <label htmlFor="collection-filter" className="text-body text-on-surface-variant">
           분류 필터
         </label>
         <select
           id="collection-filter"
           value={collectionFilter}
           onChange={(e) => setCollectionFilter(e.target.value)}
-          className="rounded border border-gray-300 px-2 py-2 text-sm"
+          className="field px-2"
         >
           <option value="">전체</option>
           {collections.map((c) => (
@@ -150,14 +150,14 @@ export default function DocumentsPage() {
             </option>
           ))}
         </select>
-        <label htmlFor="status-filter" className="text-sm text-gray-500">
+        <label htmlFor="status-filter" className="text-body text-on-surface-variant">
           상태 필터
         </label>
         <select
           id="status-filter"
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
-          className="rounded border border-gray-300 px-2 py-2 text-sm"
+          className="field px-2"
         >
           <option value="">전체</option>
           {Object.entries(STATUS_LABEL).map(([value, label]) => (
@@ -168,7 +168,7 @@ export default function DocumentsPage() {
         </select>
       </div>
       {loading ? (
-        <p className="py-8 text-center text-sm text-gray-400">불러오는 중...</p>
+        <p className="py-8 text-center text-body text-on-surface-variant">불러오는 중...</p>
       ) : (
         <DocumentTable documents={visible} />
       )}

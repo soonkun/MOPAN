@@ -143,7 +143,12 @@ const STREAM_TRUNCATED = "답변을 끝까지 받지 못했습니다. 다시 시
  * AbortError, so an intentional abort surfaces as that and never as
  * STREAM_TRUNCATED. */
 export async function streamChat(
-  body: { conversation_id?: string | null; message: string; collection_ids?: string[] },
+  body: {
+    conversation_id?: string | null;
+    message: string;
+    collection_ids?: string[];
+    attachment_ids?: string[];
+  },
   onEvent: (event: ChatEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {

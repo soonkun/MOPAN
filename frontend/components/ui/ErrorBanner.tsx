@@ -1,9 +1,11 @@
 export default function ErrorBanner({ message }: { message: string | null }) {
   if (!message) return null;
   return (
+    // Tonal, not bordered: error-container IS the signal, the same way every
+    // other surface in this app carries its meaning in its tone.
     <div
       role="alert"
-      className="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700"
+      className="rounded-md bg-error-container px-4 py-3 text-body text-on-error-container"
     >
       {message}
     </div>

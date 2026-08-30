@@ -70,6 +70,15 @@ async def test_retrieval_indexes_exist_with_expected_access_methods(test_engine)
     assert "ix_chunks_document_id" in methods
 
 
+# The single deliberate exception, spelled out rather than dropped from the query:
+# attachments.message_id is NULL for a file that has been uploaded but not yet
+# sent, which is the state the two-step attach flow exists to represent and the
+# predicate a cleanup job will use. Adding a row here should require the same
+# argument. NOT NULL is still enforced on the other half of the pair
+# (attachments.user_id), so an attachment always has an owner.
+NULLABLE_FK_EXCEPTIONS = {("attachments", "message_id")}
+
+
 async def test_every_foreign_key_is_indexed_and_not_null(test_engine):
     """pg_constraint rather than information_schema: it carries confdeltype, so
     one query covers all three properties the name promises."""
@@ -96,7 +105,9 @@ async def test_every_foreign_key_is_indexed_and_not_null(test_engine):
         (table, column, notnull, ondelete, indexed)
         for table, column, notnull, ondelete, indexed in rows
         # 'a' is NO ACTION: deleting a parent raises instead of cascading.
-        if not notnull or ondelete == "a" or not indexed
+        if (not notnull and (table, column) not in NULLABLE_FK_EXCEPTIONS)
+        or ondelete == "a"
+        or not indexed
     ]
     assert bad == [], f"FKs missing NOT NULL, ondelete, or a leading index: {bad}"
 

@@ -1,42 +1,91 @@
-import CitationBadge from "@/components/chat/CitationBadge";
-import type { Citation, Message } from "@/lib/types";
+"use client";
 
-const MARKER = /\[(\d{1,2})\]/g;
+import { useEffect, useRef, useState } from "react";
+import AttachmentChip from "@/components/chat/AttachmentChip";
+import Markdown from "@/components/chat/Markdown";
+import type { Message } from "@/lib/types";
 
-/** Replaces inline [n] markers with clickable badges, so clicking a citation IN
- *  the answer opens its source - rather than showing a literal "[1]" next to an
- *  unrelated badge row at the bottom. */
-function renderContent(content: string, citations: Citation[]): React.ReactNode[] {
-  const byIndex = new Map(citations.map((c) => [c.index, c]));
-  const nodes: React.ReactNode[] = [];
-  let cursor = 0;
-  let match: RegExpExecArray | null;
-  MARKER.lastIndex = 0;
+export default function MessageBubble({
+  message,
+  onNotify,
+}: {
+  message: Message;
+  /** ChatWindow's shared live region. Announcing 복사됨 from a region inside
+   * this component would put one live region per message on the page. */
+  onNotify?: (text: string) => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  while ((match = MARKER.exec(content)) !== null) {
-    const citation = byIndex.get(Number(match[1]));
-    if (!citation) continue;
-    if (match.index > cursor) nodes.push(content.slice(cursor, match.index));
-    nodes.push(<CitationBadge key={`${match.index}-${citation.index}`} citation={citation} />);
-    cursor = match.index + match[0].length;
+  useEffect(() => () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+  }, []);
+
+  async function copy() {
+    try {
+      // The RAW markdown, not the rendered text: what the user wants out of an
+      // answer is the thing they can paste back into a document with its list
+      // and its code fence intact.
+      await navigator.clipboard.writeText(message.content);
+    } catch {
+      // writeText rejects on a non-secure origin and on a denied permission.
+      onNotify?.("복사하지 못했습니다.");
+      return;
+    }
+    setCopied(true);
+    onNotify?.("복사됨");
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => setCopied(false), 2000);
   }
-  if (cursor < content.length) nodes.push(content.slice(cursor));
-  return nodes;
-}
 
-export default function MessageBubble({ message }: { message: Message }) {
-  const isUser = message.role === "user";
+  // §8, and the single biggest structural difference from a generic chat UI:
+  // only the USER's message is bubbled. The assistant's answer renders flat on
+  // the page surface at reading size with the gradient sparkle at its head, so
+  // it reads as a document rather than as a text message. Two return paths
+  // rather than one with ternaries everywhere, because the two are not the
+  // same shape any more.
+  if (message.role === "user") {
+    return (
+      <div className="flex flex-col items-end gap-2">
+        {message.attachments.length > 0 && (
+          // A reloaded transcript has no other record of what was sent with the
+          // question, so these render from message.attachments and not only
+          // from the live composer state.
+          <div className="flex max-w-[75%] flex-wrap justify-end gap-2">
+            {message.attachments.map((a) => (
+              <AttachmentChip
+                key={a.id}
+                filename={a.filename}
+                sizeBytes={a.size_bytes}
+                kind={a.kind}
+                // Owner-scoped and served `inline` with `nosniff` for images
+                // only; a document id here would download, which is why only an
+                // image gets a src.
+                src={a.kind === "image" ? `/api/attachments/${a.id}/content` : null}
+              />
+            ))}
+          </div>
+        )}
+        <div className="max-w-[75%] whitespace-pre-wrap rounded-md bg-surface-container px-4 py-3 text-body-lg text-on-surface">
+          {message.content}
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-      <div
-        className={`max-w-2xl whitespace-pre-wrap rounded px-4 py-2 text-sm ${
-          isUser ? "bg-gray-900 text-white" : "border border-gray-200 bg-gray-50 text-gray-900"
-        }`}
-      >
-        {isUser ? message.content : renderContent(message.content, message.citations)}
-        {!isUser && message.citations.length > 0 && (
-          <div className="mt-2 border-t border-gray-200 pt-2 text-xs text-gray-500">
+    <div className="group flex gap-4">
+      {/* aria-hidden: decorative. The role is already carried by the layout and
+          by the off-screen live region in ChatWindow. */}
+      <span aria-hidden="true" className="sparkle mt-1 h-5 w-5 shrink-0" />
+      {/* min-w-0 so a long unbroken token wraps instead of widening the flex
+          row past the transcript column. */}
+      <div className="min-w-0 flex-1">
+        {/* No whitespace-pre-wrap any more: markdown owns the block structure,
+            and pre-wrap would double every blank line between paragraphs. */}
+        <Markdown content={message.content} citations={message.citations} />
+        {message.citations.length > 0 && (
+          <div className="mt-4 border-t border-outline-variant pt-3 text-caption text-on-surface-variant">
             {message.citations.map((c) => (
               // index, not chunk_id: chunk_id is null for an MCP citation, and
               // two of them on one message would collide on a null key. index
@@ -50,6 +99,23 @@ export default function MessageBubble({ message }: { message: Message }) {
             ))}
           </div>
         )}
+        {/* Always in the DOM, never revealed by hover alone: a control that
+            appears only on :hover is unreachable by keyboard and invisible on
+            touch. It is quiet at rest and darkens on hover instead. */}
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={() => void copy()}
+            aria-label="답변 복사"
+            className="inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-caption text-on-surface-variant transition-colors duration-150 hover:bg-surface-container"
+          >
+            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <rect x="9" y="9" width="11" height="11" rx="2" />
+              <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+            </svg>
+            {copied ? "복사됨" : "복사"}
+          </button>
+        </div>
       </div>
     </div>
   );

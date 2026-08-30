@@ -4,17 +4,21 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.attachments.service import attachment_root, load_claimable, to_evidence, to_image_urls
 from app.auth.authorization import get_owned_conversation
 from app.auth.dependencies import get_current_user
 from app.chat.service import answer, load_history, persist_turn, retrieve
 from app.core.config import Settings, get_app_settings
 from app.core.db import get_db_session
+from app.documents.storage import delete_document_files
 from app.llm.base import LLMError, LLMProvider
+from app.models.attachment import Attachment
 from app.models.conversation import Conversation
 from app.models.message import Message
 from app.models.user import User
@@ -33,6 +37,28 @@ def get_llm_provider(request: Request) -> LLMProvider:
 
 def get_sessionmaker(request: Request) -> async_sessionmaker[AsyncSession]:
     return request.app.state.sessionmaker
+
+
+class ConversationUpdate(BaseModel):
+    """The rename body. Local to this router rather than app/schemas/chat.py
+    because `title` is the whole thing and nothing else consumes it.
+
+    500 is the column width; 200 is the bound offered to a human. A sidebar row
+    truncates at ~30 characters, so anything past that is invisible in the one
+    place the title is read - and the auto-generated title is `message[:80]`, so
+    200 is already generous against the only other writer of this field."""
+
+    title: str = Field(min_length=1, max_length=200)
+
+    @field_validator("title")
+    @classmethod
+    def _stripped_and_not_blank(cls, value: str) -> str:
+        # min_length runs before this, so "   " gets past it. A whitespace-only
+        # title renders as an unclickable-looking blank row in the history list.
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("대화 제목을 입력해 주세요.")
+        return stripped
 
 
 def _sse(payload: dict) -> str:
@@ -56,6 +82,21 @@ async def chat(
     # one: an unowned conversation id would degrade from 404 to a 200 carrying an
     # error frame. The frontend's streamChat() reads response.ok first and expects
     # exactly this.
+    # Before the conversation is created, for the same reason the ownership check
+    # is: a bad attachment id must not leave a titled, empty conversation in the
+    # sidebar that the user then has to delete by hand.
+    attachment_ids = payload.attachment_ids or []
+    if len(attachment_ids) > settings.max_attachments_per_message:
+        raise HTTPException(
+            status_code=400,
+            detail=f"첨부파일은 한 번에 최대 {settings.max_attachments_per_message}개까지 보낼 수 있습니다.",
+        )
+    attachments = await load_claimable(db, attachment_ids, user)
+    # Read off disk here, not inside the generator: a missing file is then a real
+    # 404 with a Korean detail rather than an error frame inside a 200.
+    images = await to_image_urls(attachments)
+    attachment_evidence = to_evidence(attachments)
+
     if payload.conversation_id is None:
         conversation = Conversation(user_id=user.id, title=payload.message[:80])
         db.add(conversation)
@@ -95,13 +136,33 @@ async def chat(
 
             # Phase 2: no DB session held across the LLM round trip.
             yield _sse({"type": "status", "status": "answering"})
-            chat_answer = await answer(llm_provider, payload.message, history, evidence, settings=settings)
+            # The user's own files first: they are the most specific thing in the
+            # request, and build_prompt fills evidence in order, so if the budget
+            # cannot hold everything it is a corpus chunk that goes, not the PDF
+            # the user just attached. Note it is ONE list from here on - attachment
+            # text competes for ANSWER_CONTEXT_TOKEN_BUDGET with the RAG evidence
+            # rather than being added on top of it.
+            chat_answer = await answer(
+                llm_provider,
+                payload.message,
+                history,
+                attachment_evidence + evidence,
+                settings=settings,
+                images=images,
+            )
 
             # Phase 3: a fresh short session to persist the turn. `conversation` is
             # the ownership-checked object from above - detached, not expired - so
             # nothing here re-reads it by bare id.
             async with sessionmaker() as persist_db:
-                await persist_turn(persist_db, conversation, payload.message, chat_answer, retrieval_ms)
+                await persist_turn(
+                    persist_db,
+                    conversation,
+                    payload.message,
+                    chat_answer,
+                    retrieval_ms,
+                    attachment_ids=attachment_ids,
+                )
 
             yield _sse({"type": "citations", "citations": chat_answer.citations})
             yield _sse(
@@ -233,12 +294,52 @@ async def list_messages(
     return list(result)
 
 
+@router.patch("/conversations/{conversation_id}", response_model=ConversationResponse)
+async def rename_conversation(
+    conversation_id: uuid.UUID,
+    payload: ConversationUpdate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """The sidebar's 이름 변경. Auto-titling takes `message[:80]` of the first
+    question, which is a sentence fragment more often than it is a name.
+
+    404 for a missing id and for someone else's alike - get_owned_conversation's
+    rule, unchanged, so a rename cannot be used to probe for ids the way a 403
+    would let it. Note this bumps `updated_at`, so a renamed conversation moves to
+    the top of the history list: that list is ordered by updated_at, and a rename
+    is an update to the row the list is showing."""
+    conversation = await get_owned_conversation(db, conversation_id, user)
+    conversation.title = payload.title
+    await db.commit()
+    # `updated_at` is `onupdate=func.now()`, a SERVER-side expression, so the
+    # UPDATE leaves that one attribute expired whatever expire_on_commit says -
+    # and response serialisation then touches it outside the greenlet and raises
+    # MissingGreenlet. This is the load that makes the value real.
+    await db.refresh(conversation)
+    return conversation
+
+
 @router.delete("/conversations/{conversation_id}", status_code=204)
 async def delete_conversation(
     conversation_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
+    settings: Settings = Depends(get_app_settings),
 ):
     conversation = await get_owned_conversation(db, conversation_id, user)
-    await db.delete(conversation)  # messages cascade
+    # Collected before the DELETE, because attachments cascade away with their
+    # messages and the ids would be unrecoverable afterwards - the same
+    # row-then-file order delete_document uses.
+    attachment_ids = (
+        await db.scalars(
+            select(Attachment.id)
+            .join(Message, Message.id == Attachment.message_id)
+            .where(Message.conversation_id == conversation.id)
+        )
+    ).all()
+    await db.delete(conversation)  # messages cascade, and attachments with them
     await db.commit()
+    root = attachment_root(settings.upload_dir)
+    for attachment_id in attachment_ids:
+        await delete_document_files(root, str(attachment_id))

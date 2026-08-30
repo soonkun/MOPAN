@@ -51,8 +51,8 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
   }, [id]);
 
   return (
-    <div className="mx-auto max-w-6xl space-y-4 p-6">
-      <h1 className="text-lg font-semibold">{doc?.filename ?? "문서"}</h1>
+    <div className="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:px-6">
+      <h1 className="text-headline font-medium">{doc?.filename ?? "문서"}</h1>
       {doc?.error_message && <ErrorBanner message={doc.error_message} />}
       <ErrorBanner message={error} />
 
@@ -76,8 +76,8 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
           scrollers; it is Safari that still needs it. */}
       {error === null && (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <section className="rounded border border-gray-200 p-4">
-            <h2 className="mb-3 text-sm font-medium text-gray-500">
+          <section className="rounded-md bg-surface-container-low p-4">
+            <h2 className="mb-4 text-title font-medium text-on-surface">
               원문 구조{!loading && ` (${blocks.length})`}
             </h2>
             <div
@@ -87,16 +87,16 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
               className="max-h-[70vh] overflow-y-auto"
             >
               {loading ? (
-                <p className="text-sm text-gray-400">불러오는 중...</p>
+                <p className="text-body text-on-surface-variant">불러오는 중...</p>
               ) : structureError ? (
-                <p className="text-sm text-red-600">{structureError}</p>
+                <p className="text-body text-error">{structureError}</p>
               ) : (
                 <StructureViewer blocks={blocks} />
               )}
             </div>
           </section>
-          <section className="rounded border border-gray-200 p-4">
-            <h2 className="mb-3 text-sm font-medium text-gray-500">
+          <section className="rounded-md bg-surface-container-low p-4">
+            <h2 className="mb-4 text-title font-medium text-on-surface">
               청크 목록{!loading && ` (${chunks.length})`}
             </h2>
             <div
@@ -106,7 +106,7 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
               className="max-h-[70vh] overflow-y-auto"
             >
               {loading ? (
-                <p className="text-sm text-gray-400">불러오는 중...</p>
+                <p className="text-body text-on-surface-variant">불러오는 중...</p>
               ) : (
                 <ChunkViewer chunks={chunks} />
               )}

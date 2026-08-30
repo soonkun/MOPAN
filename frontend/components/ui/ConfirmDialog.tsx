@@ -55,29 +55,27 @@ export default function ConfirmDialog({
       // Escape closes a <dialog> natively without firing any click handler, so
       // this is what keeps the parent's `target` state in step with the DOM.
       onClose={onClose}
-      className="w-full max-w-md rounded border border-gray-200 bg-white p-0 text-gray-900 backdrop:bg-black/30"
+      // §4: a dialog is one of exactly two things in this app allowed a
+      // box-shadow, because it genuinely floats above the page.
+      className="w-full max-w-md rounded-lg bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim"
     >
-      <div className="p-4">
-        <h2 id="confirm-title" className="text-sm font-semibold">
+      <div className="p-6">
+        <h2 id="confirm-title" className="text-title font-medium">
           {title}
         </h2>
-        <p className="mt-2 text-sm text-gray-700">{message}</p>
-        <div className="mt-2">
+        <p className="mt-3 text-body text-on-surface-variant">{message}</p>
+        <div className="mt-3">
           <ErrorBanner message={error} />
         </div>
-        <div className="mt-4 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={() => dialogRef.current?.close()}
-            className="rounded border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-100"
-          >
+        <div className="mt-6 flex justify-end gap-2">
+          <button type="button" onClick={() => dialogRef.current?.close()} className="btn-text">
             취소
           </button>
           <button
             type="button"
             onClick={() => void confirm()}
             disabled={busy}
-            className="rounded border border-red-300 bg-red-50 px-3 py-1.5 text-sm text-red-700 hover:bg-red-100 disabled:opacity-50"
+            className="btn-danger"
           >
             {busy ? "처리 중..." : confirmLabel}
           </button>

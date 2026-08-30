@@ -16,6 +16,16 @@ EMBEDDING_INPUT_TOKEN_LIMIT = 8191
 # Element ceiling for one embeddings request's input array.
 EMBEDDING_MAX_BATCH_SIZE = 2048
 
+# There is no capability query on the chat endpoint - a model that cannot see
+# images answers an image part with an opaque 400 - so vision support has to be
+# asserted, not discovered. Deliberately a short, conservative PREFIX allowlist:
+# a false negative refuses an image upload with a Korean message naming the model,
+# which an operator fixes with one env var (ANSWER_MODEL_SUPPORTS_VISION=true),
+# while a false positive is the raw provider error this exists to prevent. Note
+# what is NOT here: the o1/o3/o4 reasoning families, whose -mini members are
+# text-only, so the whole family is left to the override.
+VISION_CAPABLE_MODEL_PREFIXES = ("gpt-4o", "gpt-4.1", "gpt-4-turbo", "gpt-4-vision", "gpt-5", "chatgpt-4o")
+
 
 class Settings(BaseSettings):
     # env_file is anchored to the repo root. Resolving it against the process CWD
@@ -68,6 +78,17 @@ class Settings(BaseSettings):
     upload_dir: Path = Path("./data/uploads")
     max_upload_size_mb: int = 50
 
+    # 10MB, a fifth of a corpus document's 50MB, because the two files are spent
+    # differently. A corpus document is chunked and only ever reaches the model a
+    # few hundred tokens at a time; an attachment reaches it whole, in ONE request
+    # - an image base64-encoded (+33%, so 10MB of PNG is ~13.3MB on the wire,
+    # inside OpenAI's documented 20MB-per-image ceiling) and a document as text
+    # competing with the RAG evidence for ANSWER_CONTEXT_TOKEN_BUDGET.
+    max_attachment_size_mb: int = 10
+    max_attachments_per_message: int = 5
+    # None -> derived from ANSWER_MODEL via VISION_CAPABLE_MODEL_PREFIXES.
+    answer_model_supports_vision: bool | None = None
+
     @field_validator("upload_dir")
     @classmethod
     def _absolutize_upload_dir(cls, value: Path) -> Path:
@@ -79,6 +100,9 @@ class Settings(BaseSettings):
     def _finalise(self) -> "Settings":
         if self.allow_self_registration is None:
             self.allow_self_registration = self.environment != "production"
+        if self.answer_model_supports_vision is None:
+            model = self.answer_model.lower()
+            self.answer_model_supports_vision = model.startswith(VISION_CAPABLE_MODEL_PREFIXES)
         if self.environment == "production":
             if not self.openai_api_key:
                 raise ValueError("OPENAI_API_KEY must be set when ENVIRONMENT=production")
@@ -123,6 +147,13 @@ class Settings(BaseSettings):
         # below-the-floor log per request forever, never an error.
         if self.answer_context_token_budget < 1:
             raise ValueError("ANSWER_CONTEXT_TOKEN_BUDGET must be >= 1")
+        # Same shape as the retrieval knobs: neither errors when it goes
+        # non-positive, it just makes every attachment upload or every attached
+        # message impossible with a message that blames the user's file.
+        if self.max_attachment_size_mb < 1:
+            raise ValueError("MAX_ATTACHMENT_SIZE_MB must be >= 1")
+        if self.max_attachments_per_message < 1:
+            raise ValueError("MAX_ATTACHMENTS_PER_MESSAGE must be >= 1")
         return self
 
 

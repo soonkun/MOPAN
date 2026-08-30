@@ -110,8 +110,8 @@ export default function CollectionsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 p-6">
-      <h1 className="text-lg font-semibold">분류 관리</h1>
+    <div className="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6">
+      <h1 className="text-headline font-medium">분류 관리</h1>
       <ErrorBanner message={loadError} />
 
       {/* `user === null` is "not loaded yet", not "not an admin" - branching on
@@ -120,14 +120,14 @@ export default function CollectionsPage() {
           403 관리자 권한이 필요합니다. regardless; this only keeps buttons that
           cannot work off the screen. */}
       {user !== null && user.role !== "admin" ? (
-        <p className="text-sm text-gray-500">분류 관리는 관리자만 할 수 있습니다.</p>
+        <p className="text-body text-on-surface-variant">분류 관리는 관리자만 할 수 있습니다.</p>
       ) : (
         <>
           {user !== null && (
-            <form onSubmit={handleCreate} className="space-y-2 rounded border border-gray-200 p-4">
+            <form onSubmit={handleCreate} className="space-y-3 rounded-md bg-surface-container-low p-4">
               <div className="flex flex-wrap items-end gap-2">
                 <div className="flex flex-col gap-1">
-                  <label htmlFor="new-collection-name" className="text-sm text-gray-500">
+                  <label htmlFor="new-collection-name" className="text-body text-on-surface-variant">
                     분류 이름
                   </label>
                   <input
@@ -136,24 +136,24 @@ export default function CollectionsPage() {
                     onChange={(e) => setName(e.target.value)}
                     required
                     maxLength={255}
-                    className="rounded border border-gray-300 px-3 py-2 text-sm"
+                    className="field"
                   />
                 </div>
                 <div className="flex flex-1 flex-col gap-1">
-                  <label htmlFor="new-collection-description" className="text-sm text-gray-500">
+                  <label htmlFor="new-collection-description" className="text-body text-on-surface-variant">
                     설명 (선택)
                   </label>
                   <input
                     id="new-collection-description"
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
-                    className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+                    className="field w-full"
                   />
                 </div>
                 <button
                   type="submit"
                   disabled={creating}
-                  className="rounded border border-gray-300 px-3 py-2 text-sm hover:bg-gray-100 disabled:opacity-50"
+                  className="btn-tonal"
                 >
                   {creating ? "추가 중..." : "분류 추가"}
                 </button>
@@ -165,58 +165,58 @@ export default function CollectionsPage() {
           )}
 
           {collections === null ? (
-            <p className="py-8 text-center text-sm text-gray-400">불러오는 중...</p>
+            <p className="py-8 text-center text-body text-on-surface-variant">불러오는 중...</p>
           ) : collections.length === 0 ? (
-            <p className="py-8 text-center text-sm text-gray-400">분류가 없습니다.</p>
+            <p className="py-8 text-center text-body text-on-surface-variant">분류가 없습니다.</p>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
+            <div className="overflow-x-auto rounded-sm">
+              <table className="w-full text-left text-body">
                 <thead>
-                  <tr className="border-b border-gray-200 text-gray-500">
-                    <th scope="col" className="py-2 pr-3">분류 이름</th>
-                    <th scope="col" className="py-2 pr-3">설명</th>
-                    <th scope="col" className="py-2 pr-3 text-right">문서 수</th>
-                    <th scope="col" className="py-2 pr-3">등록일</th>
-                    <th scope="col" className="py-2">관리</th>
+                  <tr className="bg-surface-container-low text-label font-medium text-on-surface-variant">
+                    <th scope="col" className="px-3 py-3">분류 이름</th>
+                    <th scope="col" className="px-3 py-3">설명</th>
+                    <th scope="col" className="px-3 py-3 text-right">문서 수</th>
+                    <th scope="col" className="px-3 py-3">등록일</th>
+                    <th scope="col" className="px-3 py-3">관리</th>
                   </tr>
                 </thead>
                 <tbody>
                   {collections.map((c) => {
                     const editing = editingId === c.id;
                     return (
-                      <tr key={c.id} className="border-b border-gray-100 align-top">
-                        <td className="py-2 pr-3">
+                      <tr key={c.id} className="border-b border-outline-variant align-top">
+                        <td className="px-3 py-3">
                           {editing ? (
                             <input
                               value={editName}
                               onChange={(e) => setEditName(e.target.value)}
                               maxLength={255}
                               aria-label={`${c.name} 분류 이름`}
-                              className="w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                              className="field h-8 w-full px-2 text-caption"
                             />
                           ) : (
                             c.name
                           )}
                         </td>
-                        <td className="py-2 pr-3 text-gray-500">
+                        <td className="px-3 py-3 text-on-surface-variant">
                           {editing ? (
                             <input
                               value={editDescription}
                               onChange={(e) => setEditDescription(e.target.value)}
                               aria-label={`${c.name} 설명`}
-                              className="w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                              className="field h-8 w-full px-2 text-caption"
                             />
                           ) : (
                             (c.description ?? "-")
                           )}
                         </td>
-                        <td className="py-2 pr-3 text-right text-gray-500">
+                        <td className="px-3 py-3 text-right text-on-surface-variant">
                           {counts === null ? "-" : (counts[c.id] ?? 0)}
                         </td>
-                        <td className="py-2 pr-3 text-gray-500">
+                        <td className="px-3 py-3 text-on-surface-variant">
                           {new Date(c.created_at).toLocaleDateString()}
                         </td>
-                        <td className="py-2">
+                        <td className="px-3 py-3">
                           <div className="flex gap-2">
                             {editing ? (
                               <>
@@ -224,7 +224,7 @@ export default function CollectionsPage() {
                                   type="button"
                                   onClick={() => void handleSave(c.id)}
                                   disabled={saving}
-                                  className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-100 disabled:opacity-50"
+                                  className="btn-tonal btn-compact"
                                 >
                                   저장
                                 </button>
@@ -234,7 +234,7 @@ export default function CollectionsPage() {
                                     setEditingId(null);
                                     setRowError(null);
                                   }}
-                                  className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-100"
+                                  className="btn-tonal btn-compact"
                                 >
                                   취소
                                 </button>
@@ -244,7 +244,7 @@ export default function CollectionsPage() {
                                 <button
                                   type="button"
                                   onClick={() => startEdit(c)}
-                                  className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-100"
+                                  className="btn-tonal btn-compact"
                                 >
                                   수정
                                 </button>
@@ -254,7 +254,7 @@ export default function CollectionsPage() {
                                     setRowError(null);
                                     setDeleteTarget(c);
                                   }}
-                                  className="rounded border border-red-300 px-2 py-1 text-xs text-red-700 hover:bg-red-50"
+                                  className="btn-danger btn-compact"
                                 >
                                   삭제
                                 </button>

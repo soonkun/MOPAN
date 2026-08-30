@@ -2,16 +2,294 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Flat, bordered, high-contrast. No gradients, no glow, no glassmorphism,
-   no oversized radii, no decorative animation. */
-body {
-  @apply bg-white text-gray-900 antialiased;
+/* MOPAN design language - docs/superpowers/specs/2026-08-30-design-language.md.
+   This file and tailwind.config.ts are the ONLY places a colour literal is
+   allowed to appear. Every component resolves colour through a token.
+
+   Hierarchy comes from tonal steps between container surfaces, not from a 1px
+   grey rule around every box. */
+:root {
+  color-scheme: light;
+
+  /* §2 Colour - light */
+  --surface: #ffffff;
+  --surface-container-lowest: #ffffff;
+  --surface-container-low: #f8fafd;
+  --surface-container: #f0f4f9;
+  --surface-container-high: #e9eef6;
+  --surface-container-highest: #dde3ea;
+  --on-surface: #1f1f1f;
+  --on-surface-variant: #444746;
+  --outline: #747775;
+  --outline-variant: #c4c7c5;
+  --primary: #0b57d0;
+  --on-primary: #ffffff;
+  --primary-container: #d3e3fd;
+  --on-primary-container: #041e49;
+  --error: #b3261e;
+  --on-error: #ffffff;
+  --error-container: #f9dedc;
+  --on-error-container: #410e0b;
+
+  /* The modal backdrop. Not in the spec's table, but a <dialog>::backdrop needs
+     a value and `bg-black/30` would be a palette class in a component. */
+  --scrim: rgb(0 0 0 / 0.32);
+
+  /* §2 The Gemini gradient. Wordmark, assistant sparkle and streaming
+     indicator ONLY - never on a surface, behind text, or on a button. */
+  --gradient-brand: linear-gradient(74deg, #4285f4 0%, #9b72cb 45%, #d96570 100%);
+
+  /* §4 Elevation. No resting container gets a shadow; these two are true
+     overlays that float above the page. */
+  --shadow-menu: 0 2px 6px rgb(0 0 0 / 0.1), 0 1px 2px rgb(0 0 0 / 0.06);
+  --shadow-dialog: 0 8px 24px rgb(0 0 0 / 0.16), 0 2px 6px rgb(0 0 0 / 0.08);
 }
 
-/* One rule for every control on every page. The UA default ring is the only
-   focus indicator this app had, and against the dropzone's dashed border it is
-   nearly invisible. Outline, not a ring shadow: no glow. */
+/* The dark values are declared twice on purpose. The media query covers
+   "system", the attribute covers an explicit choice - and the attribute block
+   comes second so `[data-theme="dark"]` wins on a light-preferring OS while
+   `:not([data-theme="light"])` on the media block keeps an explicit LIGHT
+   choice from being overridden on a dark-preferring one. Both directions. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface: #131314;
+    --surface-container-lowest: #0e0e0e;
+    --surface-container-low: #1b1b1b;
+    --surface-container: #1e1f20;
+    --surface-container-high: #282a2c;
+    --surface-container-highest: #333537;
+    --on-surface: #e3e3e3;
+    --on-surface-variant: #c4c7c5;
+    --outline: #8e918f;
+    --outline-variant: #444746;
+    --primary: #a8c7fa;
+    --on-primary: #062e6f;
+    --primary-container: #0842a0;
+    --on-primary-container: #d3e3fd;
+    --error: #f2b8b5;
+    --on-error: #601410;
+    --error-container: #8c1d18;
+    --on-error-container: #f9dedc;
+    --scrim: rgb(0 0 0 / 0.5);
+    /* Half opacity: a shadow on a dark surface reads as dirt, not as depth. */
+    --shadow-menu: 0 2px 6px rgb(0 0 0 / 0.05), 0 1px 2px rgb(0 0 0 / 0.03);
+    --shadow-dialog: 0 8px 24px rgb(0 0 0 / 0.08), 0 2px 6px rgb(0 0 0 / 0.04);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface: #131314;
+  --surface-container-lowest: #0e0e0e;
+  --surface-container-low: #1b1b1b;
+  --surface-container: #1e1f20;
+  --surface-container-high: #282a2c;
+  --surface-container-highest: #333537;
+  --on-surface: #e3e3e3;
+  --on-surface-variant: #c4c7c5;
+  --outline: #8e918f;
+  --outline-variant: #444746;
+  --primary: #a8c7fa;
+  --on-primary: #062e6f;
+  --primary-container: #0842a0;
+  --on-primary-container: #d3e3fd;
+  --error: #f2b8b5;
+  --on-error: #601410;
+  --error-container: #8c1d18;
+  --on-error-container: #f9dedc;
+  --scrim: rgb(0 0 0 / 0.5);
+  --shadow-menu: 0 2px 6px rgb(0 0 0 / 0.05), 0 1px 2px rgb(0 0 0 / 0.03);
+  --shadow-dialog: 0 8px 24px rgb(0 0 0 / 0.08), 0 2px 6px rgb(0 0 0 / 0.04);
+}
+
+body {
+  @apply bg-surface text-on-surface text-body antialiased;
+}
+
+/* §8 Focus. One rule for every control on every page - the UA default ring is
+   nearly invisible against a container surface. Outline, not a ring shadow: no
+   glow. Retargeted from the old grey to the accent token. */
 :focus-visible {
-  outline: 2px solid theme("colors.gray.700");
+  outline: 2px solid var(--primary);
   outline-offset: 2px;
+}
+
+/* §8 Buttons and fields. These live here rather than in a shared TS constants
+   module because there is nothing dynamic about them - they are class names,
+   and a component that needs one writes it the same way it writes any other
+   class. Three button variants exactly as the spec lists them, plus the
+   destructive one the 삭제 / 비활성화 flows need. */
+@layer components {
+  .btn-filled {
+    @apply inline-flex h-10 items-center justify-center rounded-sm bg-primary px-4 text-label font-medium text-on-primary transition-opacity duration-150 hover:opacity-90 disabled:opacity-50;
+  }
+  .btn-tonal {
+    @apply inline-flex h-10 items-center justify-center rounded-sm bg-surface-container-high px-4 text-label font-medium text-on-surface transition-colors duration-150 hover:bg-surface-container-highest disabled:opacity-50;
+  }
+  .btn-text {
+    @apply inline-flex h-10 items-center justify-center rounded-sm bg-transparent px-4 text-label font-medium text-primary transition-colors duration-150 hover:bg-surface-container disabled:opacity-50;
+  }
+  .btn-danger {
+    @apply inline-flex h-10 items-center justify-center rounded-sm bg-error-container px-4 text-label font-medium text-on-error-container transition-opacity duration-150 hover:opacity-90 disabled:opacity-50;
+  }
+  /* Row-level actions in the 분류/사용자 tables. 40px buttons stacked two to a
+     cell push the row height past the text it is acting on. */
+  .btn-compact {
+    @apply h-8 px-3 text-caption;
+  }
+  .icon-btn {
+    @apply inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-on-surface-variant transition-colors duration-150 hover:bg-surface-container-high disabled:opacity-50;
+  }
+  /* The one place a border still carries meaning: a text field's resting
+     outline is what says "you can type here". */
+  .field {
+    @apply h-10 rounded-sm border border-outline bg-surface px-3 text-body text-on-surface transition-colors duration-150 placeholder:text-on-surface-variant focus:border-primary;
+  }
+}
+
+/* The assistant answer's markdown, rendered by components/chat/Markdown.tsx.
+   These are static class lists per element, which is what this @layer is for -
+   as ~20 `components` overrides in the TSX they would be the same strings with
+   a JSX function around each one. Tailwind's preflight strips heading sizes and
+   list markers, so every one of them has to be restated here.
+   Scoped under .markdown so nothing outside an answer inherits it. */
+@layer components {
+  .markdown {
+    @apply break-words;
+  }
+  .markdown > :first-child {
+    @apply mt-0;
+  }
+  .markdown > :last-child {
+    @apply mb-0;
+  }
+  .markdown p,
+  .markdown ul,
+  .markdown ol,
+  .markdown blockquote,
+  .markdown pre {
+    @apply my-3;
+  }
+  .markdown h1 {
+    @apply mb-2 mt-6 text-headline font-medium;
+  }
+  .markdown h2 {
+    @apply mb-2 mt-6 text-title font-medium;
+  }
+  .markdown h3,
+  .markdown h4,
+  .markdown h5,
+  .markdown h6 {
+    @apply mb-1 mt-4 text-body-lg font-medium;
+  }
+  .markdown ul {
+    @apply list-disc pl-6;
+  }
+  .markdown ol {
+    @apply list-decimal pl-6;
+  }
+  .markdown li {
+    @apply my-1;
+  }
+  .markdown li > ul,
+  .markdown li > ol {
+    @apply my-1;
+  }
+  .markdown a {
+    @apply text-primary underline;
+  }
+  .markdown blockquote {
+    @apply border-l-2 border-outline-variant pl-4 text-on-surface-variant;
+  }
+  .markdown hr {
+    @apply my-6 border-t border-outline-variant;
+  }
+  /* §8: code blocks on surface-container-high at --radius-sm, monospace. No
+     syntax highlighting - deliberately out of scope, so no colour appears
+     inside a code block that is not a token. */
+  .markdown code {
+    @apply rounded-xs bg-surface-container-high px-1.5 py-0.5 text-body;
+  }
+  .markdown pre {
+    @apply overflow-x-auto rounded-sm bg-surface-container-high p-4;
+  }
+  .markdown pre code {
+    @apply rounded-none bg-transparent p-0;
+  }
+  /* remark-gfm tables. The scrolling wrapper is in Markdown.tsx - a max-width
+     on the container is what `overflow-x-auto` needs to have something to
+     overflow, and the transcript column supplies it. */
+  .markdown table {
+    @apply w-full text-left text-body;
+  }
+  .markdown th {
+    @apply border-b border-outline-variant bg-surface-container-low px-3 py-2 text-label font-medium text-on-surface-variant;
+  }
+  .markdown td {
+    @apply border-b border-outline-variant px-3 py-2 align-top;
+  }
+}
+
+/* The gradient text used by the wordmark and the empty-state greeting.
+   background-clip:text needs the paired -webkit- prefix and a transparent
+   fill; that is three declarations that would be three arbitrary-value
+   Tailwind classes at every call site. */
+.text-gradient-brand {
+  background-image: var(--gradient-brand);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* §2/§8 The assistant's sparkle, and the same mark used as the streaming
+   indicator. The gradient is painted as a background and punched out by an
+   SVG mask, so the shape carries no colour of its own - which is what keeps
+   every colour literal in this file. The data URI has no fill attribute
+   because a mask reads alpha only. */
+.sparkle {
+  background-image: var(--gradient-brand);
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 0c0 6.6-5.4 12-12 12 6.6 0 12 5.4 12 12 0-6.6 5.4-12 12-12-6.6 0-12-5.4-12-12z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 0c0 6.6-5.4 12-12 12 6.6 0 12 5.4 12 12 0-6.6 5.4-12 12-12-6.6 0-12-5.4-12-12z'/%3E%3C/svg%3E");
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+}
+
+/* The one looping animation in the app, and it runs only while an answer is
+   actually being produced. No animation-fill-mode, so when the reduced-motion
+   override below collapses it to a single 0.01ms pass the element lands back
+   on its own resting style rather than freezing on a keyframe. */
+@keyframes sparkle-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.sparkle-pulsing {
+  animation: sparkle-pulse 1.2s cubic-bezier(0.2, 0, 0, 1) infinite;
+}
+
+/* §7 Motion is feedback, not decoration. Under `reduce` the app keeps every
+   state change - only the tweening between states goes. Written as one global
+   override rather than wrapping each transition in a no-preference query: same
+   result, and it cannot be forgotten at a new call site. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
 }

@@ -1,7 +1,12 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
-SourceType = Literal["rag", "mcp"]
+# "attachment" is text the user attached to this one turn. It rides the Evidence
+# type rather than a parallel channel so that it inherits, for free, every defence
+# build_prompt already applies to corpus text: the per-request nonce fence,
+# _strip_fence_markers, and one shared token budget instead of a second one added
+# on top.
+SourceType = Literal["rag", "mcp", "attachment"]
 
 
 @dataclass

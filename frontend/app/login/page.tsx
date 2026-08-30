@@ -39,9 +39,11 @@ export default function LoginPage() {
     <div className="flex min-h-screen items-center justify-center px-4">
       <form
         onSubmit={handleSubmit}
-        className="w-full max-w-sm space-y-4 rounded border border-gray-200 p-8"
+        className="w-full max-w-sm space-y-6 rounded-lg bg-surface-container-low p-8"
       >
-        <h1 className="text-xl font-semibold">MOPAN</h1>
+        <h1 className="text-headline font-medium">
+          <span className="text-gradient-brand">MOPAN</span>
+        </h1>
         <div>
           <label htmlFor="email" className="sr-only">
             이메일
@@ -54,7 +56,7 @@ export default function LoginPage() {
             placeholder="이메일"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+            className="field w-full"
           />
         </div>
         <div>
@@ -69,20 +71,20 @@ export default function LoginPage() {
             placeholder="비밀번호"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+            className="field w-full"
           />
         </div>
         <ErrorBanner message={error} />
         <button
           type="submit"
           disabled={loading}
-          className="w-full rounded bg-gray-900 px-3 py-2 text-sm text-white disabled:opacity-50"
+          className="btn-filled w-full"
         >
           {loading ? "로그인 중..." : "로그인"}
         </button>
-        <p className="text-center text-sm text-gray-500">
+        <p className="text-center text-body text-on-surface-variant">
           계정이 없으신가요?{" "}
-          <Link href="/register" className="underline">
+          <Link href="/register" className="text-primary underline">
             회원가입
           </Link>
         </p>

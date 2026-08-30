@@ -2,13 +2,13 @@ import type { Chunk } from "@/lib/types";
 
 export default function ChunkViewer({ chunks }: { chunks: Chunk[] }) {
   if (chunks.length === 0) {
-    return <p className="text-sm text-gray-400">아직 청크가 없습니다.</p>;
+    return <p className="text-body text-on-surface-variant">아직 청크가 없습니다.</p>;
   }
   return (
     <div className="space-y-3">
       {chunks.map((chunk) => (
-        <div key={chunk.id} className="rounded border border-gray-200 p-3 text-sm">
-          <div className="mb-1 flex flex-wrap gap-3 text-xs text-gray-400">
+        <div key={chunk.id} className="rounded-md bg-surface-container p-3 text-body">
+          <div className="mb-1 flex flex-wrap gap-3 text-caption text-on-surface-variant">
             {/* chunk_index is 0-based on the wire; the heading is not. */}
             <span>청크 {chunk.chunk_index + 1}</span>
             <span className="break-all">ID {chunk.id}</span>
@@ -23,7 +23,7 @@ export default function ChunkViewer({ chunks }: { chunks: Chunk[] }) {
               </span>
             )}
           </div>
-          <p className="whitespace-pre-wrap text-gray-800">{chunk.content}</p>
+          <p className="whitespace-pre-wrap text-on-surface">{chunk.content}</p>
         </div>
       ))}
     </div>

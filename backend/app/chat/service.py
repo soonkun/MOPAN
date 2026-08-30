@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.attachments.service import claim as claim_attachments
 from app.chat.prompt import build_prompt, get_prompt, new_nonce
 from app.core.config import Settings
 from app.core.logging import log_event
@@ -122,6 +123,7 @@ async def answer(
     evidence: list[Evidence],
     *,
     settings: Settings,
+    images: list[str] | None = None,
 ) -> ChatAnswer:
     """Deliberately knows nothing about where `evidence` came from: no session, no
     vector store, no reranker. That is the whole point of the split - Slice 3 runs
@@ -135,6 +137,7 @@ async def answer(
         prompt=template,
         nonce=new_nonce(),
         token_budget=settings.answer_context_token_budget,
+        images=images,
     )
 
     started = time.perf_counter()
@@ -191,6 +194,7 @@ async def persist_turn(
     question: str,
     chat_answer: ChatAnswer,
     retrieval_ms: int,
+    attachment_ids: list[uuid.UUID] | None = None,
 ) -> None:
     # No flush between the two adds. SQLAlchemy does emit them as ONE executemany
     # INSERT, but asyncpg executes it as a Bind/Execute per parameter set and
@@ -199,7 +203,8 @@ async def persist_turn(
     # sharing a timestamp the way a now() default would. That is
     # exactly the property Message.created_at was given clock_timestamp() for, and
     # test_the_two_messages_of_a_turn_never_share_a_timestamp guards it.
-    db.add(Message(conversation_id=conversation.id, role="user", content=question, citations=[]))
+    user_message = Message(conversation_id=conversation.id, role="user", content=question, citations=[])
+    db.add(user_message)
     db.add(
         Message(
             conversation_id=conversation.id,
@@ -214,6 +219,18 @@ async def persist_turn(
             retrieval_ms=retrieval_ms,
         )
     )
+    # In the SAME transaction as the two messages: an attachment is either part of
+    # a persisted turn or still unclaimed, never pointing at a message that was
+    # rolled back.
+    if attachment_ids:
+        # AFTER both adds, so they still flush as one executemany and keep their
+        # distinct clock_timestamp()s. The flush is not optional: Message.id's
+        # `default=uuid.uuid4` is a *flush-time* default, so before it
+        # user_message.id is None - and the claim below would then quietly write
+        # message_id = NULL, match its own `IS NULL` predicate, and report a
+        # rowcount that looks like success.
+        await db.flush()
+        await claim_attachments(db, attachment_ids, conversation.user_id, user_message.id)
     # Without this the sidebar is frozen in creation order: `onupdate` only fires
     # when some column on the conversation row itself changes.
     await db.execute(

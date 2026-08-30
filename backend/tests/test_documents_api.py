@@ -1,9 +1,11 @@
+import base64
 import uuid
 from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from app.models.chunk import EMBEDDING_DIM, Chunk
 
@@ -357,3 +359,189 @@ async def test_unknown_collection_id_is_404(admin_client):
     deleted = await admin_client.delete(f"/api/collections/{MISSING_ID}")
     assert deleted.status_code == 404
     assert deleted.json()["detail"] == "분류를 찾을 수 없습니다."
+
+
+# --- Chat attachments --------------------------------------------------------
+#
+# Same upload machinery as a corpus document (app/documents/validation.py,
+# app/documents/storage.py) and a deliberately DIFFERENT permission rule: writing
+# to /api/documents is admin-only because those documents become the evidence base
+# for everybody's answers, while an attachment can only ever influence its own
+# owner's answer. member_client below is a plain non-admin user throughout, and is
+# 403 on /api/documents in test_upload_requires_admin.
+
+# A real 1x1 PNG: `filetype` sniffs the signature, so a made-up byte string would
+# be rejected by validate_magic_bytes before any of these tests measured anything.
+PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+
+async def upload_attachment(client, name="note.txt", data=b"hello", content_type="text/plain"):
+    return await client.post("/api/attachments", files={"file": (name, data, content_type)})
+
+
+async def test_any_authenticated_user_may_attach(member_client):
+    response = await upload_attachment(member_client, "spec.txt", b"turbidity is 4.2 NTU")
+    assert response.status_code == 201
+    body = response.json()
+    assert body["kind"] == "document"
+    assert body["filename"] == "spec.txt"
+    assert body["size_bytes"] == len(b"turbidity is 4.2 NTU")
+    # Extracted at upload, not at answer time - but never echoed back: it is prompt
+    # input, sometimes megabytes of it.
+    assert body["has_text"] is True
+    assert "extracted_text" not in body
+
+
+async def test_an_image_attachment_is_stored_with_kind_image(member_client):
+    body = (await upload_attachment(member_client, "shot.png", PNG_1X1, "image/png")).json()
+    assert body["kind"] == "image"
+    # NULL extracted_text: an image reaches the model as an image part, not text.
+    assert body["has_text"] is False
+
+
+async def test_attachment_routes_require_auth(client):
+    attachment_id = uuid.uuid4()
+    assert (await upload_attachment(client)).status_code == 401
+    assert (await client.get(f"/api/attachments/{attachment_id}")).status_code == 401
+    assert (await client.get(f"/api/attachments/{attachment_id}/content")).status_code == 401
+    assert (await client.delete(f"/api/attachments/{attachment_id}")).status_code == 401
+
+
+async def test_another_users_attachment_is_404_on_every_route(member_client, admin_client):
+    """404, not 403, exactly as get_owned_conversation does it: a 403 would confirm
+    that somebody else's attachment id exists."""
+    attachment_id = (await upload_attachment(member_client, "private.txt", b"my own notes")).json()["id"]
+
+    assert (await admin_client.get(f"/api/attachments/{attachment_id}")).status_code == 404
+    assert (await admin_client.get(f"/api/attachments/{attachment_id}/content")).status_code == 404
+    assert (await admin_client.delete(f"/api/attachments/{attachment_id}")).status_code == 404
+    # The refusal is real, not cosmetic: the owner still has it.
+    assert (await member_client.get(f"/api/attachments/{attachment_id}")).status_code == 200
+
+
+async def test_an_unknown_attachment_id_is_the_same_404(member_client):
+    response = await member_client.get(f"/api/attachments/{MISSING_ID}")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "첨부파일을 찾을 수 없습니다."
+
+
+async def test_an_oversize_attachment_is_refused_in_korean(member_client, app):
+    """MAX_ATTACHMENT_SIZE_MB is its own setting, not MAX_UPLOAD_SIZE_MB: a corpus
+    document is chunked and reaches the model a few hundred tokens at a time, an
+    attachment reaches it whole in one request. Only the attachment limit is
+    lowered here, and the "1MB" in the message is what proves it was the one
+    consulted - asserting the 413 alone would pass against a handler reading
+    MAX_UPLOAD_SIZE_MB, because save_upload_stream refuses it a second time
+    anyway. (Staged: swapping the setting leaves the status 413 and changes only
+    this string.)"""
+    app.state.settings = app.state.settings.model_copy(
+        update={"max_attachment_size_mb": 1, "max_upload_size_mb": 50}
+    )
+    response = await upload_attachment(member_client, "big.txt", b"x" * (2 * 1024 * 1024))
+    assert response.status_code == 413
+    detail = response.json()["detail"]
+    assert detail == "파일이 최대 크기 1MB를 초과했습니다."
+    # Hangul, not English: frontend/lib/api.ts:detailText drops a detail with no
+    # Hangul in it and shows a generic fallback, so English is invisible here.
+    assert any("가" <= ch <= "힣" for ch in detail)
+
+
+async def test_a_content_type_extension_mismatch_is_refused(member_client):
+    response = await upload_attachment(member_client, "shot.png", PNG_1X1, "application/pdf")
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Content-Type application/pdf은(는) .png 파일과 맞지 않습니다."
+
+
+async def test_an_image_renamed_to_pdf_is_refused_by_its_magic_bytes(member_client):
+    response = await upload_attachment(member_client, "shot.pdf", PNG_1X1, "application/pdf")
+    assert response.status_code == 400
+    assert "확장자와 맞지 않습니다" in response.json()["detail"]
+
+
+async def test_an_unsupported_attachment_type_is_refused(member_client):
+    response = await upload_attachment(member_client, "clip.mp4", b"\x00\x00\x00\x20ftypisom", "video/mp4")
+    assert response.status_code == 400
+    assert response.json()["detail"] == "지원하지 않는 파일 형식입니다: .mp4"
+
+
+async def test_an_image_is_refused_when_the_answer_model_cannot_see(member_client, app):
+    """Refused at UPLOAD, so the user is told while attaching rather than after
+    composing a whole message around a thumbnail - and so an image part can never
+    reach a text-only model at all."""
+    app.state.settings = app.state.settings.model_copy(
+        update={"answer_model": "text-only-1", "answer_model_supports_vision": False}
+    )
+    response = await upload_attachment(member_client, "shot.png", PNG_1X1, "image/png")
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "현재 답변 모델(text-only-1)은 이미지를 읽을 수 없습니다. "
+        "이미지 대신 문서 파일을 첨부하거나 관리자에게 문의해 주세요."
+    )
+    # A document attachment still works - the model just cannot see pictures.
+    assert (await upload_attachment(member_client, "note.txt", b"still fine")).status_code == 201
+
+
+async def test_a_document_with_no_readable_text_is_refused(member_client):
+    """A scanned PDF parses cleanly and yields nothing. Accepting it would put a
+    chip on screen that contributes literally nothing to the answer, with no way
+    for the user to tell."""
+    response = await upload_attachment(member_client, "blank.txt", b"   \n  \n")
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "첨부한 문서에서 읽을 수 있는 텍스트를 찾지 못했습니다. 다른 파일을 첨부해 주세요."
+    )
+
+
+async def test_a_refused_attachment_leaves_no_row_and_no_file(member_client, app, db):
+    from app.models.attachment import Attachment
+
+    await upload_attachment(member_client, "blank.txt", b"   ")
+    assert (await db.scalars(select(Attachment))).all() == []
+    root = Path(app.state.settings.upload_dir) / "attachments"
+    assert not root.exists() or list(root.iterdir()) == []
+
+
+async def test_image_content_is_served_inline_and_html_is_not(member_client):
+    """.html is an accepted attachment type and /api/* is proxied same-origin by
+    Next, so serving a stored file back under its own Content-Type would be stored
+    XSS on the app's own origin."""
+    image_id = (await upload_attachment(member_client, "shot.png", PNG_1X1, "image/png")).json()["id"]
+    hostile_page = b"<html><body><p>hi</p><script>alert(1)</script></body></html>"
+    page_id = (await upload_attachment(member_client, "x.html", hostile_page, "text/html")).json()["id"]
+
+    image = await member_client.get(f"/api/attachments/{image_id}/content")
+    assert image.status_code == 200
+    assert image.headers["content-type"] == "image/png"
+    assert image.headers["content-disposition"].startswith("inline")
+    assert image.content == PNG_1X1
+
+    page = await member_client.get(f"/api/attachments/{page_id}/content")
+    assert page.headers["content-type"] == "application/octet-stream"
+    assert page.headers["content-disposition"].startswith("attachment")
+    assert page.headers["x-content-type-options"] == "nosniff"
+
+
+async def test_deleting_an_unclaimed_attachment_removes_the_row_and_the_file(member_client, app):
+    attachment_id = (await upload_attachment(member_client, "note.txt", b"drop me")).json()["id"]
+    stored = Path(app.state.settings.upload_dir) / "attachments" / attachment_id
+    assert stored.exists()
+
+    assert (await member_client.delete(f"/api/attachments/{attachment_id}")).status_code == 204
+    assert (await member_client.get(f"/api/attachments/{attachment_id}")).status_code == 404
+    assert not stored.exists()
+
+
+async def test_attachments_live_under_their_own_subdirectory(member_client, admin_client, app, collection_id):
+    """One UPLOAD_DIR, two per-id trees. `attachments` can never collide with a
+    document's directory because that name is always a UUID."""
+    attachment_id = (await upload_attachment(member_client, "note.txt", b"hello")).json()["id"]
+    document = await admin_client.post(
+        "/api/documents",
+        data={"collection_id": collection_id},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+    )
+    root = Path(app.state.settings.upload_dir)
+    assert (root / "attachments" / attachment_id / "source.txt").exists()
+    assert (root / document.json()["id"] / "source.txt").exists()

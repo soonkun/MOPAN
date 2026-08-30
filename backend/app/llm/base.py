@@ -20,9 +20,17 @@ class ChatMessage:
     content: str
     name: str | None = None
     tool_call_id: str | None = None
+    # data: URLs for chat attachments of kind 'image'. A plain string `content`
+    # stays a plain string on the wire, so every existing call site is untouched;
+    # only a message that actually carries an image becomes a content array.
+    images: list[str] | None = None
 
     def to_openai(self) -> dict:
         payload: dict = {"role": self.role, "content": self.content}
+        if self.images:
+            payload["content"] = [{"type": "text", "text": self.content}] + [
+                {"type": "image_url", "image_url": {"url": url}} for url in self.images
+            ]
         if self.name is not None:
             payload["name"] = self.name
         if self.tool_call_id is not None:

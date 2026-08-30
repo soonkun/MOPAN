@@ -164,7 +164,10 @@ def test_answer_takes_no_session_and_no_retrieval_collaborator():
     calls this same function. If answer() grew a db, a vector store or a reranker
     parameter, that would become a rewrite instead of an addition."""
     params = list(inspect.signature(answer).parameters)
-    assert params == ["llm_provider", "question", "history", "evidence", "settings"]
+    # `images` is data, like `evidence`: chat attachments of kind 'image', already
+    # read off disk by the caller. It carries no session and no retrieval
+    # collaborator, which is the property this test is actually about.
+    assert params == ["llm_provider", "question", "history", "evidence", "settings", "images"]
 
 
 async def test_an_mcp_citation_is_identifiable_not_just_non_crashing(settings):

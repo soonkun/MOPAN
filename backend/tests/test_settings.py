@@ -152,3 +152,44 @@ def test_invalid_environment_value_is_rejected(monkeypatch):
     # field, so it would not notice the Literal being loosened back to str.
     with pytest.raises(ValidationError, match="environment"):
         Settings()
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("gpt-4o", True),
+        ("gpt-4o-mini", True),
+        ("gpt-4.1", True),
+        # Conservative on purpose: the o-series -mini members are text-only, so the
+        # whole family is left to the explicit override rather than guessed at. A
+        # false negative costs one env var; a false positive is the opaque provider
+        # 400 this setting exists to prevent.
+        ("o1-mini", False),
+        ("llama-3-8b-instruct", False),
+    ],
+)
+def test_vision_support_is_derived_from_the_answer_model(model, expected):
+    assert Settings(answer_model=model).answer_model_supports_vision is expected
+
+
+def test_an_explicit_vision_setting_overrides_the_derivation():
+    """The escape hatch for a vision-capable model the allowlist has not heard of,
+    and for pinning a listed model off."""
+    assert Settings(
+        answer_model="my-local-vlm", answer_model_supports_vision=True
+    ).answer_model_supports_vision
+    assert (
+        Settings(answer_model="gpt-4o", answer_model_supports_vision=False).answer_model_supports_vision
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("max_attachment_size_mb", 0), ("max_attachments_per_message", 0)],
+)
+def test_non_positive_attachment_limits_are_rejected(field, value):
+    # Neither errors when it goes non-positive, it just makes every attachment
+    # upload impossible with a message that blames the user's file.
+    with pytest.raises(ValueError, match=field.upper()):
+        Settings(**{field: value})

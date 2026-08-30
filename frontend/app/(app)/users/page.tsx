@@ -70,36 +70,36 @@ export default function UsersPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 p-6">
-      <h1 className="text-lg font-semibold">사용자 관리</h1>
+    <div className="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6">
+      <h1 className="text-headline font-medium">사용자 관리</h1>
       <ErrorBanner message={loadError} />
 
       {users === null ? (
-        !loadError && <p className="py-8 text-center text-sm text-gray-400">불러오는 중...</p>
+        !loadError && <p className="py-8 text-center text-body text-on-surface-variant">불러오는 중...</p>
       ) : users.length === 0 ? (
-        <p className="py-8 text-center text-sm text-gray-400">사용자가 없습니다.</p>
+        <p className="py-8 text-center text-body text-on-surface-variant">사용자가 없습니다.</p>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
+        <div className="overflow-x-auto rounded-sm">
+          <table className="w-full text-left text-body">
             <thead>
-              <tr className="border-b border-gray-200 text-gray-500">
-                <th scope="col" className="py-2 pr-3">이메일</th>
-                <th scope="col" className="py-2 pr-3">권한</th>
-                <th scope="col" className="py-2 pr-3">상태</th>
-                <th scope="col" className="py-2 pr-3">가입일</th>
-                <th scope="col" className="py-2">관리</th>
+              <tr className="bg-surface-container-low text-label font-medium text-on-surface-variant">
+                <th scope="col" className="px-3 py-3">이메일</th>
+                <th scope="col" className="px-3 py-3">권한</th>
+                <th scope="col" className="px-3 py-3">상태</th>
+                <th scope="col" className="px-3 py-3">가입일</th>
+                <th scope="col" className="px-3 py-3">관리</th>
               </tr>
             </thead>
             <tbody>
               {users.map((u) => (
-                <tr key={u.id} className="border-b border-gray-100 align-top">
-                  <td className="py-2 pr-3">
+                <tr key={u.id} className="border-b border-outline-variant align-top">
+                  <td className="px-3 py-3">
                     {u.email}
                     {/* Which row is you is what makes 자신의 권한은 변경할 수
                         없습니다. readable as an explanation instead of a riddle. */}
-                    {me?.id === u.id && <span className="ml-1 text-xs text-gray-400">(나)</span>}
+                    {me?.id === u.id && <span className="ml-1 text-caption text-on-surface-variant">(나)</span>}
                   </td>
-                  <td className="py-2 pr-3">
+                  <td className="px-3 py-3">
                     <select
                       value={u.role}
                       disabled={busyId === u.id}
@@ -110,7 +110,7 @@ export default function UsersPage() {
                       onChange={(e) => {
                         void patch(u.id, { role: e.target.value }).catch(() => undefined);
                       }}
-                      className="rounded border border-gray-300 px-2 py-1 text-sm disabled:opacity-50"
+                      className="field h-8 px-2 text-caption disabled:opacity-50"
                     >
                       {Object.entries(ROLE_LABEL).map(([value, label]) => (
                         <option key={value} value={value}>
@@ -119,15 +119,15 @@ export default function UsersPage() {
                       ))}
                     </select>
                   </td>
-                  <td className="py-2 pr-3">
-                    <span className={u.is_active ? "text-gray-700" : "text-red-600"}>
+                  <td className="px-3 py-3">
+                    <span className={u.is_active ? "text-on-surface" : "text-error"}>
                       {u.is_active ? "활성" : "비활성"}
                     </span>
                   </td>
-                  <td className="py-2 pr-3 text-gray-500">
+                  <td className="px-3 py-3 text-on-surface-variant">
                     {new Date(u.created_at).toLocaleDateString()}
                   </td>
-                  <td className="py-2">
+                  <td className="px-3 py-3">
                     {u.is_active ? (
                       <button
                         type="button"
@@ -135,7 +135,7 @@ export default function UsersPage() {
                           setRowError(null);
                           setDeactivateTarget(u);
                         }}
-                        className="rounded border border-red-300 px-2 py-1 text-xs text-red-700 hover:bg-red-50"
+                        className="btn-danger btn-compact"
                       >
                         비활성화
                       </button>
@@ -148,7 +148,7 @@ export default function UsersPage() {
                         onClick={() => {
                           void patch(u.id, { is_active: true }).catch(() => undefined);
                         }}
-                        className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-100 disabled:opacity-50"
+                        className="btn-tonal btn-compact"
                       >
                         활성화
                       </button>

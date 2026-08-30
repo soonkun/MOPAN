@@ -4,13 +4,47 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { apiFetch, errorMessage, streamChat } from "@/lib/api";
 import ErrorBanner from "@/components/ui/ErrorBanner";
+import Composer, {
+  ATTACHMENT_EXTENSIONS,
+  type PendingAttachment,
+} from "@/components/chat/Composer";
 import MessageBubble from "@/components/chat/MessageBubble";
-import type { Message } from "@/lib/types";
+import type { Attachment, Message } from "@/lib/types";
 
 const STATUS_LABEL: Record<string, string> = {
   searching: "문서 검색 중…",
   answering: "답변 생성 중…",
 };
+
+// settings.max_attachments_per_message and settings.max_attachment_size_mb. The
+// server is the real boundary and refuses both in Korean; these only spare the
+// user an upload that ends in a 400 or a 413, and they are worded identically to
+// the server's own refusals so the two can never read as different rules.
+const MAX_ATTACHMENTS = 5;
+const MAX_ATTACHMENT_MB = 10;
+
+// §8: 3-4 chips that fill the composer when clicked. Deliberately about
+// documents and not about the corpus that happens to be loaded - this is a
+// document-QA product and the corpus is incidental to it.
+const SUGGESTIONS = [
+  "이 문서의 핵심 내용을 세 줄로 요약해 주세요",
+  "첨부한 파일에서 주요 수치를 표로 정리해 주세요",
+  "두 문서의 내용이 어긋나는 부분을 찾아 주세요",
+  "규정에서 담당자의 의무가 무엇인지 알려 주세요",
+];
+
+function rejection(file: File): string | null {
+  // Same rule as validation.py's extension_of: no dot means no extension, not
+  // "the whole name is the extension".
+  const extension = file.name.includes(".") ? file.name.split(".").pop()!.toLowerCase() : "";
+  if (!ATTACHMENT_EXTENSIONS.includes(extension)) {
+    return `지원하지 않는 파일 형식입니다: .${extension}`;
+  }
+  if (file.size > MAX_ATTACHMENT_MB * 1024 * 1024) {
+    return `파일이 최대 크기 ${MAX_ATTACHMENT_MB}MB를 초과했습니다.`;
+  }
+  return null;
+}
 
 export default function ChatWindow({
   initialConversationId,
@@ -23,22 +57,44 @@ export default function ChatWindow({
   // "no messages", "not loaded yet" and "the load failed" are three states, and
   // the empty-state line below belongs to only the first - the same distinction
   // the Sidebar draws for its conversation list, its `!error &&` included.
-  // Without `loaded`, every arrival at /chat/{id} flashes 등록된 문서에 대해
-  // 무엇이든 물어보세요. before the transcript lands: measured at 40ms over
-  // loopback, and it is a network round trip, so it is only ever longer in
-  // front of a real user. Without `!error`, a failed load shows that same
-  // invitation stacked on top of the error banner, because setLoaded runs in
-  // finally() and a rejected fetch is therefore loaded-and-empty.
+  // Without `loaded`, every arrival at /chat/{id} flashes the greeting before
+  // the transcript lands: measured at 40ms over loopback, and it is a network
+  // round trip, so it is only ever longer in front of a real user. Without
+  // `!error`, a failed load shows that same invitation stacked on top of the
+  // error banner, because setLoaded runs in finally() and a rejected fetch is
+  // therefore loaded-and-empty.
   const [loaded, setLoaded] = useState(!initialConversationId);
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [dragging, setDragging] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The answer, repeated into an off-screen live region - see the markup below
   // for why the transcript itself cannot be the live region.
   const [announcement, setAnnouncement] = useState("");
+  // A second region, for the things that are not the answer: an attachment
+  // added or removed, and 복사됨. Separate because the answer's region is only
+  // ever written on `done`, and mixing the two would re-announce an old answer
+  // every time a file was attached.
+  const [notice, setNotice] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Set only by 중지, so the shared AbortError catch below can tell "the user
+  // pressed stop" from "this component unmounted mid-answer".
+  const stoppedRef = useRef(false);
+  // One controller per in-flight upload, so removing a chip that is still
+  // uploading cancels its request instead of letting it land on a chip that no
+  // longer exists.
+  const uploadsRef = useRef(new Map<string, AbortController>());
+  // Every blob: URL handed to a thumbnail, revoked on unmount. Without this a
+  // session of attaching and removing images leaks one buffer per preview.
+  const previewUrlsRef = useRef<string[]>([]);
+  // dragenter/dragleave fire for every child element the pointer crosses, so a
+  // plain boolean flickers off the moment the cursor moves over a message. The
+  // depth counter is what makes the drop state survive the crossing.
+  const dragDepth = useRef(0);
 
   // Abort an answer still in flight when this window stops being the one on
   // screen. Without it streamChat outlived the component and its closure kept
@@ -53,6 +109,11 @@ export default function ChatWindow({
   useEffect(() => () => abortRef.current?.abort(), [initialConversationId]);
 
   useEffect(() => {
+    const urls = previewUrlsRef.current;
+    return () => urls.forEach((url) => URL.revokeObjectURL(url));
+  }, []);
+
+  useEffect(() => {
     if (!initialConversationId) return;
     apiFetch<Message[]>(`/api/conversations/${initialConversationId}/messages`)
       .then(setMessages)
@@ -61,18 +122,122 @@ export default function ChatWindow({
   }, [initialConversationId]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    // §7: under `reduce` the app must be fully usable with zero animation, and
+    // a CSS override cannot reach a behavior passed to scrollIntoView. The jump
+    // still lands on the same element - only the tween goes.
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    bottomRef.current?.scrollIntoView({ behavior: reduce ? "auto" : "smooth" });
   }, [messages, status]);
 
-  async function handleSend(e: React.FormEvent) {
-    e.preventDefault();
+  async function upload(key: string, file: File) {
+    const controller = new AbortController();
+    uploadsRef.current.set(key, controller);
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      // apiFetch handles FormData correctly: it only sets a JSON Content-Type
+      // for string bodies, so the browser's multipart boundary survives.
+      const created = await apiFetch<Attachment>("/api/attachments", {
+        method: "POST",
+        body: form,
+        signal: controller.signal,
+      });
+      setAttachments((prev) =>
+        prev.map((a) =>
+          a.key === key
+            ? { ...a, status: "ready", attachment: created, sizeBytes: created.size_bytes }
+            : a,
+        ),
+      );
+      setNotice(`${created.filename} 첨부됨`);
+    } catch (err) {
+      // The chip was removed while this was in flight; there is nothing left to
+      // report the failure on.
+      if ((err as { name?: string } | null)?.name === "AbortError") return;
+      const message = errorMessage(err);
+      // Onto the chip, not into the page banner: with five files in the row a
+      // banner cannot say which one 지원하지 않는 파일 형식입니다 is about.
+      setAttachments((prev) =>
+        prev.map((a) => (a.key === key ? { ...a, status: "error", error: message } : a)),
+      );
+      setNotice(`${file.name} 첨부 실패: ${message}`);
+    } finally {
+      uploadsRef.current.delete(key);
+    }
+  }
+
+  function addFiles(files: File[]) {
+    setError(null);
+    const room = MAX_ATTACHMENTS - attachments.length;
+    if (files.length > room) {
+      // The one refusal that has no chip to live on, because the files it
+      // refuses never become chips. Same sentence the server answers with.
+      setError(`첨부파일은 한 번에 최대 ${MAX_ATTACHMENTS}개까지 보낼 수 있습니다.`);
+    }
+    for (const file of files.slice(0, Math.max(room, 0))) {
+      const key = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const refusal = rejection(file);
+      const isImage = file.type.startsWith("image/");
+      // A blob: URL, not a FileReader data: URL: it is synchronous, so the
+      // thumbnail is on screen in the same frame the file was chosen.
+      const previewUrl = isImage && !refusal ? URL.createObjectURL(file) : null;
+      if (previewUrl) previewUrlsRef.current.push(previewUrl);
+      setAttachments((prev) => [
+        ...prev,
+        {
+          key,
+          filename: file.name,
+          sizeBytes: file.size,
+          kind: isImage ? "image" : "document",
+          previewUrl,
+          status: refusal ? "error" : "uploading",
+          attachment: null,
+          error: refusal,
+        },
+      ]);
+      // The upload starts NOW, on selection, not on send: the thumbnail and any
+      // refusal have to be on screen while the user is still writing the
+      // question, not after they have pressed 전송.
+      if (!refusal) void upload(key, file);
+      else setNotice(`${file.name} 첨부 실패: ${refusal}`);
+    }
+  }
+
+  function removeAttachment(key: string) {
+    const entry = attachments.find((a) => a.key === key);
+    if (!entry) return;
+    uploadsRef.current.get(key)?.abort();
+    if (entry.previewUrl) URL.revokeObjectURL(entry.previewUrl);
+    setAttachments((prev) => prev.filter((a) => a.key !== key));
+    setNotice(`${entry.filename} 첨부 삭제됨`);
+    // Only a row that actually exists server-side. A refused file was never
+    // stored, and DELETE on its (absent) id would answer 404 and put a banner
+    // on screen for a removal that worked.
+    if (entry.attachment) {
+      apiFetch(`/api/attachments/${entry.attachment.id}`, { method: "DELETE" }).catch((err) =>
+        setError(errorMessage(err)),
+      );
+    }
+  }
+
+  async function handleSend() {
     if (!input.trim() || sending) return;
+    if (attachments.some((a) => a.status === "uploading")) {
+      setError("첨부파일 업로드가 끝난 뒤에 보내 주세요.");
+      return;
+    }
 
     const question = input;
+    const sent = attachments.filter((a) => a.attachment !== null).map((a) => a.attachment!);
     const pendingId = `temp-${Date.now()}`;
     const controller = new AbortController();
     abortRef.current = controller;
+    stoppedRef.current = false;
     setInput("");
+    // Cleared here rather than on `done`: these rows are claimed by the send,
+    // so leaving the chips up would offer a 삭제 that now answers 409
+    // 이미 전송된 첨부파일은 삭제할 수 없습니다.
+    setAttachments([]);
     setError(null);
     setAnnouncement("");
     setSending(true);
@@ -83,6 +248,7 @@ export default function ChatWindow({
         role: "user",
         content: question,
         citations: [],
+        attachments: sent,
         created_at: new Date().toISOString(),
       },
     ]);
@@ -94,7 +260,11 @@ export default function ChatWindow({
       // never emitted at all (it is Slice 3's), and the `citations` frame carries
       // the identical array that `done` carries one frame later.
       await streamChat(
-        { conversation_id: conversationId, message: question },
+        {
+          conversation_id: conversationId,
+          message: question,
+          attachment_ids: sent.map((a) => a.id),
+        },
         (event) => {
           if (event.type === "status") {
             setStatus(STATUS_LABEL[event.status] ?? null);
@@ -118,6 +288,7 @@ export default function ChatWindow({
                 role: "assistant",
                 content: event.content,
                 citations: event.citations,
+                attachments: [],
                 created_at: new Date().toISOString(),
               },
             ]);
@@ -156,13 +327,24 @@ export default function ChatWindow({
         router.replace(`/chat/${newConversationId}`);
       }
     } catch (err) {
-      // An abort is this component's own doing, not a failure: the user moved
-      // on. Rendering it would put a red banner on the conversation they just
-      // opened, about the one they just left. Name check rather than
-      // `instanceof DOMException` - fetch and the stream reader are free to
-      // reject with either, and only the name is guaranteed.
+      // An abort is this component's own doing, not a failure: either the user
+      // pressed 중지, or they moved on and the unmount cleanup fired. Rendering
+      // it would put a red banner on the conversation they just opened, about
+      // the one they just left. Name check rather than `instanceof
+      // DOMException` - fetch and the stream reader are free to reject with
+      // either, and only the name is guaranteed.
       if ((err as { name?: string } | null)?.name !== "AbortError") {
         setError(errorMessage(err));
+      } else if (stoppedRef.current) {
+        // 중지 lands before phase 3, so the backend persisted nothing: the
+        // client disconnect cancels the generator at a yield, and persist_turn
+        // is downstream of that. Leaving the question in the transcript would
+        // show a turn that no reload can reproduce - the same reasoning the
+        // `error` frame above follows - so it goes back into the composer, where
+        // the user can edit it and ask again.
+        setMessages((prev) => prev.filter((m) => m.id !== pendingId));
+        setInput(question);
+        setNotice("답변 생성을 중지했습니다.");
       }
     } finally {
       setStatus(null);
@@ -170,27 +352,96 @@ export default function ChatWindow({
     }
   }
 
+  function fill(text: string) {
+    setInput(text);
+    textareaRef.current?.focus();
+  }
+
+  const hasFiles = (e: React.DragEvent) => e.dataTransfer.types.includes("Files");
+
   // h-full, not h-screen: this fills `main`, and the (app) layout's h-screen
   // wrapper is what bounds it. h-screen here would be 100vh whatever main
   // actually offers a child. Below md that is not the same number: main is a
   // flex item stretched to the wrapper's 100vh with pt-12 on it, so its content
   // box is 100vh - 3rem and a h-screen child overflows by exactly that padding.
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex-1 space-y-3 overflow-y-auto p-4">
-        {loaded && !error && messages.length === 0 && !sending && (
-          <p className="mt-16 text-center text-sm text-gray-400">
-            등록된 문서에 대해 무엇이든 물어보세요.
+    <div
+      className="relative flex h-full flex-col"
+      onDragEnter={(e) => {
+        if (!hasFiles(e)) return;
+        dragDepth.current += 1;
+        setDragging(true);
+      }}
+      onDragOver={(e) => {
+        // Without preventDefault on dragover the browser refuses the drop and
+        // navigates to the file instead, which loses the whole conversation.
+        if (hasFiles(e)) e.preventDefault();
+      }}
+      onDragLeave={() => {
+        dragDepth.current -= 1;
+        if (dragDepth.current <= 0) setDragging(false);
+      }}
+      onDrop={(e) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        dragDepth.current = 0;
+        setDragging(false);
+        addFiles(Array.from(e.dataTransfer.files));
+      }}
+    >
+      {dragging && (
+        // pointer-events-none is load-bearing: an overlay that takes the
+        // pointer fires dragleave on the container the instant it appears, so
+        // the drop state would flicker and the drop itself would land on the
+        // overlay instead of on the handler above.
+        <div className="pointer-events-none absolute inset-4 z-10 flex items-center justify-center rounded-lg bg-surface outline-dashed outline-2 outline-primary">
+          <p className="text-title text-primary">파일을 놓아 첨부하세요</p>
+        </div>
+      )}
+      {/* The scroll container is full-bleed; the 768px reading column (§6) is
+          the inner div. Putting max-width on the scroller instead would leave
+          the scrollbar floating in the middle of the page. */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-transcript space-y-8 px-4 py-8 sm:px-6">
+          {loaded && !error && messages.length === 0 && !sending && (
+            // §8 empty state: centred, `display` size, the greeting in the
+            // brand gradient, then 3-4 suggestion chips that fill the composer.
+            // break-keep (word-break: keep-all) because at 36px in a 343px
+            // column the browser's default breaks Korean between syllables -
+            // measured at 375px, "무엇이든" split across two lines as 무 / 엇이든.
+            // keep-all breaks at spaces instead, which is how the language
+            // reads. Only needed at display size; at 14-16px it is invisible.
+            <div className="mt-24">
+              <p className="break-keep text-center text-display">
+                <span className="text-gradient-brand">등록된 문서에 대해 무엇이든 물어보세요.</span>
+              </p>
+              <div className="mt-10 flex flex-wrap justify-center gap-2">
+                {SUGGESTIONS.map((text) => (
+                  <button
+                    key={text}
+                    type="button"
+                    onClick={() => fill(text)}
+                    className="break-keep rounded-full bg-surface-container px-4 py-2 text-label text-on-surface-variant transition-colors duration-150 hover:bg-surface-container-high"
+                  >
+                    {text}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {messages.map((m) => (
+            <MessageBubble key={m.id} message={m} onNotify={setNotice} />
+          ))}
+          {/* aria-live, because this line is the only feedback between pressing
+              전송 and the answer landing, and it is never focused. The sparkle
+              is the streaming indicator - the one looping animation in the app
+              (§7), and it exists only while `status` does. */}
+          <p aria-live="polite" className="flex items-center gap-4 text-body text-on-surface-variant">
+            {status && (
+              <span aria-hidden="true" className="sparkle sparkle-pulsing h-5 w-5 shrink-0" />
+            )}
+            {status}
           </p>
-        )}
-        {messages.map((m) => (
-          <MessageBubble key={m.id} message={m} />
-        ))}
-        {/* aria-live, because this line is the only feedback between pressing
-            전송 and the answer landing, and it is never focused. */}
-        <p aria-live="polite" className="text-sm text-gray-400">
-          {status}
-        </p>
         {/* The answer itself, off screen, because a screen reader was told
             문서 검색 중… and 답변 생성 중… and then nothing at all - the status
             line is emptied the moment the answer lands, so the one thing the
@@ -207,31 +458,33 @@ export default function ChatWindow({
             conversation is the exception - router.replace reloads the document
             ~76ms later (see below) and takes this region with it, the same
             reload the answer bubble itself survives only by being refetched. */}
-        <p aria-live="polite" className="sr-only">
-          {announcement}
-        </p>
-        <div ref={bottomRef} />
+          <p aria-live="polite" className="sr-only">
+            {announcement}
+          </p>
+          <p aria-live="polite" className="sr-only">
+            {notice}
+          </p>
+          <div ref={bottomRef} />
+        </div>
       </div>
-      <div className="border-t border-gray-200 p-3">
+      {/* No border-t. The composer is a tonal block sitting on the page, and
+          the transcript above it ends where the block begins. */}
+      <div className="mx-auto w-full max-w-transcript space-y-3 px-4 pb-6 sm:px-6">
         <ErrorBanner message={error} />
-        <form onSubmit={handleSend} className="mt-2 flex gap-2">
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="질문을 입력하세요"
-            // A placeholder is not an accessible name: it is dropped the moment
-            // the field has text, and some screen readers never announce it.
-            aria-label="질문"
-            className="flex-1 rounded border border-gray-300 px-3 py-2 text-sm"
-          />
-          <button
-            type="submit"
-            disabled={sending}
-            className="rounded bg-gray-900 px-4 py-2 text-sm text-white disabled:opacity-50"
-          >
-            전송
-          </button>
-        </form>
+        <Composer
+          value={input}
+          onChange={setInput}
+          onSubmit={() => void handleSend()}
+          onFiles={addFiles}
+          attachments={attachments}
+          onRemove={removeAttachment}
+          sending={sending}
+          onStop={() => {
+            stoppedRef.current = true;
+            abortRef.current?.abort();
+          }}
+          textareaRef={textareaRef}
+        />
       </div>
     </div>
   );

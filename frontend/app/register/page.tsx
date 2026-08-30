@@ -40,10 +40,10 @@ export default function RegisterPage() {
     <div className="flex min-h-screen items-center justify-center px-4">
       <form
         onSubmit={handleSubmit}
-        className="w-full max-w-sm space-y-4 rounded border border-gray-200 p-8"
+        className="w-full max-w-sm space-y-6 rounded-lg bg-surface-container-low p-8"
       >
-        <h1 className="text-xl font-semibold">회원가입</h1>
-        <p className="text-sm text-gray-500">첫 번째 계정은 관리자 권한을 갖습니다.</p>
+        <h1 className="text-headline font-medium">회원가입</h1>
+        <p className="text-body text-on-surface-variant">첫 번째 계정은 관리자 권한을 갖습니다.</p>
         <div>
           <label htmlFor="email" className="sr-only">
             이메일
@@ -56,7 +56,7 @@ export default function RegisterPage() {
             placeholder="이메일"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+            className="field w-full"
           />
         </div>
         <div>
@@ -76,19 +76,19 @@ export default function RegisterPage() {
             placeholder="비밀번호 (8자 이상)"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+            className="field w-full"
           />
         </div>
         <ErrorBanner message={error} />
         <button
           type="submit"
           disabled={loading}
-          className="w-full rounded bg-gray-900 px-3 py-2 text-sm text-white disabled:opacity-50"
+          className="btn-filled w-full"
         >
           {loading ? "가입 중..." : "가입하기"}
         </button>
-        <p className="text-center text-sm text-gray-500">
-          <Link href="/login" className="underline">
+        <p className="text-center text-body text-on-surface-variant">
+          <Link href="/login" className="text-primary underline">
             로그인으로 돌아가기
           </Link>
         </p>

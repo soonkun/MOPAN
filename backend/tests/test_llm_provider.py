@@ -249,6 +249,46 @@ async def test_chat_omits_the_tools_key_when_none_are_passed():
     assert kwargs["messages"] == [{"role": "user", "content": "hi"}]
 
 
+async def test_a_message_with_images_becomes_an_openai_content_array():
+    """Chat attachments of kind 'image'. The array form is the only way OpenAI
+    accepts an image, and the assertion in
+    test_chat_omits_the_tools_key_when_none_are_passed above is the other half of
+    this pair: a text-only message must stay a plain string, or every existing
+    call site changes shape for a feature it does not use."""
+    provider = _provider()
+    message = MagicMock(content="ok", tool_calls=None)
+    provider.client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(choices=[MagicMock(message=message)], usage=None, model="gpt-4o")
+    )
+
+    await provider.chat(
+        [
+            ChatMessage(role="system", content="rules"),
+            ChatMessage(role="user", content="what is this?", images=["data:image/png;base64,AAAA"]),
+        ]
+    )
+
+    sent = provider.client.chat.completions.create.await_args.kwargs["messages"]
+    assert sent[0] == {"role": "system", "content": "rules"}
+    assert sent[1] == {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "what is this?"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ],
+    }
+
+
+async def test_an_empty_image_list_leaves_the_content_a_plain_string():
+    """`images=[]` must not produce a one-element content array: an array with no
+    image is a shape change for nothing, and `[]` is what a turn with only document
+    attachments produces."""
+    assert ChatMessage(role="user", content="hi", images=[]).to_openai() == {
+        "role": "user",
+        "content": "hi",
+    }
+
+
 async def test_chat_surfaces_tool_calls_when_the_model_requests_one():
     """Unused in Slice 1; proves the Slice 2 seam actually works."""
     provider = _provider()

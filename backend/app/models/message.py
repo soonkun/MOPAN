@@ -3,8 +3,9 @@ from datetime import datetime
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.models.attachment import Attachment
 from app.models.base import Base
 
 MESSAGE_ROLES = ("user", "assistant")
@@ -25,6 +26,14 @@ class Message(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     citations: Mapped[list] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    # viewonly: the claim is a single conditional UPDATE (app/attachments/service.py)
+    # whose `message_id IS NULL` predicate is the double-claim guard, and a writable
+    # relationship would offer a second path that skips it. lazy="selectin" because
+    # MessageResponse serialises this and the session is async, where a lazy load
+    # at attribute access raises MissingGreenlet.
+    attachments: Mapped[list[Attachment]] = relationship(
+        lazy="selectin", order_by=Attachment.created_at, viewonly=True
     )
 
     # Observability seam (Slice 5 reads these; Slice 4 fills prompt_version).

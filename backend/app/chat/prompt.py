@@ -103,6 +103,7 @@ def build_prompt(
     prompt: PromptTemplate,
     nonce: str | None = None,
     token_budget: int,
+    images: list[str] | None = None,
 ) -> tuple[list[ChatMessage], list[Evidence]]:
     """Returns the messages AND the evidence that actually fit the budget, so
     citations can only reference evidence the model was shown."""
@@ -192,7 +193,18 @@ def build_prompt(
     if rendered:
         messages.append(ChatMessage(role="user", content=_fence(nonce, "\n\n".join(rendered))))
 
-    messages.append(ChatMessage(role="user", content=question))
+    # Images ride the question's own message. They are NOT charged against
+    # token_budget: an image's cost is the provider's own tile arithmetic on
+    # dimensions this layer never sees, and tiktoken cannot count it. What bounds
+    # them instead is MAX_ATTACHMENTS_PER_MESSAGE x MAX_ATTACHMENT_SIZE_MB.
+    #
+    # RESIDUAL RISK, stated because it has no defence here: text rendered INSIDE an
+    # image cannot be fenced, and ANSWER_SYSTEM_PROMPT deliberately says nothing
+    # about it - measured, the shortest usable warning is 12 tokens and the system
+    # prompt is already 190 of a 6000-token budget whose mandatory floor four
+    # calibrated tests sit just under. Extracted DOCUMENT text has no such gap: it
+    # arrives as Evidence and is fenced, stripped and budgeted like corpus text.
+    messages.append(ChatMessage(role="user", content=question, images=images or None))
     return messages, used
 
 
@@ -200,7 +212,10 @@ def _evidence_label(item: Evidence) -> str:
     filename = item.metadata.get("filename") or item.ref
     page = item.metadata.get("page")
     section = item.metadata.get("section")
-    parts = [str(filename)]
+    # The prefix is the model's only cue that this item came from the user's own
+    # file rather than the shared corpus - and it is inside the fence, so it is
+    # sanitized with the rest of the label.
+    parts = [f"user attachment: {filename}" if item.source_type == "attachment" else str(filename)]
     if page is not None:
         parts.append(f"p.{page}")
     if section:

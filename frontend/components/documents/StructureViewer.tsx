@@ -15,13 +15,13 @@ const BLOCK_LABEL: Record<Block["block_type"], string> = {
  *  quality can be judged against what the parser actually saw. */
 export default function StructureViewer({ blocks }: { blocks: Block[] }) {
   if (blocks.length === 0) {
-    return <p className="text-sm text-gray-400">원문 구조를 불러올 수 없습니다.</p>;
+    return <p className="text-body text-on-surface-variant">원문 구조를 불러올 수 없습니다.</p>;
   }
   return (
     <div className="space-y-2">
       {blocks.map((block, index) => (
-        <div key={index} className="text-sm">
-          <span className="mr-2 text-xs text-gray-400">
+        <div key={index} className="text-body">
+          <span className="mr-2 text-caption text-on-surface-variant">
             {/* The Record type makes a new block type a compile error, but the
                 wire type is `str` - a backend deployed ahead of the frontend
                 would otherwise render an empty label with no clue why. */}
@@ -29,7 +29,7 @@ export default function StructureViewer({ blocks }: { blocks: Block[] }) {
           </span>
           <span
             className={
-              block.block_type === "heading" ? "font-semibold text-gray-900" : "text-gray-700"
+              block.block_type === "heading" ? "font-semibold text-on-surface" : "text-on-surface"
             }
           >
             {block.text}

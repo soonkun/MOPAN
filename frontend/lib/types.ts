@@ -70,7 +70,10 @@ export interface Citation {
   // source_type and ref are the only two fields every citation carries - the
   // five below come from Evidence.metadata and a Slice 2/3 MCP citation has
   // none of them. See _citations_from in backend/app/chat/service.py.
-  source_type: "rag" | "mcp";
+  // "attachment" is a citation of a file the user attached to their own turn:
+  // `filename` is set and chunk_id/document_id/page/section are all null, so
+  // CitationBadge must not try to fetch a chunk for one.
+  source_type: "rag" | "mcp" | "attachment";
   ref: string;
   chunk_id: string | null;
   document_id: string | null;
@@ -79,6 +82,19 @@ export interface Citation {
   section: string | null;
   snippet: string;
   score: number | null;
+}
+
+/** POST /api/attachments, and the `attachments` array on a user MessageResponse.
+ * `has_text` is whether the parser got anything out of a document; the text
+ * itself is never sent to the browser. */
+export interface Attachment {
+  id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  kind: "image" | "document";
+  has_text: boolean;
+  created_at: string;
 }
 
 export interface Conversation {
@@ -93,6 +109,8 @@ export interface Message {
   role: "user" | "assistant";
   content: string;
   citations: Citation[];
+  // Populated on user turns only, and only for a turn that carried files.
+  attachments: Attachment[];
   created_at: string;
 }
 

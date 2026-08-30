@@ -91,9 +91,14 @@ export default function UploadDropzone({
           if (file) void uploadFile(file);
         }}
         onClick={() => inputRef.current?.click()}
-        className={`w-full rounded border-2 border-dashed p-8 text-center text-sm ${
-          dragging ? "border-gray-500 bg-gray-50" : "border-gray-300"
-        } ${busy ? "text-gray-400" : "cursor-pointer"}`}
+        // The dashed outline is the exception §1 allows: it is not decorating a
+        // box, it is drawing the drop target. Everything else here is tonal -
+        // the container steps up to `high` while a file is over it.
+        className={`w-full rounded-md border border-dashed p-8 text-center text-body transition-colors duration-150 ${
+          dragging
+            ? "border-primary bg-surface-container-high text-on-surface"
+            : "border-outline bg-surface-container-low text-on-surface-variant"
+        } ${busy ? "" : "cursor-pointer hover:bg-surface-container"}`}
       >
         {busy ? "업로드 중..." : `문서를 드래그하거나 클릭하여 업로드하세요 (${FORMATS})`}
       </button>

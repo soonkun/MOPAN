@@ -2,6 +2,20 @@ import filetype
 
 ALLOWED_EXTENSIONS = {"pdf", "docx", "txt", "md", "html"}
 
+# Chat attachments only. Kept OUT of ALLOWED_EXTENSIONS on purpose: that set gates
+# /api/documents, and app/rag/parsers has no parser for an image, so an image in
+# the corpus would be accepted at upload and then fail in the worker with no
+# route back. Callers opt in by passing `allowed=` below.
+IMAGE_MIME = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+    "gif": "image/gif",
+}
+IMAGE_EXTENSIONS = set(IMAGE_MIME)
+ATTACHMENT_EXTENSIONS = ALLOWED_EXTENSIONS | IMAGE_EXTENSIONS
+
 # Browsers are inconsistent about text/* types, so each extension carries a small
 # allowlist rather than a single expected value.
 ALLOWED_CONTENT_TYPES = {
@@ -13,6 +27,10 @@ ALLOWED_CONTENT_TYPES = {
     "txt": {"text/plain", "application/octet-stream"},
     "md": {"text/markdown", "text/plain", "text/x-markdown", "application/octet-stream"},
     "html": {"text/html", "application/xhtml+xml", "text/plain"},
+    # No application/octet-stream escape hatch for images, unlike the text formats
+    # above: every browser sets a real image/* type on a paste, a drop and a file
+    # picker alike, so allowing the generic type would only widen the hole.
+    **{extension: {mime} for extension, mime in IMAGE_MIME.items()},
 }
 
 # Expected sniffed mimes for binary formats. Text formats are checked by ruling
@@ -28,6 +46,9 @@ EXPECTED_MAGIC_MIME = {
         "application/zip",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     },
+    # filetype reports exactly these four for the image formats accepted here, so
+    # the sniffed mime and the canonical mime are the same value.
+    **{extension: {mime} for extension, mime in IMAGE_MIME.items()},
 }
 TEXT_EXTENSIONS = {"txt", "md", "html"}
 MAGIC_SNIFF_BYTES = 261  # what `filetype` needs to identify every supported format
@@ -45,9 +66,16 @@ def extension_of(filename: str) -> str:
     return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
 
-def validate_upload_metadata(filename: str, content_type: str, declared_size: int, max_size_mb: int) -> str:
+def validate_upload_metadata(
+    filename: str,
+    content_type: str,
+    declared_size: int,
+    max_size_mb: int,
+    *,
+    allowed: set[str] = ALLOWED_EXTENSIONS,
+) -> str:
     extension = extension_of(filename)
-    if extension not in ALLOWED_EXTENSIONS:
+    if extension not in allowed:
         raise UploadValidationError(f"지원하지 않는 파일 형식입니다: .{extension}")
 
     normalised = (content_type or "").split(";", 1)[0].strip().lower()

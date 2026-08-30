@@ -1,3 +1,4 @@
+from app.models.attachment import ATTACHMENT_KINDS, Attachment
 from app.models.base import Base
 from app.models.chunk import EMBEDDING_DIM, Chunk
 from app.models.collection import Collection
@@ -14,9 +15,11 @@ __all__ = [
     "Chunk",
     "Conversation",
     "Message",
+    "Attachment",
     "EMBEDDING_DIM",
     "DOCUMENT_STATUSES",
     "TERMINAL_STATUSES",
     "MESSAGE_ROLES",
     "USER_ROLES",
+    "ATTACHMENT_KINDS",
 ]
