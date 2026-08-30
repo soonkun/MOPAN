@@ -165,9 +165,19 @@ def test_answer_takes_no_session_and_no_retrieval_collaborator():
     parameter, that would become a rewrite instead of an addition."""
     params = list(inspect.signature(answer).parameters)
     # `images` is data, like `evidence`: chat attachments of kind 'image', already
-    # read off disk by the caller. It carries no session and no retrieval
-    # collaborator, which is the property this test is actually about.
-    assert params == ["llm_provider", "question", "history", "evidence", "settings", "images"]
+    # read off disk by the caller. `model` is the same shape - a string the caller
+    # has ALREADY validated against the allowlist, not a capability. Neither
+    # carries a session or a retrieval collaborator, which is the property this
+    # test is actually about.
+    assert params == [
+        "llm_provider",
+        "question",
+        "history",
+        "evidence",
+        "settings",
+        "images",
+        "model",
+    ]
 
 
 async def test_an_mcp_citation_is_identifiable_not_just_non_crashing(settings):

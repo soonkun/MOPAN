@@ -9,7 +9,7 @@ import Composer, {
   type PendingAttachment,
 } from "@/components/chat/Composer";
 import MessageBubble from "@/components/chat/MessageBubble";
-import type { Attachment, Message } from "@/lib/types";
+import type { AnswerModel, Attachment, Message } from "@/lib/types";
 
 const STATUS_LABEL: Record<string, string> = {
   searching: "문서 검색 중…",
@@ -22,6 +22,13 @@ const STATUS_LABEL: Record<string, string> = {
 // the server's own refusals so the two can never read as different rules.
 const MAX_ATTACHMENTS = 5;
 const MAX_ATTACHMENT_MB = 10;
+
+// The chosen answer model, remembered across messages and across reloads. A
+// per-viewer convenience with no server-side meaning - the server re-checks the
+// value against its allowlist on every request - so localStorage is the right
+// home for it, and a browser that refuses to store it just starts on the
+// default every time.
+const MODEL_STORAGE_KEY = "mopan.answer-model";
 
 // §8: 3-4 chips that fill the composer when clicked. Deliberately about
 // documents and not about the corpus that happens to be loaded - this is a
@@ -66,6 +73,11 @@ export default function ChatWindow({
   const [loaded, setLoaded] = useState(!initialConversationId);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [models, setModels] = useState<AnswerModel[]>([]);
+  // "" until GET /api/models has answered. A send in that window carries no
+  // `model` at all, which the server reads as its own default - so the picker
+  // failing to load costs the user the choice, never the answer.
+  const [model, setModel] = useState("");
   const [dragging, setDragging] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -111,6 +123,32 @@ export default function ChatWindow({
   useEffect(() => {
     const urls = previewUrlsRef.current;
     return () => urls.forEach((url) => URL.revokeObjectURL(url));
+  }, []);
+
+  // Once per mount, and deliberately not wired to `error`: the model list is a
+  // convenience, and a failure to fetch it must not put a red banner over a
+  // conversation that answers perfectly well on the server's default.
+  //
+  // localStorage is read HERE rather than in a useState initialiser: this
+  // component is server-rendered, where `window` does not exist, and reading it
+  // during render would also hydrate a different value than the server emitted.
+  useEffect(() => {
+    apiFetch<AnswerModel[]>("/api/models")
+      .then((list) => {
+        setModels(list);
+        let stored: string | null = null;
+        try {
+          stored = localStorage.getItem(MODEL_STORAGE_KEY);
+        } catch {
+          // Private mode, or site data blocked. Fall through to the default.
+        }
+        // Validated against the list, not trusted: an admin can remove a model
+        // from ANSWER_MODELS, and a stale id would then be refused on every
+        // send with a 400 the user cannot act on.
+        const fallback = list.find((m) => m.is_default)?.id ?? list[0]?.id ?? "";
+        setModel(list.some((m) => m.id === stored) ? stored! : fallback);
+      })
+      .catch(() => setModels([]));
   }, []);
 
   useEffect(() => {
@@ -249,6 +287,7 @@ export default function ChatWindow({
         content: question,
         citations: [],
         attachments: sent,
+        model: null,
         created_at: new Date().toISOString(),
       },
     ]);
@@ -264,6 +303,10 @@ export default function ChatWindow({
           conversation_id: conversationId,
           message: question,
           attachment_ids: sent.map((a) => a.id),
+          // Omitted, not sent empty, while the list is still loading: the
+          // backend reads an absent `model` as ANSWER_MODEL and an unknown one
+          // as a 400.
+          ...(model ? { model } : {}),
         },
         (event) => {
           if (event.type === "status") {
@@ -289,6 +332,10 @@ export default function ChatWindow({
                 content: event.content,
                 citations: event.citations,
                 attachments: [],
+                // From the frame, not from `model` state: the user may well
+                // switch the picker while this answer is still streaming, and
+                // the label has to name what actually answered.
+                model: event.model,
                 created_at: new Date().toISOString(),
               },
             ]);
@@ -349,6 +396,17 @@ export default function ChatWindow({
     } finally {
       setStatus(null);
       setSending(false);
+    }
+  }
+
+  function chooseModel(id: string) {
+    setModel(id);
+    setNotice(`답변 모델을 ${models.find((m) => m.id === id)?.label ?? id}(으)로 바꿨습니다.`);
+    try {
+      localStorage.setItem(MODEL_STORAGE_KEY, id);
+    } catch {
+      // The choice still applies to this session; it just will not survive a
+      // reload. Nothing to tell the user about.
     }
   }
 
@@ -487,6 +545,9 @@ export default function ChatWindow({
             abortRef.current?.abort();
           }}
           textareaRef={textareaRef}
+          models={models}
+          model={model}
+          onModelChange={chooseModel}
         />
       </div>
     </div>

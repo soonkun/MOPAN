@@ -122,6 +122,12 @@ async def app(test_engine, test_sessionmaker, fake_redis, tmp_path_factory):
             "upload_dir": tmp_path_factory.mktemp("uploads"),
             "allow_self_registration": True,
             "environment": "development",
+            # Pinned for the same reason allow_self_registration is: the model
+            # allowlist is a deployment decision, and an operator adding a model
+            # to .env must not be able to change what the suite asserts. A test
+            # that cares overrides it locally (tests/test_chat.py).
+            "answer_model": "gpt-4o",
+            "answer_models": [],
         }
     )
     application.state.settings = settings

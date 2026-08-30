@@ -3,6 +3,9 @@ import re
 import secrets
 from dataclasses import dataclass
 
+from sqlalchemy import text
+
+from app.core.db import current_sessionmaker
 from app.core.logging import log_event
 from app.core.tokens import count_tokens, decode_tokens, encode_tokens
 from app.llm.base import ChatMessage
@@ -42,19 +45,53 @@ class PromptTemplate:
     text: str
 
 
-# Slice 4 replaces this dict with a DB-backed lookup. Call sites already go
-# through get_prompt() and already persist prompt_name/prompt_version, so that
-# change is an implementation swap rather than an edit of every caller.
-_PROMPTS = {
+# The SEED and the FALLBACK, not the source of truth. Migration 0004 copies this
+# text into `prompts` as version 1; from then on the table is what answers, and
+# an admin edits it through /api/prompts without a redeploy. This dict is what
+# get_prompt returns when the table cannot answer - which is also what keeps the
+# hundreds of pure unit tests that call get_prompt() with no database working.
+_FALLBACK_PROMPTS = {
     "answer_agent": PromptTemplate(name="answer_agent", version="1", text=ANSWER_SYSTEM_PROMPT),
 }
 
+_ACTIVE_PROMPT_SQL = text("SELECT version, text FROM prompts WHERE name = :name AND is_active LIMIT 1")
+
 
 async def get_prompt(name: str) -> PromptTemplate:
-    try:
-        return _PROMPTS[name]
-    except KeyError as exc:
-        raise ValueError(f"unknown prompt: {name}") from exc
+    """Reads the ACTIVE row for `name`, and falls back to the module constant.
+
+    NO CACHE, deliberately. One indexed single-row SELECT sits in front of an
+    embedding round trip, a vector search and an LLM call that together take
+    seconds, so caching it buys nothing measurable - and it would cost the
+    feature its entire point: an edit has to reach the very next question, in
+    every uvicorn worker and in the arq worker, with no restart and no
+    invalidation message that can be lost.
+
+    Every failure path returns the constant rather than raising. An editing
+    screen must not be able to take answering down: a dropped connection, a
+    table 0004 has not reached yet, an empty table - all of them answer with the
+    text that shipped in the image.
+    """
+    fallback = _FALLBACK_PROMPTS.get(name)
+    sessionmaker = current_sessionmaker.get()
+    if sessionmaker is not None:
+        try:
+            # Its own short session, not the caller's: answer() is handed no db
+            # by design (the Slice 3 seam tests/test_chat_service.py asserts on),
+            # and reaching across that boundary is what the seam exists to
+            # prevent. See app/core/db.py:current_sessionmaker.
+            async with sessionmaker() as session:
+                row = (await session.execute(_ACTIVE_PROMPT_SQL, {"name": name})).first()
+            if row is not None:
+                return PromptTemplate(name=name, version=row.version, text=row.text)
+        except Exception:
+            # exception(), not a silent swallow: the answer is still produced,
+            # from the constant, so nothing on screen says this happened. This
+            # log line is the only trace that an admin's edit stopped applying.
+            logger.exception("prompt lookup failed; falling back to the built-in text")
+    if fallback is None:
+        raise ValueError(f"unknown prompt: {name}")
+    return fallback
 
 
 def new_nonce() -> str:

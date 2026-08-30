@@ -2,6 +2,7 @@ import logging
 import time
 import uuid
 
+from app.core.db import current_sessionmaker
 from app.core.logging import log_event, request_id_var
 
 logger = logging.getLogger("mopan.request")
@@ -20,6 +21,14 @@ class RequestContextMiddleware:
 
         request_id = str(uuid.uuid4())
         token = request_id_var.set(request_id)
+        # scope["app"] is set by Starlette.__call__ BEFORE the middleware stack
+        # runs, and the lifespan has filled state.sessionmaker by the time any
+        # http scope arrives - but getattr, not indexing: an app started without
+        # its lifespan (a bare ASGI mount, an early smoke test) must not 500 every
+        # request over a prompt lookup that has a fallback anyway.
+        sessionmaker_token = current_sessionmaker.set(
+            getattr(getattr(scope.get("app"), "state", None), "sessionmaker", None)
+        )
         started = time.perf_counter()
         state = {"status": 500}
 
@@ -43,3 +52,4 @@ class RequestContextMiddleware:
                 duration_ms=round((time.perf_counter() - started) * 1000, 2),
             )
             request_id_var.reset(token)
+            current_sessionmaker.reset(sessionmaker_token)

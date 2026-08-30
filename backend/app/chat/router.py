@@ -10,11 +10,17 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.attachments.service import attachment_root, load_claimable, to_evidence, to_image_urls
+from app.attachments.service import (
+    attachment_root,
+    load_claimable,
+    no_vision_message,
+    to_evidence,
+    to_image_urls,
+)
 from app.auth.authorization import get_owned_conversation
 from app.auth.dependencies import get_current_user
 from app.chat.service import answer, load_history, persist_turn, retrieve
-from app.core.config import Settings, get_app_settings
+from app.core.config import MODEL_LABELS, Settings, get_app_settings
 from app.core.db import get_db_session
 from app.documents.storage import delete_document_files
 from app.llm.base import LLMError, LLMProvider
@@ -24,7 +30,12 @@ from app.models.message import Message
 from app.models.user import User
 from app.retrieval.reranker import NoneReranker
 from app.retrieval.vector_store import PgVectorStore
-from app.schemas.chat import ChatRequest, ConversationResponse, MessageResponse
+from app.schemas.chat import (
+    AnswerModelResponse,
+    ChatRequest,
+    ConversationResponse,
+    MessageResponse,
+)
 from app.schemas.search import EvidenceResponse, SearchRequest, SearchResponse
 
 logger = logging.getLogger("mopan.chat")
@@ -82,9 +93,20 @@ async def chat(
     # one: an unowned conversation id would degrade from 404 to a 200 carrying an
     # error frame. The frontend's streamChat() reads response.ok first and expects
     # exactly this.
-    # Before the conversation is created, for the same reason the ownership check
-    # is: a bad attachment id must not leave a titled, empty conversation in the
+    # Both checks below run before the conversation is created, for the same
+    # reason the ownership check does: a bad attachment id - or a model that is
+    # not on the allowlist - must not leave a titled, empty conversation in the
     # sidebar that the user then has to delete by hand.
+    #
+    # The model FIRST, before the attachments are even loaded: an arbitrary model
+    # string from a client must never reach the provider, because the operator
+    # pays per call and this allowlist is the only thing standing between a forged
+    # body and gpt-4o pricing - or a model that does not exist, whose 400 would
+    # otherwise arrive as an error frame inside a 200 after the row was written.
+    model = payload.model or settings.answer_model
+    if model not in settings.selectable_models:
+        raise HTTPException(status_code=400, detail=f"사용할 수 없는 답변 모델입니다: {model}")
+
     attachment_ids = payload.attachment_ids or []
     if len(attachment_ids) > settings.max_attachments_per_message:
         raise HTTPException(
@@ -96,6 +118,12 @@ async def chat(
     # 404 with a Korean detail rather than an error frame inside a 200.
     images = await to_image_urls(attachments)
     attachment_evidence = to_evidence(attachments)
+    # The upload gate only proved SOME allowlisted model can see. This is the one
+    # that proves the model the user actually picked can - without it, choosing a
+    # text-only model for a question with a screenshot in it sends an image part
+    # to a blind model and gets an opaque provider 400 back inside a 200 stream.
+    if images and not settings.model_supports_vision(model):
+        raise HTTPException(status_code=400, detail=no_vision_message(model))
 
     if payload.conversation_id is None:
         conversation = Conversation(user_id=user.id, title=payload.message[:80])
@@ -149,6 +177,7 @@ async def chat(
                 attachment_evidence + evidence,
                 settings=settings,
                 images=images,
+                model=model,
             )
 
             # Phase 3: a fresh short session to persist the turn. `conversation` is
@@ -171,6 +200,10 @@ async def chat(
                     "conversation_id": str(conversation.id),
                     "content": chat_answer.content,
                     "citations": chat_answer.citations,
+                    # The provider's RESOLVED id ("gpt-4o-2024-08-06"), the same
+                    # string persisted to Message.model, so the answer on screen
+                    # and the answer after a reload are labelled identically.
+                    "model": chat_answer.model,
                 }
             )
         except LLMError:
@@ -266,6 +299,24 @@ async def search(
             for e in evidence
         ],
     )
+
+
+@router.get("/models", response_model=list[AnswerModelResponse])
+async def list_models(
+    user: User = Depends(get_current_user),
+    settings: Settings = Depends(get_app_settings),
+):
+    """What the composer's model picker lists. Any authenticated user may read it:
+    it is the same allowlist POST /api/chat enforces, so it discloses nothing a
+    user could not already learn by sending a model and being refused."""
+    return [
+        AnswerModelResponse(
+            id=model,
+            label=MODEL_LABELS.get(model, model),
+            is_default=model == settings.answer_model,
+        )
+        for model in settings.selectable_models
+    ]
 
 
 @router.get("/conversations", response_model=list[ConversationResponse])

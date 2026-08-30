@@ -26,6 +26,17 @@ EMBEDDING_MAX_BATCH_SIZE = 2048
 # text-only, so the whole family is left to the override.
 VISION_CAPABLE_MODEL_PREFIXES = ("gpt-4o", "gpt-4.1", "gpt-4-turbo", "gpt-4-vision", "gpt-5", "chatgpt-4o")
 
+# Display names for the ids an operator is likely to allow. Falling back to the
+# id is not a degraded case - a label is a nicety for the picker, never a gate,
+# so a model nobody thought to list here is still selectable under its own name.
+MODEL_LABELS = {
+    "gpt-4o": "GPT-4o",
+    "gpt-4o-mini": "GPT-4o mini",
+    "gpt-4.1": "GPT-4.1",
+    "gpt-4.1-mini": "GPT-4.1 mini",
+    "gpt-5": "GPT-5",
+}
+
 
 class Settings(BaseSettings):
     # env_file is anchored to the repo root. Resolving it against the process CWD
@@ -57,6 +68,14 @@ class Settings(BaseSettings):
 
     openai_api_key: str = ""
     answer_model: str = "gpt-4o"
+    # The admin-controlled allowlist a user picks an answer model from. It is a
+    # COST boundary as much as a correctness one - the operator pays per call and
+    # gpt-4o is many times the price of gpt-4o-mini - so an arbitrary model string
+    # from a client must never reach the provider. Read through
+    # `selectable_models`, which always includes ANSWER_MODEL; leave this empty
+    # and the picker offers exactly the default, which is the pre-existing
+    # behaviour.
+    answer_models: list[str] = []
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1536
     embedding_batch_size: int = 128
@@ -139,6 +158,41 @@ class Settings(BaseSettings):
     max_attachments_per_message: int = 5
     # None -> derived from ANSWER_MODEL via VISION_CAPABLE_MODEL_PREFIXES.
     answer_model_supports_vision: bool | None = None
+
+    @property
+    def selectable_models(self) -> list[str]:
+        """The allowlist as the app reads it. ANSWER_MODEL is always first and
+        always present: it is what a request that names no model gets, so an
+        allowlist that omitted it would refuse the default.
+
+        A property rather than a normalisation in `_finalise` because
+        `model_copy(update=...)` - which every test and `/api/search`'s top_n
+        override uses - does not re-run model validators, and a list frozen at
+        boot would then disagree with an overridden `answer_model`.
+        """
+        seen = dict.fromkeys([self.answer_model] + self.answer_models)
+        return [model for model in seen if model.strip()]
+
+    def model_supports_vision(self, model: str) -> bool:
+        """Per MODEL, because the answer model is now a per-request choice: the
+        old single-model derivation would send an image to whichever model the
+        operator happened to make the default and blind the rest.
+
+        ANSWER_MODEL_SUPPORTS_VISION stays an override for the DEFAULT model only
+        - that is the model it was written about, and it exists for a local VLM
+        whose name no prefix can recognise. Every other entry in the allowlist is
+        derived from VISION_CAPABLE_MODEL_PREFIXES.
+        """
+        if model == self.answer_model:
+            return bool(self.answer_model_supports_vision)
+        return model.lower().startswith(VISION_CAPABLE_MODEL_PREFIXES)
+
+    @property
+    def any_model_supports_vision(self) -> bool:
+        """What the UPLOAD gate asks. Storing an image is refused only when NO
+        allowlisted model could ever look at it; whether the model the user
+        actually picks can is settled at /api/chat, where the choice is known."""
+        return any(self.model_supports_vision(model) for model in self.selectable_models)
 
     @field_validator("upload_dir")
     @classmethod

@@ -5,6 +5,7 @@ from app.models.collection import Collection
 from app.models.conversation import Conversation
 from app.models.document import DOCUMENT_STATUSES, TERMINAL_STATUSES, Document
 from app.models.message import MESSAGE_ROLES, Message
+from app.models.prompt import Prompt
 from app.models.user import USER_ROLES, User
 
 __all__ = [
@@ -15,6 +16,7 @@ __all__ = [
     "Chunk",
     "Conversation",
     "Message",
+    "Prompt",
     "Attachment",
     "EMBEDDING_DIM",
     "DOCUMENT_STATUSES",

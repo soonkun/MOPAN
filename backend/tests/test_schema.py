@@ -76,7 +76,13 @@ async def test_retrieval_indexes_exist_with_expected_access_methods(test_engine)
 # predicate a cleanup job will use. Adding a row here should require the same
 # argument. NOT NULL is still enforced on the other half of the pair
 # (attachments.user_id), so an attachment always has an owner.
-NULLABLE_FK_EXCEPTIONS = {("attachments", "message_id")}
+# prompts.created_by is the second, and it carries the same kind of argument
+# rather than a weaker one: migration 0004 seeds version 1 of the answer prompt
+# INTO A DATABASE WITH NO USERS IN IT - the bootstrap admin registers afterwards -
+# so there is no id to attribute it to and NULL is the only truthful value. It
+# means "the deployment's own default", which the admin screen renders as 시스템.
+# Every version an admin writes carries their id; only the seed is NULL.
+NULLABLE_FK_EXCEPTIONS = {("attachments", "message_id"), ("prompts", "created_by")}
 
 
 async def test_every_foreign_key_is_indexed_and_not_null(test_engine):

@@ -610,3 +610,133 @@ async def test_deleting_a_conversation_takes_its_attachment_files_with_it(logged
     # The row cascades away with its message; without the explicit sweep the file
     # would stay on disk forever with nothing left pointing at it.
     assert not stored.exists()
+
+
+# --- Answer model selection --------------------------------------------------
+
+
+@pytest.fixture
+def two_models(app):
+    """An allowlist with a second, cheaper model on it. The suite's default is one
+    model - conftest pins ANSWER_MODELS empty, which is the behaviour that
+    predates the picker - and this is the deployment the picker exists for."""
+    app.state.settings = app.state.settings.model_copy(
+        update={"answer_model": "gpt-4o", "answer_models": ["gpt-4o-mini"]}
+    )
+    return app.state.settings
+
+
+def model_sent(fake_llm) -> str | None:
+    return fake_llm.chat.await_args.kwargs.get("model")
+
+
+async def test_a_model_outside_the_allowlist_is_refused_in_korean(logged_in, two_models):
+    """The allowlist is a cost boundary before it is anything else: the operator
+    pays per call, so a model string a browser invented must never reach the
+    provider."""
+    response = await logged_in.post("/api/chat", json={"message": "hi", "model": "gpt-4-turbo"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "사용할 수 없는 답변 모델입니다: gpt-4-turbo"
+
+
+async def test_an_unallowed_model_writes_nothing_and_never_calls_the_provider(logged_in, fake_llm, db):
+    """Refused BEFORE the conversation row, the same order attachment_ids follows:
+    a rejected model must not leave a titled, empty conversation in the sidebar
+    for the user to delete by hand - and must never be paid for."""
+    response = await logged_in.post("/api/chat", json={"message": "hi", "model": "claude-opus-4"})
+
+    assert response.status_code == 400
+    assert (await logged_in.get("/api/conversations")).json() == []
+    assert (await db.scalars(select(Message))).all() == []
+    fake_llm.chat.assert_not_awaited()
+
+
+async def test_no_model_in_the_body_means_the_default_model(logged_in, fake_llm, two_models):
+    """ANSWER_MODEL is what a body with no `model` gets - every client that
+    predates the picker, and the picker itself before its list has loaded."""
+    response = await logged_in.post("/api/chat", json={"message": "hi"})
+
+    assert response.status_code == 200
+    assert model_sent(fake_llm) == "gpt-4o"
+
+
+async def test_an_allowlisted_model_reaches_the_provider(logged_in, fake_llm, two_models):
+    response = await logged_in.post("/api/chat", json={"message": "hi", "model": "gpt-4o-mini"})
+
+    assert response.status_code == 200
+    assert model_sent(fake_llm) == "gpt-4o-mini"
+
+
+async def test_the_answer_model_survives_a_reload(logged_in, fake_llm, two_models):
+    """The provider's RESOLVED id, on the `done` frame and on the persisted row
+    alike, so an answer is labelled the same before and after a refresh. A user
+    comparing two answers has no other way to tell which model gave which."""
+    fake_llm.chat.return_value = ChatResult(content="answer", model="gpt-4o-mini-2024-07-18")
+
+    response = await logged_in.post("/api/chat", json={"message": "hi", "model": "gpt-4o-mini"})
+    done = parse_sse(response.text)[-1]
+    assert done["model"] == "gpt-4o-mini-2024-07-18"
+
+    messages = (await logged_in.get(f"/api/conversations/{done['conversation_id']}/messages")).json()
+    assert [m["model"] for m in messages] == [None, "gpt-4o-mini-2024-07-18"]
+
+
+async def test_an_image_with_a_text_only_model_is_refused_before_anything_is_written(
+    logged_in, fake_llm, app, db
+):
+    """The upload gate only proves SOME allowlisted model can see - and here one
+    can, so the PNG stores fine. This is the gate that proves the model the user
+    actually picked can, and without it an image part reaches a blind model and
+    comes back as an opaque provider error inside a 200."""
+    app.state.settings = app.state.settings.model_copy(
+        update={"answer_model": "gpt-4o", "answer_models": ["text-only-1"]}
+    )
+    attachment_id = await attach(logged_in, "shot.png", PNG_1X1, "image/png")
+
+    response = await logged_in.post(
+        "/api/chat",
+        json={"message": "what is this?", "model": "text-only-1", "attachment_ids": [attachment_id]},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "현재 답변 모델(text-only-1)은 이미지를 읽을 수 없습니다. "
+        "이미지 대신 문서 파일을 첨부하거나 관리자에게 문의해 주세요."
+    )
+    assert (await logged_in.get("/api/conversations")).json() == []
+    assert (await db.scalars(select(Message))).all() == []
+    fake_llm.chat.assert_not_awaited()
+    # The same image, the same allowlist, asked of the model that CAN see it.
+    sent = await logged_in.post(
+        "/api/chat",
+        json={"message": "what is this?", "model": "gpt-4o", "attachment_ids": [attachment_id]},
+    )
+    assert sent.status_code == 200
+
+
+async def test_the_model_list_is_readable_by_any_authenticated_user(logged_in, two_models):
+    """No admin gate: it is the same allowlist POST /api/chat enforces, so it
+    discloses nothing a user could not learn by sending a model and being
+    refused. The default is first, because it is what an unset picker sends."""
+    response = await logged_in.get("/api/models")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {"id": "gpt-4o", "label": "GPT-4o", "is_default": True},
+        {"id": "gpt-4o-mini", "label": "GPT-4o mini", "is_default": False},
+    ]
+
+
+async def test_the_model_list_needs_a_session(client):
+    assert (await client.get("/api/models")).status_code == 401
+
+
+async def test_a_model_with_no_label_is_still_offered_under_its_id(logged_in, app):
+    """MODEL_LABELS is a nicety for the picker, never a gate - an operator can
+    allowlist a local model nobody has written a label for."""
+    app.state.settings = app.state.settings.model_copy(update={"answer_models": ["my-local-vlm"]})
+
+    listed = (await logged_in.get("/api/models")).json()
+
+    assert {"id": "my-local-vlm", "label": "my-local-vlm", "is_default": False} in listed

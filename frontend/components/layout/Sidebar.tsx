@@ -191,12 +191,13 @@ export default function Sidebar() {
     { href: "/documents", label: "문서" },
   ];
 
-  // Rendered only for an admin. Both screens are admin-only on the server too -
+  // Rendered only for an admin. All three screens are admin-only on the server too -
   // every endpoint behind them answers 403 관리자 권한이 필요합니다. - so this is
   // about not offering a link that leads to a refusal, not about access.
   const adminLinks = [
     { href: "/collections", label: "분류 관리" },
     { href: "/users", label: "사용자 관리" },
+    { href: "/prompts", label: "프롬프트 관리" },
   ];
 
   // Same markup for both groups: the active styling and aria-current below are

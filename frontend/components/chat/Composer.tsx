@@ -2,7 +2,8 @@
 
 import { useEffect, useRef } from "react";
 import AttachmentChip from "@/components/chat/AttachmentChip";
-import type { Attachment } from "@/lib/types";
+import ModelPicker from "@/components/chat/ModelPicker";
+import type { AnswerModel, Attachment } from "@/lib/types";
 
 /** One file the user has chosen. It exists on screen from the moment it is
  * picked, before POST /api/attachments has answered, so that a refusal can be
@@ -52,6 +53,9 @@ export default function Composer({
   sending,
   onStop,
   textareaRef,
+  models,
+  model,
+  onModelChange,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -62,6 +66,9 @@ export default function Composer({
   sending: boolean;
   onStop: () => void;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  models: AnswerModel[];
+  model: string;
+  onModelChange: (id: string) => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   // Chrome fires keydown(Enter) with isComposing=true while a Hangul syllable
@@ -222,6 +229,12 @@ export default function Composer({
           style={{ maxHeight: MAX_HEIGHT }}
           className="min-w-0 flex-1 resize-none bg-transparent px-2 py-2 text-body-lg text-on-surface placeholder:text-on-surface-variant focus:outline-none"
         />
+
+        {/* To the RIGHT of the input, where Gemini and ChatGPT put it, and
+            before the send button so that Tab order runs input -> model ->
+            전송: the model is a property of the message being sent, so it
+            belongs on the way to sending it rather than after. */}
+        <ModelPicker models={models} value={model} onChange={onModelChange} />
 
         {/* The two `key`s are load-bearing, and this was measured. Without them
             React reuses ONE <button> DOM node across the branch and only

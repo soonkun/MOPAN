@@ -19,6 +19,16 @@ NOT_FOUND_MESSAGE = "첨부파일을 찾을 수 없습니다."
 FILE_GONE_MESSAGE = "첨부파일의 원본을 더 이상 찾을 수 없습니다."
 
 
+def no_vision_message(model: str) -> str:
+    """Shared by both gates: POST /api/attachments refuses an image no allowlisted
+    model could ever read, and POST /api/chat refuses one sent WITH a model that
+    cannot read it. Same sentence, because to the user it is the same refusal."""
+    return (
+        f"현재 답변 모델({model})은 이미지를 읽을 수 없습니다. "
+        "이미지 대신 문서 파일을 첨부하거나 관리자에게 문의해 주세요."
+    )
+
+
 def attachment_root(upload_dir: Path) -> Path:
     """A subdirectory of UPLOAD_DIR, reusing the documents per-id layout wholesale
     (app/documents/storage.py). "attachments" can never collide with a document's

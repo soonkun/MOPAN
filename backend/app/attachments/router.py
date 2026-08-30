@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.attachments.service import attachment_root, get_owned_attachment
+from app.attachments.service import attachment_root, get_owned_attachment, no_vision_message
 from app.auth.dependencies import get_current_user
 from app.core.config import Settings, get_app_settings
 from app.core.db import get_db_session
@@ -33,13 +33,6 @@ router = APIRouter(prefix="/api", tags=["attachments"])
 UNREADABLE_MESSAGE = "첨부파일을 읽지 못했습니다. 파일이 손상되었는지 확인해 주세요."
 NO_TEXT_MESSAGE = "첨부한 문서에서 읽을 수 있는 텍스트를 찾지 못했습니다. 다른 파일을 첨부해 주세요."
 ALREADY_SENT_MESSAGE = "이미 전송된 첨부파일은 삭제할 수 없습니다."
-
-
-def _no_vision_message(model: str) -> str:
-    return (
-        f"현재 답변 모델({model})은 이미지를 읽을 수 없습니다. "
-        "이미지 대신 문서 파일을 첨부하거나 관리자에게 문의해 주세요."
-    )
 
 
 @router.post("/attachments", response_model=AttachmentResponse, status_code=201)
@@ -68,12 +61,17 @@ async def upload_attachment(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     kind = "image" if extension in IMAGE_EXTENSIONS else "document"
-    # Refused here rather than at answer time. Storing an image the model can
-    # never look at would let the user compose a whole message around a thumbnail
-    # and only then be told it was ignored - and it is the one check that makes it
-    # impossible for an image part to reach a text-only model at all.
-    if kind == "image" and not settings.answer_model_supports_vision:
-        raise HTTPException(status_code=400, detail=_no_vision_message(settings.answer_model))
+    # Refused here rather than at answer time, so the user is told while attaching
+    # rather than after composing a whole message around a thumbnail.
+    #
+    # Against the WHOLE allowlist, not the default model: with a per-request model
+    # the user may well pick a vision model for this very question, and gating on
+    # ANSWER_MODEL alone would refuse the upload for a model they never chose. It
+    # is no longer the check that makes an image part unable to reach a blind
+    # model - POST /api/chat owns that, where the choice is actually known - it is
+    # the early "no model here can see at all" one.
+    if kind == "image" and not settings.any_model_supports_vision:
+        raise HTTPException(status_code=400, detail=no_vision_message(settings.answer_model))
 
     head = await file.read(MAGIC_SNIFF_BYTES)
     try:

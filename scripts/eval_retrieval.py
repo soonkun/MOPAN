@@ -274,6 +274,19 @@ def score(returned_pages: list[int | None], gold: set[int]) -> tuple[int, int]:
     return (1 if hits else 0), hits
 
 
+def anchor_hit(returned_contents: list[str], anchor: str) -> int:
+    """Did a chunk carrying the answer-bearing sentence actually reach the model?
+
+    This exists because recall@N did not catch a real failure. It counts a hit
+    on any chunk from a gold PAGE, and a page here holds several chunks: on the
+    owner's 공지예외/국내우선권 question it scored a hit for a page-594 chunk that
+    restates the rule as a double negative, while the chunk on 593 that states
+    it plainly - "...그 공지예외주장을 인정하도록 한다" - sat at fused rank 8 and
+    never arrived. The metric reported success and the answer was inverted.
+    """
+    return 1 if any(anchor in content for content in returned_contents) else 0
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--variants", default="")
@@ -386,10 +399,14 @@ async def main() -> int:
                 f"top_n={top_n}  candidate_limit={cfg_limit}  rrf_k={cfg_k}  sparse_weight={cfg_w}"
             )
             print(f"\n{header}\n{'-' * len(header)}")
-            print(f"{'variant':<14} {'recall@' + str(top_n):>9} {'prec@' + str(top_n):>9} {'overlap':>8} {'sparse-noise':>13}")
+            print(
+                f"{'variant':<14} {'recall@' + str(top_n):>9} {'anchor@' + str(top_n):>9} "
+                f"{'prec@' + str(top_n):>9} {'overlap':>8} {'sparse-noise':>13}"
+            )
             for name in wanted:
                 fn = variants[name]
                 recalls, precisions, overlaps, noise = [], [], [], []
+                anchors = []
                 for entry in questions:
                     gold = set(entry["gold_pages"])
                     dense_ids = dense[entry["id"]][:cfg_limit]
@@ -407,6 +424,9 @@ async def main() -> int:
                         fused = sorted(acc.items(), key=lambda p: -p[1])
                     selected = [chunk_id for chunk_id, _ in fused[:top_n]]
                     hit, hits = score([pages.get(cid) for cid in selected], gold)
+                    anchors.append(
+                        anchor_hit([docs[cid] for cid in selected if cid in docs], entry["anchor"])
+                    )
                     recalls.append(hit)
                     precisions.append(hits / top_n)
                     overlaps.append(len(set(dense_ids) & set(sparse_ids)))
@@ -432,7 +452,8 @@ async def main() -> int:
                     for entry, hits in zip(questions, precisions, strict=True):
                         print(f"    {entry['id']:<28} {round(hits * top_n)}/{top_n}")
                 print(
-                    f"{name:<14} {sum(recalls) / n:>9.3f} {sum(precisions) / n:>9.3f} "
+                    f"{name:<14} {sum(recalls) / n:>9.3f} {sum(anchors) / n:>9.3f} "
+                    f"{sum(precisions) / n:>9.3f} "
                     f"{sum(overlaps) / n:>8.2f} {sum(noise) / n:>13.2f}"
                 )
 

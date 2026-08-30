@@ -21,6 +21,28 @@ export interface Collection {
   created_at: string;
 }
 
+/** GET /api/prompts. One entry per prompt NAME, carrying the text that is live
+ * right now - the exact string the model receives as its system message on the
+ * next question. Admin only. */
+export interface PromptSummary {
+  name: string;
+  version: string;
+  text: string;
+  version_count: number;
+  updated_at: string;
+}
+
+/** GET /api/prompts/{name}/versions, newest first. `created_by_email` is null
+ * for the version the migration seeded, which predates every account. */
+export interface PromptVersion {
+  id: string;
+  version: string;
+  text: string;
+  is_active: boolean;
+  created_by_email: string | null;
+  created_at: string;
+}
+
 export type DocumentStatus =
   | "uploaded"
   | "parsing"
@@ -90,6 +112,14 @@ export interface Attachment {
   created_at: string;
 }
 
+/** GET /api/models - the admin's ANSWER_MODELS allowlist, which POST /api/chat
+ * enforces. `label` falls back to the id server-side, so it is never empty. */
+export interface AnswerModel {
+  id: string;
+  label: string;
+  is_default: boolean;
+}
+
 export interface Conversation {
   id: string;
   title: string;
@@ -104,6 +134,10 @@ export interface Message {
   citations: Citation[];
   // Populated on user turns only, and only for a turn that carried files.
   attachments: Attachment[];
+  // The model that produced this answer, as the provider resolved it
+  // ("gpt-4o-2024-08-06"). Null on every user turn, and on assistant turns
+  // written before the model became a per-question choice.
+  model: string | null;
   created_at: string;
 }
 
@@ -112,5 +146,11 @@ export type ChatEvent =
   | { type: "status"; status: "searching" | "answering" }
   | { type: "token"; text: string }
   | { type: "citations"; citations: Citation[] }
-  | { type: "done"; conversation_id: string; content: string; citations: Citation[] }
+  | {
+      type: "done";
+      conversation_id: string;
+      content: string;
+      citations: Citation[];
+      model: string | null;
+    }
   | { type: "error"; detail: string };

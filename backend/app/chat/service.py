@@ -125,6 +125,7 @@ async def answer(
     *,
     settings: Settings,
     images: list[str] | None = None,
+    model: str | None = None,
 ) -> ChatAnswer:
     """Deliberately knows nothing about where `evidence` came from: no session, no
     vector store, no reranker. That is the whole point of the split - Slice 3 runs
@@ -144,7 +145,15 @@ async def answer(
     started = time.perf_counter()
     # tools=None in Slice 1; the parameter exists so Slice 2's MCP work does not
     # break the LLMProvider ABC.
-    result = await llm_provider.chat(messages, tools=None)
+    #
+    # `model` rides **kwargs rather than joining the ABC signature:
+    # OpenAIProvider.chat builds its request as {"model": self.answer_model, ...,
+    # **kwargs}, so naming it here overrides the provider's construction-time
+    # default and no other implementation has to change. Omitted entirely when
+    # None - the caller wants the provider's own default, and model=None would
+    # put a null on the wire. The router resolves it against the allowlist before
+    # calling; this function is not the trust boundary and must not be used as one.
+    result = await llm_provider.chat(messages, tools=None, **({"model": model} if model else {}))
     latency_ms = int((time.perf_counter() - started) * 1000)
 
     citations = _citations_from(result.content, used_evidence)

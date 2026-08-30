@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from contextvars import ContextVar
 
 from fastapi import Request
 from sqlalchemy.ext.asyncio import (
@@ -9,6 +10,19 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.config import Settings
+
+# The request's sessionmaker, for code that is deliberately NOT handed a
+# session. app/chat/prompt.py:get_prompt is the only reader: it is called from
+# chat.service.answer(), whose signature is a guarded Slice 3 seam - it takes no
+# db, no vector store and no reranker, and tests/test_chat_service.py asserts
+# that - yet the prompt it loads now lives in a table. Set per request by
+# RequestContextMiddleware from app.state, so it is the SAME sessionmaker the
+# endpoint's own dependency uses, in tests as well as in production. Anything
+# holding a session already should keep using it; this is the seam, not a
+# shortcut around dependency injection.
+current_sessionmaker: ContextVar[async_sessionmaker[AsyncSession] | None] = ContextVar(
+    "current_sessionmaker", default=None
+)
 
 
 def make_engine(settings: Settings) -> AsyncEngine:

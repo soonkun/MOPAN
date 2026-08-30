@@ -211,6 +211,50 @@ def test_an_explicit_vision_setting_overrides_the_derivation():
     )
 
 
+def test_the_default_model_is_always_selectable_and_always_first():
+    """A body with no `model` gets ANSWER_MODEL, so an allowlist that omitted it
+    would refuse the default. A duplicate entry must not offer it twice either -
+    the picker would render two identical rows."""
+    assert Settings(answer_model="gpt-4o", answer_models=[]).selectable_models == ["gpt-4o"]
+    assert Settings(answer_model="gpt-4o", answer_models=["gpt-4o-mini"]).selectable_models == [
+        "gpt-4o",
+        "gpt-4o-mini",
+    ]
+    assert Settings(answer_model="gpt-4o", answer_models=["gpt-4o-mini", "gpt-4o"]).selectable_models == [
+        "gpt-4o",
+        "gpt-4o-mini",
+    ]
+    # A stray empty entry - ANSWER_MODELS=["gpt-4o",""] - would otherwise be an
+    # unselectable blank row that POST /api/chat still accepts.
+    assert Settings(answer_model="gpt-4o", answer_models=["", "  "]).selectable_models == ["gpt-4o"]
+
+
+def test_selectable_models_follows_an_overridden_answer_model():
+    """model_copy(update=...) does not re-run model validators, which is why the
+    allowlist is a property and not a value normalised at boot: a list frozen
+    there would keep offering the model the copy replaced."""
+    settings = Settings(answer_model="gpt-4o", answer_models=[])
+    assert settings.model_copy(update={"answer_model": "text-only-1"}).selectable_models == ["text-only-1"]
+
+
+def test_vision_is_asked_per_model_not_of_the_default_alone():
+    """With a per-request model the old single-model derivation would blind every
+    model but the default. The explicit override still applies to ANSWER_MODEL
+    only - that is the model it was written about."""
+    settings = Settings(
+        answer_model="my-local-vlm",
+        answer_model_supports_vision=True,
+        answer_models=["gpt-4o", "o1-mini"],
+    )
+    assert settings.model_supports_vision("my-local-vlm") is True
+    assert settings.model_supports_vision("gpt-4o") is True
+    assert settings.model_supports_vision("o1-mini") is False
+    assert settings.any_model_supports_vision is True
+    # The upload gate: nothing on this allowlist could ever read an image.
+    blind = Settings(answer_model="o1-mini", answer_models=["llama-3-8b-instruct"])
+    assert blind.any_model_supports_vision is False
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [("max_attachment_size_mb", 0), ("max_attachments_per_message", 0)],

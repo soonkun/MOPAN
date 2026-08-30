@@ -115,7 +115,7 @@ export default function MessageBubble({
         {/* Always in the DOM, never revealed by hover alone: a control that
             appears only on :hover is unreachable by keyboard and invisible on
             touch. It is quiet at rest and darkens on hover instead. */}
-        <div className="mt-2">
+        <div className="mt-2 flex items-center gap-2">
           <button
             type="button"
             onClick={() => void copy()}
@@ -128,6 +128,19 @@ export default function MessageBubble({
             </svg>
             {copied ? "복사됨" : "복사"}
           </button>
+          {/* Quiet, and directly under the citations, because it answers the
+              same question they do: where did this come from. A user comparing
+              two answers to the same question has no other way to tell which
+              model gave which - and this is the resolved provider id, so it
+              names the exact snapshot, not just the family.
+              Null on a user turn and on any answer written before the model
+              became a per-question choice. */}
+          {message.model && (
+            <span className="min-w-0 truncate text-caption text-on-surface-variant">
+              <span className="sr-only">답변 모델 </span>
+              {message.model}
+            </span>
+          )}
         </div>
       </div>
     </div>

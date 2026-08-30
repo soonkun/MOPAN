@@ -183,6 +183,10 @@ export async function streamChat(
     message: string;
     collection_ids?: string[];
     attachment_ids?: string[];
+    /** One of GET /api/models. Omitted means the server's ANSWER_MODEL default,
+     * which is what the composer sends before its list has loaded. Anything not
+     * on the allowlist comes back as a Korean 400 before a row is written. */
+    model?: string;
   },
   onEvent: (event: ChatEvent) => void,
   signal?: AbortSignal,
