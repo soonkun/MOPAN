@@ -535,9 +535,18 @@ async def expand_selection(session, selected, meta, *, mode, settings, query):
     Calls the SHIPPED `app.retrieval.neighbors.expand` - the same function
     hybrid_search calls, with the same CHUNK_OVERLAP and the same token budget -
     so what this measures is the product and not a second implementation of it.
+
+    And, in the same order hybrid_search runs them, the shipped
+    `app.retrieval.references.attach`. A harness that skipped it would measure a
+    pipeline nobody runs, which is the one thing this file is not allowed to do.
+    A citation lands in `anchor@N` and NOT in `recall@N`, and that is correct
+    rather than a gap: anchor asks whether the answer-bearing sentence reached the
+    model, which it did, while recall asks which chunks won a SLOT, and a
+    reference does not win one - it is text added to a slot already won.
     """
     from app.retrieval.evidence import RetrievedChunk
     from app.retrieval.neighbors import expand
+    from app.retrieval.references import attach as attach_references
 
     chunks = [
         RetrievedChunk(
@@ -552,6 +561,12 @@ async def expand_selection(session, selected, meta, *, mode, settings, query):
         for cid in selected
         if cid in meta
     ]
+    await attach_references(
+        session,
+        chunks,
+        token_budget=settings.answer_context_token_budget,
+        query=query,
+    )
     await expand(
         session,
         chunks,

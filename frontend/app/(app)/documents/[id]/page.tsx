@@ -1,11 +1,13 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, downloadDocument, errorMessage } from "@/lib/api";
 import ChunkViewer from "@/components/documents/ChunkViewer";
+import { TERMINAL } from "@/components/documents/DocumentTable";
+import StructurePanel from "@/components/documents/StructurePanel";
 import PageShell from "@/components/layout/PageShell";
 import ErrorBanner from "@/components/ui/ErrorBanner";
-import type { Chunk, DocumentItem } from "@/lib/types";
+import type { Chunk, DocumentItem, User } from "@/lib/types";
 
 // Next 15 made `params` a Promise. A client component cannot await, so it
 // unwraps with React 19's `use()`. A synchronous signature is a build error.
@@ -23,24 +25,55 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
+  // Only to decide whether the 구조 인식 controls are on screen at all. null is
+  // "not loaded yet", not "not an admin" - the same distinction the list page
+  // and the 분류 screen draw. The endpoint answers a non-admin with 403
+  // regardless.
+  const [user, setUser] = useState<User | null>(null);
+  // Read by the poll below without making the interval depend on `doc`, which
+  // would tear down and rebuild it on every refetch.
+  const docRef = useRef<DocumentItem | null>(null);
 
-  useEffect(() => {
+  const load = useCallback(async () => {
     // The 원문 구조 pane and its GET /api/documents/{id}/structure are gone. It
     // re-parsed the whole file on every request - about 35 seconds of pdfplumber
     // on the 854-page document in this corpus - to fill a pane nobody read.
-    Promise.all([
-      apiFetch<DocumentItem>(`/api/documents/${id}`),
-      apiFetch<Chunk[]>(`/api/documents/${id}/chunks`),
-    ])
-      .then(([item, chunkList]) => {
-        setDoc(item);
-        setChunks(chunkList);
-      })
-      .catch((err) => setError(errorMessage(err)))
-      // finally, not a tail of .then: a 404 on the document otherwise leaves the
-      // list saying 불러오는 중... forever, under a banner explaining why.
-      .finally(() => setLoading(false));
+    try {
+      const [item, chunkList] = await Promise.all([
+        apiFetch<DocumentItem>(`/api/documents/${id}`),
+        apiFetch<Chunk[]>(`/api/documents/${id}/chunks`),
+      ]);
+      docRef.current = item;
+      setDoc(item);
+      setChunks(chunkList);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      // finally, not a tail of the try: a 404 on the document otherwise leaves
+      // the list saying 불러오는 중... forever, under a banner explaining why.
+      setLoading(false);
+    }
   }, [id]);
+
+  useEffect(() => {
+    void load();
+    apiFetch<User>("/api/auth/me")
+      .then(setUser)
+      .catch(() => undefined);
+  }, [load]);
+
+  // 다시 처리 puts the document back to 대기 중, so without this the panel would
+  // sit on a disabled button and a stale verdict until somebody reloaded the
+  // page by hand. Same gate as the list page's poll - only while something is
+  // actually processing, and never while the tab is hidden.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (document.hidden) return;
+      if (docRef.current === null || TERMINAL.has(docRef.current.status)) return;
+      void load();
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [load]);
 
   async function download() {
     if (doc === null) return;
@@ -77,6 +110,13 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
       </div>
       {doc?.error_message && <ErrorBanner message={doc.error_message} />}
       <ErrorBanner message={error} />
+
+      {/* Above the chunk list, because it is what explains the chunk list: a
+          document judged 참조형 was cut on its own numbering and every chunk
+          below carries its governing clause. */}
+      {doc !== null && (
+        <StructurePanel doc={doc} isAdmin={user?.role === "admin"} onReprocessed={load} />
+      )}
 
       {/* One pane, and one line per row. This screen answers "did the chunking
           come out sensibly", which is a question about boundaries, not about

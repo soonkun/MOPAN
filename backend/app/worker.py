@@ -12,7 +12,7 @@ from app.core.settings_store import effective_settings
 from app.llm.openai_provider import OpenAIProvider
 from app.models.collection import Collection
 from app.models.document import TERMINAL_STATUSES, Document
-from app.rag.chunking import get_chunking_strategy, resolve
+from app.rag.chunking import get_chunking_strategy, resolve, resolve_scheme
 from app.rag.pipeline import USER_FACING_FAILURE
 from app.rag.pipeline import process_document as run_pipeline
 from app.retrieval.vector_store import PgVectorStore
@@ -103,6 +103,14 @@ async def process_document(ctx: dict, document_id: str) -> None:
                     .where(Document.id == uuid.UUID(document_id))
                 )
                 markers = resolve(chunking)
+                # THE COLLECTION SUPPLIES THE VOCABULARY; THE DOCUMENT DECIDES.
+                # A scheme here means "documents in this collection are numbered
+                # 편/장/조/항" - not "this document is". `fallback` is what the
+                # pipeline uses when detection says otherwise, and it is exactly
+                # the prose strategy the deployment is configured with, so a
+                # self-contained document in a hierarchical collection is cut the
+                # way it is today.
+                scheme = resolve_scheme(chunking)
                 await run_pipeline(
                     db,
                     PgVectorStore(db),
@@ -110,6 +118,8 @@ async def process_document(ctx: dict, document_id: str) -> None:
                     get_chunking_strategy(settings, chunking),
                     document_id,
                     section_marker=markers.marker if markers else None,
+                    scheme=scheme,
+                    fallback=get_chunking_strategy(settings) if scheme else None,
                 )
     except BaseException as exc:
         # BaseException, and here rather than in a WorkerSettings hook: arq 0.26

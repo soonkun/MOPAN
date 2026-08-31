@@ -30,7 +30,7 @@ from app.models.collection import Collection
 from app.models.document import Document
 from app.models.user import User
 from app.schemas.collection import CollectionCreate, CollectionResponse, CollectionUpdate
-from app.schemas.document import ChunkResponse, DocumentResponse
+from app.schemas.document import ChunkResponse, DocumentReprocess, DocumentResponse
 
 logger = logging.getLogger("mopan.documents")
 router = APIRouter(prefix="/api", tags=["documents"])
@@ -70,6 +70,7 @@ def _to_response(document, collection_name, uploader_email, chunk_count) -> Docu
         error_message=document.error_message,
         uploader_email=uploader_email,
         chunk_count=chunk_count or 0,
+        structure=document.structure or {},
         created_at=document.created_at,
         updated_at=document.updated_at,
     )
@@ -288,6 +289,63 @@ async def get_document(
     if row is None:
         raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
     return _to_response(*row)
+
+
+@router.post("/documents/{document_id}/reprocess", response_model=DocumentResponse, status_code=202)
+async def reprocess_document(
+    document_id: uuid.UUID,
+    payload: DocumentReprocess | None = None,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db_session),
+    arq_pool: ArqRedis = Depends(get_arq_pool),
+):
+    """Run the pipeline over the stored file again, optionally recording first
+    what a person says this document's character is.
+
+    THE FILE IS NOT TOUCHED - this is the button behind 성격 바꾸기, and re-cutting
+    a document that is already here is the whole point. It is also why `structure`
+    is MERGED rather than replaced: `detected`, the level counts and the citation
+    numbers are what the screen shows beside the person's choice, and the pipeline
+    reads `override` back off this same dict on the next run and keeps it.
+    """
+    row = (await db.execute(_document_list_query().where(Document.id == document_id))).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
+    document, collection_name, uploader_email, chunk_count = row
+
+    if payload is not None:
+        # A new dict, not a key assignment: `structure` is a plain JSONB column
+        # with no MutableDict on it, so an in-place mutation is a change
+        # SQLAlchemy never flushes.
+        document.structure = {**(document.structure or {}), "override": payload.character}
+    document.status = "uploaded"
+    document.error_message = None
+    await db.commit()
+
+    try:
+        await enqueue_document_processing(arq_pool, str(document.id))
+    except Exception:
+        # Same contract as the upload endpoint: a silently dropped job leaves the
+        # row at "uploaded" forever with nothing on screen to explain it. The
+        # stored file STAYS, unlike upload's - the document and its chunks are
+        # still here and still fine, so deleting the original would turn a queue
+        # hiccup into an unrecoverable one.
+        logger.exception("failed to enqueue document reprocessing")
+        document.status = "failed"
+        document.error_message = ENQUEUE_FAILED_MESSAGE
+        await db.commit()
+        await db.refresh(document)
+        return JSONResponse(
+            status_code=503,
+            content={
+                **jsonable_encoder(_to_response(document, collection_name, uploader_email, chunk_count)),
+                "detail": ENQUEUE_FAILED_MESSAGE,
+            },
+        )
+
+    await db.refresh(document)
+    log_event(logger, "document_reprocess_enqueued", document_id=str(document.id))
+    return _to_response(document, collection_name, uploader_email, chunk_count)
 
 
 @router.get("/documents/{document_id}/chunks", response_model=list[ChunkResponse])

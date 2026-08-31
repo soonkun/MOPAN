@@ -8,6 +8,39 @@ import DataTable from "@/components/ui/DataTable";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { Collection, DocumentItem, User } from "@/lib/types";
 
+/** The three shapes `collections.chunking` is allowed to hold from this screen,
+ * keyed by their `strategy`. The bodies are what
+ * `backend/app/rag/chunking/__init__.py:resolve` reads, and it answers 422 on
+ * anything it does not know - so these three strings are the contract, not a
+ * label table.
+ *
+ * A preset per strategy and nothing else: the presets are the cultural knowledge
+ * ("조/항/호가 어떻게 생겼는가") and there is deliberately no free-text pattern
+ * editor here, because a bad regex would run against every line of a
+ * thousand-page document. */
+const CHUNKING_OPTIONS: { value: string; label: string; chunking: Record<string, unknown> }[] = [
+  { value: "", label: "일반 문서(기본)", chunking: {} },
+  {
+    value: "hierarchical",
+    label: "법령·규정 (조·항·호 번호체계)",
+    chunking: { strategy: "hierarchical", preset: "korean_legal" },
+  },
+  {
+    value: "classification_table",
+    label: "분류표",
+    chunking: { strategy: "classification_table", preset: "korean_ip_classification" },
+  },
+];
+
+function strategyOf(chunking: Record<string, unknown> | undefined): string {
+  const strategy = typeof chunking?.strategy === "string" ? chunking.strategy : "";
+  return CHUNKING_OPTIONS.some((option) => option.value === strategy) ? strategy : "";
+}
+
+function labelOf(chunking: Record<string, unknown> | undefined): string {
+  return CHUNKING_OPTIONS.find((option) => option.value === strategyOf(chunking))?.label ?? "-";
+}
+
 export default function CollectionsPage() {
   const [user, setUser] = useState<User | null>(null);
   // null is "not loaded yet", not "none" - the same distinction the documents
@@ -19,12 +52,14 @@ export default function CollectionsPage() {
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [strategy, setStrategy] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editDescription, setEditDescription] = useState("");
+  const [editStrategy, setEditStrategy] = useState("");
   const [saving, setSaving] = useState(false);
   // One row acts at a time, so one slot rather than a map keyed by id. It is
   // rendered inside the row that produced it: a rename refused with 같은 이름의
@@ -68,10 +103,15 @@ export default function CollectionsPage() {
     try {
       await apiFetch<Collection>("/api/collections", {
         method: "POST",
-        body: JSON.stringify({ name, description: description.trim() || null }),
+        body: JSON.stringify({
+          name,
+          description: description.trim() || null,
+          chunking: CHUNKING_OPTIONS.find((o) => o.value === strategy)?.chunking ?? {},
+        }),
       });
       setName("");
       setDescription("");
+      setStrategy("");
       // Refetch rather than pushing the returned row onto the list: another
       // admin's collection created since this page loaded would otherwise stay
       // invisible until a reload, and its document count would be missing.
@@ -87,25 +127,38 @@ export default function CollectionsPage() {
     setEditingId(collection.id);
     setEditName(collection.name);
     setEditDescription(collection.description ?? "");
+    setEditStrategy(strategyOf(collection.chunking));
     setRowError(null);
   }
 
-  async function handleSave(id: string) {
+  async function handleSave(collection: Collection) {
     setSaving(true);
     setRowError(null);
     try {
-      // An empty 설명 is sent as an explicit null, which is the only way to
-      // clear it - PATCH treats an OMITTED field as "leave this alone".
-      const updated = await apiFetch<Collection>(`/api/collections/${id}`, {
+      const body: Record<string, unknown> = {
+        name: editName,
+        // An empty 설명 is sent as an explicit null, which is the only way to
+        // clear it - PATCH treats an OMITTED field as "leave this alone".
+        description: editDescription.trim() || null,
+      };
+      // OMITTED when the strategy did not change, and that is not an
+      // optimisation: `strategyOf` reads a collection configured by hand with
+      // its own `levels` as plain "hierarchical", so sending the option's body
+      // back would replace those levels with the korean_legal preset on a save
+      // that only meant to fix a typo in the name.
+      if (editStrategy !== strategyOf(collection.chunking)) {
+        body.chunking = CHUNKING_OPTIONS.find((o) => o.value === editStrategy)?.chunking ?? {};
+      }
+      const updated = await apiFetch<Collection>(`/api/collections/${collection.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ name: editName, description: editDescription.trim() || null }),
+        body: JSON.stringify(body),
       });
       // The server's object, not the form's. The backend trims the name, so the
       // row has to show what was stored and not what was typed.
-      setCollections((prev) => (prev ?? []).map((c) => (c.id === id ? updated : c)));
+      setCollections((prev) => (prev ?? []).map((c) => (c.id === collection.id ? updated : c)));
       setEditingId(null);
     } catch (err) {
-      setRowError({ id, message: errorMessage(err) });
+      setRowError({ id: collection.id, message: errorMessage(err) });
     } finally {
       setSaving(false);
     }
@@ -152,6 +205,23 @@ export default function CollectionsPage() {
                     className="field w-full"
                   />
                 </div>
+                <div className="flex flex-col gap-1">
+                  <label htmlFor="new-collection-chunking" className="text-body text-on-surface-variant">
+                    문서 구조
+                  </label>
+                  <select
+                    id="new-collection-chunking"
+                    value={strategy}
+                    onChange={(e) => setStrategy(e.target.value)}
+                    className="field px-2"
+                  >
+                    {CHUNKING_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
                 <button
                   type="submit"
                   disabled={creating}
@@ -160,6 +230,14 @@ export default function CollectionsPage() {
                   {creating ? "추가 중..." : "분류 추가"}
                 </button>
               </div>
+              {/* The one sentence that stops this select from reading as a
+                  per-collection verdict. It supplies the vocabulary; each
+                  document is judged on its own content, and the 일반 collection
+                  of this deployment already holds both kinds. */}
+              <p className="max-w-measure text-caption text-on-surface-variant">
+                이 설정은 문서의 번호체계가 어떻게 생겼는지만 알려줍니다. 실제로 그 구조를 쓰는지는
+                문서마다 내용을 보고 판단하며, 그 결과는 각 문서 상세 화면에 표시됩니다.
+              </p>
               {/* Under the form, not at the top of the page: 같은 이름의 분류가
                   이미 있습니다. is about the name in the field right above it. */}
               <ErrorBanner message={createError} />
@@ -176,6 +254,7 @@ export default function CollectionsPage() {
                   <tr className="bg-surface-container-low text-label font-medium text-on-surface-variant">
                     <th scope="col" className="px-3 py-3">분류 이름</th>
                     <th scope="col" className="px-3 py-3">설명</th>
+                    <th scope="col" className="px-3 py-3">문서 구조</th>
                     <th scope="col" className="px-3 py-3 text-right">문서 수</th>
                     <th scope="col" className="px-3 py-3">등록일</th>
                     <th scope="col" className="px-3 py-3">관리</th>
@@ -211,6 +290,24 @@ export default function CollectionsPage() {
                             (c.description ?? "-")
                           )}
                         </td>
+                        <td className="px-3 py-3 text-on-surface-variant">
+                          {editing ? (
+                            <select
+                              value={editStrategy}
+                              onChange={(e) => setEditStrategy(e.target.value)}
+                              aria-label={`${c.name} 문서 구조`}
+                              className="field h-8 w-full px-2 text-caption"
+                            >
+                              {CHUNKING_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            labelOf(c.chunking)
+                          )}
+                        </td>
                         <td className="px-3 py-3 text-right text-on-surface-variant">
                           {counts === null ? "-" : (counts[c.id] ?? 0)}
                         </td>
@@ -223,7 +320,7 @@ export default function CollectionsPage() {
                               <>
                                 <button
                                   type="button"
-                                  onClick={() => void handleSave(c.id)}
+                                  onClick={() => void handleSave(c)}
                                   disabled={saving}
                                   className="btn-tonal btn-compact"
                                 >

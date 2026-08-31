@@ -2,6 +2,7 @@ from app.models.app_setting import AppSetting
 from app.models.attachment import ATTACHMENT_KINDS, Attachment
 from app.models.base import Base
 from app.models.chunk import EMBEDDING_DIM, Chunk
+from app.models.chunk_edge import EDGE_KINDS, ChunkEdge
 from app.models.collection import Collection
 from app.models.conversation import Conversation
 from app.models.document import DOCUMENT_STATUSES, TERMINAL_STATUSES, Document
@@ -33,6 +34,7 @@ __all__ = [
     "Collection",
     "Document",
     "Chunk",
+    "ChunkEdge",
     "Conversation",
     "Message",
     "MessageFeedback",
@@ -42,6 +44,7 @@ __all__ = [
     "Prompt",
     "Attachment",
     "EMBEDDING_DIM",
+    "EDGE_KINDS",
     "DOCUMENT_STATUSES",
     "TERMINAL_STATUSES",
     "MESSAGE_ROLES",

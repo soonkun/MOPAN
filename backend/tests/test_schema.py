@@ -100,7 +100,15 @@ async def test_retrieval_indexes_exist_with_expected_access_methods(test_engine)
 # so there is no id to attribute it to and NULL is the only truthful value. It
 # means "the deployment's own default", which the admin screen renders as 시스템.
 # Every version an admin writes carries their id; only the seed is NULL.
-NULLABLE_FK_EXCEPTIONS = {("attachments", "message_id"), ("prompts", "created_by")}
+NULLABLE_FK_EXCEPTIONS = {
+    ("attachments", "message_id"),
+    ("prompts", "created_by"),
+    # An UNRESOLVED citation. 특허·실용신안 심사기준 cites [민법950] and [헌법6] and
+    # neither statute has been uploaded; the row records that fact, and the
+    # document screen reads "1,102 found, 913 resolved" off exactly these NULLs.
+    # Dropping the row instead would make the count unanswerable.
+    ("chunk_edges", "dst_chunk_id"),
+}
 
 
 async def test_every_foreign_key_is_indexed_and_not_null(test_engine):

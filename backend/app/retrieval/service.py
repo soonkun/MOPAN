@@ -13,6 +13,7 @@ from app.retrieval.evidence import Evidence, RetrievedChunk, chunk_to_evidence
 from app.retrieval.expansion import expand_query
 from app.retrieval.keyword_search import keyword_search
 from app.retrieval.neighbors import ExpansionMode, expand
+from app.retrieval.references import attach as attach_references
 from app.retrieval.reranker import Reranker
 from app.retrieval.rrf import reciprocal_rank_fusion
 from app.retrieval.vector_store import VectorStore
@@ -229,6 +230,19 @@ async def hybrid_search(
         candidates = await reranker.rerank(query, candidates)
     selected = candidates[:top_n]
 
+    # WHAT THE SELECTED CHUNKS CITE, before neighbour expansion and after the
+    # top-N cut, for the same reason expansion is where it is: a cited provision
+    # is not a candidate competing for a slot, it is text added to a slot that was
+    # already won. It goes FIRST because a clause the author explicitly pointed at
+    # carries more of the answer than the paragraph that happens to sit beside it,
+    # and `expand` recomputes its running total from the contents it is handed, so
+    # it sees whatever this spent.
+    #
+    # No switch: a document with no `chunk_edges` rows produces no walk rows and
+    # this costs one indexed query. There is no stage here that can be "on" and do
+    # nothing - the reason NoneReranker was deleted.
+    await attach_references(db, selected, token_budget=token_budget, query=query)
+
     # After the truncation, on the items that survived it. Expanding the whole
     # candidate set instead would pay for 20 neighbours to use 14, and expanding
     # BEFORE the rerank would let a neighbour's text change the score of the
@@ -256,6 +270,12 @@ async def hybrid_search(
         documents=len({chunk.document_id for chunk in selected}),
         selected=len(selected),
         expanded=sum(1 for chunk in selected if chunk.neighbors),
+        referenced=sum(
+            1
+            for chunk in selected
+            for note in chunk.neighbors
+            if str(note.get("reason", "")).startswith("ref:")
+        ),
         duration_ms=round((time.perf_counter() - started) * 1000, 2),
     )
     return [chunk_to_evidence(chunk) for chunk in selected]

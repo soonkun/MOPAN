@@ -18,6 +18,15 @@ export interface Collection {
   id: string;
   name: string;
   description: string | null;
+  /** WHAT THE DOCUMENTS' NUMBERING LOOKS LIKE, not what any one document is.
+   * `{}` is prose. The two shapes the 문서 구조 select writes are
+   * `{"strategy":"hierarchical","preset":"korean_legal"}` and
+   * `{"strategy":"classification_table","preset":"korean_ip_classification"}`;
+   * the backend validates it with the same `resolve` the worker calls, so a
+   * shape it does not know is a 422 at save time. Whether a given document
+   * actually uses that numbering is decided per document and lands in
+   * `DocumentItem.structure`. */
+  chunking: Record<string, unknown>;
   created_at: string;
 }
 
@@ -116,6 +125,44 @@ export type DocumentStatus =
   | "indexed"
   | "failed";
 
+export type DocumentCharacter = "reference_dependent" | "self_contained";
+
+/** `documents.structure`, written by the pipeline and read by the 구조 인식
+ * panel. EVERY FIELD IS OPTIONAL and that is the contract, not laziness:
+ *
+ *  - `{}` is a document whose collection asks for prose, or one that has not
+ *    been re-processed since the collection was configured. Nothing has been
+ *    detected, which is not the same fact as "no structure found".
+ *  - `citations` / `unresolved_examples` / `parent_edges` appear only for a
+ *    document that was actually cut on its hierarchy - the pipeline skips edge
+ *    building otherwise rather than record "0 of 130 resolved" about a document
+ *    it never tried to resolve.
+ *
+ * See backend/app/rag/chunking/hierarchy.py:Detection.as_json. */
+export interface DocumentStructure {
+  /** What was APPLIED - the override when there is one, the detection otherwise. */
+  character?: DocumentCharacter;
+  /** What the content said, kept separate so the screen can show both. */
+  detected?: DocumentCharacter;
+  /** What a person said. Survives re-processing; null means nobody has. */
+  override?: DocumentCharacter | null;
+  confidence?: "high" | "ambiguous" | "none";
+  /** The preset name, or "custom" for a collection that wrote its own levels. */
+  scheme?: string;
+  /** Level name to count. JSONB does not preserve key order, so this arrives in
+   * Postgres's order rather than outermost-to-innermost. */
+  levels?: Record<string, number>;
+  blocks?: number;
+  spine_ratio?: number;
+  citation_ratio?: number;
+  citations?: { found: number; resolved: number; unresolved: number };
+  /** Unresolved citations verbatim - "[민법950]", "[헌법6]". The point is that
+   * the reader can see WHICH law is missing from the corpus, which a count
+   * cannot say. */
+  unresolved_examples?: string[];
+  parent_edges?: number;
+}
+
 export interface DocumentItem {
   id: string;
   collection_id: string;
@@ -127,6 +174,7 @@ export interface DocumentItem {
   error_message: string | null;
   uploader_email: string | null;
   chunk_count: number;
+  structure: DocumentStructure;
   created_at: string;
   updated_at: string;
 }

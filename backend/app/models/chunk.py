@@ -11,12 +11,12 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     func,
     literal_column,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
-from sqlalchemy import event
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.config import get_settings

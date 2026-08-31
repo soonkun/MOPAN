@@ -139,6 +139,20 @@ def _joined_body(previous, following, overlap_chars: int) -> str | None:
     body = strip_overlap(previous.content, following.content, overlap_chars)
     if body is not None:
         return body
+    # A HIERARCHICALLY CUT CHUNK CARRIES NO OVERLAP - its ancestor line is the
+    # continuity carrier instead - so `strip_overlap` finds nothing and, before
+    # this branch was reached at all, expansion switched itself off for every such
+    # document without saying so. MEASURED: with 특허·실용신안 심사기준 re-cut on its
+    # own numbering, the `neighbor` fixture group's anchor fell 1.000 -> 0.625 and
+    # `proviso` recall 0.900 -> 0.500.
+    #
+    # Two chunks that repeat the SAME ancestor line are two pieces of one clause
+    # that the size bound had to split - exactly the case an overlap prefix marks
+    # in prose - and joining them is the same join. A different ancestor line is a
+    # boundary the document itself drew, and this correctly refuses it.
+    head = previous.content.split("\n", 1)[0]
+    if head and following.content.startswith(f"{head}\n"):
+        return following.content[len(head) + 1 :]
     # CHUNK_OVERLAP=0 is reachable from the admin settings screen, and it leaves
     # no prefix to detect - which would turn expansion into a silent no-op for
     # whoever set it. The recorded section is the only signal left; it is noisier

@@ -164,9 +164,10 @@ def resolve(config: dict | None) -> SectionMarkers | None:
     Raises ValueError on a configuration that cannot work, so that the failure
     lands on whoever is saving the setting rather than on the next upload.
     """
+    # None for "not this strategy" - including for another strategy's name. Which
+    # names exist at all is the package's question, not this module's, and
+    # `app/rag/chunking/__init__.py:resolve` is where an unknown one is rejected.
     if not config or config.get("strategy") != STRATEGY:
-        if config and config.get("strategy") not in (None, STRATEGY):
-            raise ValueError(f"unknown chunking strategy: {config['strategy']!r}")
         return None
     preset = config.get("preset")
     if preset is not None and preset not in PRESETS:
