@@ -1,9 +1,13 @@
 // The one container every admin screen sits in. It exists because there were
-// eight of them: `mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6` was copied
-// into 분류/사용자/프롬프트/MCP/고급 설정/문서/문서 상세, and 워크플로우 had
-// drifted to max-w-7xl with nothing recording why. Eight containers are eight
-// chances to diverge again, which is how a wide-desktop bug ended up on every
-// screen at once instead of on one.
+// eight of them: a centred 1024px column with 24px of gutter, written out as
+// the same six utilities and copied into 분류/사용자/프롬프트/MCP/고급 설정/
+// 문서/문서 상세, while 워크플로우 had drifted to a 1280px one with nothing
+// recording why. Eight containers are eight chances to diverge again, which is
+// how a wide-desktop bug ended up on every screen at once instead of on one.
+//
+// The old width is spelled out in prose above rather than as its class name on
+// purpose: Tailwind's extractor scans this file, so naming a utility in a
+// comment keeps emitting its CSS long after the last call site is gone.
 //
 // Widths, measured in headless Chrome against the running app:
 //   1024px column in a 1640px `main` at 1920 left 308px of dead gutter each
