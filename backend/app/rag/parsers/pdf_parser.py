@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 import pdfplumber
 
-from app.rag.blocks import Block, ParsedDocument
+from app.rag.blocks import CLASS_GROUP_MARKER, Block, ParsedDocument
 from app.rag.parsers.base import Parser
 
 MAX_HEADING_CHARS = 80
@@ -116,7 +116,23 @@ def _is_heading(line: str, next_line: str) -> bool:
     relabels the rest of the document. Missing a heading only costs a chunk
     boundary, which the size pass in Task 9 supplies anyway."""
     stripped = line.strip()
-    if not stripped or len(stripped) > MAX_HEADING_CHARS:
+    if not stripped:
+        return False
+    # Before the length and punctuation guards, because this one is EVIDENCE and
+    # not a heuristic: a line that opens with a bracketed class/similarity-group
+    # code is a section header of a classification table by construction, and
+    # nothing else in these documents has that shape. It has to be here at all
+    # because every test below rejects it - the line is Hangul (the CJK guard
+    # returns False for anything cased-ambiguous), it is set in 10.5pt against a
+    # 9.5pt body so _is_font_heading misses it at the 1.15 ratio, and a long goods
+    # name pushes it past MAX_HEADING_CHARS. Measured on 유사상품 심사기준: 931
+    # such lines, of which only 63 survived into a block of their own; the other
+    # 868 were joined into the paragraph of the PREVIOUS section's goods list,
+    # which is why "[제9류/G390802] 소프트웨어" and its 상품의 범위 were retrievable
+    # only as the tail of a chunk about robots.
+    if CLASS_GROUP_MARKER.match(stripped):
+        return True
+    if len(stripped) > MAX_HEADING_CHARS:
         return False
     if stripped[-1] in SENTENCE_ENDINGS:
         return False

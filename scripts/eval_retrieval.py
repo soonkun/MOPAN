@@ -518,7 +518,7 @@ def _ranks(ids: list[str]) -> dict[str, int]:
     return {chunk_id: rank for rank, chunk_id in enumerate(dict.fromkeys(ids), start=1)}
 
 
-def score(returned_pages: list[int | None], gold: set[int]) -> tuple[int, int]:
+def score(returned_pages: list[tuple[str, int | None] | None], gold: set) -> tuple[int, int]:
     hits = sum(1 for page in returned_pages if page in gold)
     return (1 if hits else 0), hits
 
@@ -659,6 +659,10 @@ async def main() -> int:
     parser.add_argument("--setup-lex", default="", help="build eval_lex_<name> tables")
     parser.add_argument("--drop-lex", action="store_true", help="drop every eval_lex_* table")
     parser.add_argument("--show", default="", help="question id to print per-slot detail for")
+    parser.add_argument(
+        "--fixture", default=str(FIXTURE),
+        help="question set to measure; defaults to eval_questions_ko.json",
+    )
     args = parser.parse_args()
 
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -671,7 +675,7 @@ async def main() -> int:
     from app.core.tokens import count_tokens
     from app.retrieval.rrf import reciprocal_rank_fusion
 
-    fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    fixture = json.loads(Path(args.fixture).read_text(encoding="utf-8"))
     questions = fixture["questions"]
     env_settings = get_settings()
 
@@ -737,26 +741,42 @@ async def main() -> int:
         # agree far less often. On the small index the false-trigger rate reads
         # 0/52 and in production the branch fires on answerable questions.
         corpus_rows = (await session.execute(select(*columns))).all()
-        rows = [r for r in corpus_rows if r.document_id in {
-            d for (d,) in (await session.execute(
-                select(Document.id).where(Document.filename == fixture["document_filename"])
+        # `document_filename` may be one name or a list of them: a question set
+        # about the trademark side of this corpus has its answers spread over
+        # 상표심사기준 AND 유사상품 심사기준, and scoring such a set against one of
+        # the two would silently zero every question the other one answers.
+        names = fixture["document_filename"]
+        names = [names] if isinstance(names, str) else list(names)
+        by_id = {
+            document_id: name
+            for name in names
+            for (document_id,) in (await session.execute(
+                select(Document.id).where(Document.filename == name)
             )).all()
-        }]
+        }
+        rows = [r for r in corpus_rows if r.document_id in by_id]
         if not rows:
-            print(f"no chunks for {fixture['document_filename']!r} - is the corpus ingested?")
+            print(f"no chunks for {names!r} - is the corpus ingested?")
             return 1
-        # GOLD PAGES stay keyed to the fixture's document only. A page number is
-        # unique per document, not per corpus, so a foreign chunk that happens to
-        # sit on page 593 must not score as a hit for the manual's page 593;
-        # `pages.get()` returning None is what makes that true.
-        pages = {str(r.id): r.page for r in rows}
+        # GOLD PAGES stay keyed to the fixture's documents only, and a gold page
+        # is the PAIR (document, page): a page number is unique per document, not
+        # per corpus, so a foreign chunk that happens to sit on page 593 must not
+        # score as a hit for the manual's page 593. `pages.get()` returning None
+        # is what makes that true. A question names its own document in
+        # `document`; a single-document fixture has nothing to name and its
+        # questions default to the only one there is.
+        pages = {str(r.id): (by_id[r.document_id], r.page) for r in rows}
         docs = {str(r.id): r.content for r in rows}
+        for entry in questions:
+            entry["_gold"] = {
+                (entry.get("document", names[0]), page) for page in entry["gold_pages"]
+            }
         # `meta` is the whole corpus: a foreign chunk that wins a slot has to be
         # loadable, or it silently costs nothing in the anchor score it displaced.
         meta = {str(r.id): r for r in corpus_rows}
         print(
             f"corpus: {len(corpus_rows)} chunks searched, "
-            f"{len(rows)} in {fixture['document_filename']} ({len(set(pages.values()))} pages)"
+            f"{len(rows)} in {', '.join(names)} ({len(set(pages.values()))} pages)"
         )
 
         # Anchors are the fixture's own regression check: if extraction changes
@@ -765,7 +785,7 @@ async def main() -> int:
         bad = [
             e["id"]
             for e in questions
-            if not any(e["anchor"] in c for cid, c in docs.items() if pages[cid] in set(e["gold_pages"]))
+            if not any(e["anchor"] in c for cid, c in docs.items() if pages[cid] in e["_gold"])
         ]
         groups = list(dict.fromkeys(e.get("group", "base") for e in questions))
         counts = Counter(e.get("group", "base") for e in questions)
@@ -871,7 +891,8 @@ async def main() -> int:
 
         header = (
             f"{'row':<40} {'group':<10} {'n':>3} {'recall':>7} {'anchor':>7} "
-            f"{'prec':>6} {'ms/q':>8} {'$/q':>10} {'clarify':>8} {'deliv':>6}"
+            f"{'prec':>6} {'ms/q':>8} {'$/q':>10} {'clarify':>8} {'wk<':>4} {'wk!':>4} "
+            f"{'bestRRF':>8} {'deliv':>6}"
         )
 
         from app.llm.openai_provider import OpenAIProvider
@@ -1023,7 +1044,7 @@ async def measure_row(
                                         settings=settings, query=query)
         elapsed = (time.perf_counter() - started) * 1000
 
-        gold = set(entry["gold_pages"])
+        gold = entry["_gold"]
         hit, hits = score([pages.get(c) for c in selected], gold)
         bucket = per_group[entry.get("group", "base")]
         bucket["recall"].append(hit)
@@ -1057,6 +1078,17 @@ async def measure_row(
             )
             else 0
         )
+        # THE TWO SIGNALS SEPARATELY, because `clarify` is their OR and cannot say
+        # which one fired - and they want different fixes. `wk<` is the score arm
+        # (best fused RRF under WEAK_EVIDENCE_RRF_SCORE), `wk!` is the agreement
+        # arm (no delivered chunk found by both arms), and `bestRRF` is the mean of
+        # the best score, which is the number a new threshold would be set from.
+        best = max((fused_scores.get(cid, 0.0) for cid in selected), default=0.0)
+        bucket["wk<"].append(1 if best < settings.weak_evidence_rrf_score else 0)
+        bucket["wk!"].append(
+            0 if any(c in dense_seen and c in sparse_seen for c in selected) else 1
+        )
+        bucket["bestRRF"].append(best)
         if show == entry["id"]:
             print(f"  [{label}] {entry['id']}")
             for i, cid in enumerate(selected, 1):
@@ -1076,7 +1108,8 @@ async def measure_row(
         print(
             f"{label:<40} {group:<10} {n:>3} {mean('recall'):>7.3f} {mean('anchor'):>7.3f} "
             f"{mean('prec'):>6.3f} {mean('ms'):>8.1f} {mean('cost'):>10.6f} "
-            f"{sum(bucket['clarify']):>3}/{n:<4} {mean('delivered'):>6.1f}"
+            f"{sum(bucket['clarify']):>3}/{n:<4} {sum(bucket['wk<']):>4} {sum(bucket['wk!']):>4} "
+            f"{mean('bestRRF'):>8.4f} {mean('delivered'):>6.1f}"
         )
 
 

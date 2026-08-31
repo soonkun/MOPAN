@@ -1,0 +1,106 @@
+{
+  "_readme": [
+    "WHAT THIS IS FOR, and why the 52-question set could not do it.",
+    "",
+    "eval_questions_ko.json asks every one of its 52 questions in the CORPUS'S OWN",
+    "vocabulary - it was written by reading the manual, so a question about",
+    "공지예외주장 uses the word 공지예외주장. That makes it structurally blind to the",
+    "failure this set exists to measure: a person types 어플, and the examination",
+    "standards print 애플리케이션 소프트웨어, 컴퓨터 프로그램 and 응용 소프트웨어 and",
+    "never once print 어플 or 앱. No tokenizer bridges that. Worse than absent:",
+    "under the character-bigram sparse arm 어플 MATCHES 휴대용멀티미디어플레이어 and",
+    "전기식메이크업어플리케이터, so the colloquial word actively drags retrieval",
+    "toward the wrong goods.",
+    "",
+    "So every question here is phrased the way somebody starting a business types",
+    "it - 어플, 치킨집, 학원, 강아지 사료, 동네 마트 - and every one is answerable",
+    "from this corpus, by a section that uses none of those words.",
+    "",
+    "THE ANCHORS ARE DELIBERATELY STRICT, and chosen so BEFORE and AFTER are",
+    "comparable. Each is a line of the section's 상품의 범위 / 서비스업의 범위 - the",
+    "sentence that actually answers 'which class, which goods' - and each occurs in",
+    "EXACTLY ONE chunk, under both the old chunking and the classification-table",
+    "one. Deliberately NOT the '[제9류/G390802]' marker line: the re-chunk repeats",
+    "that marker on every chunk of its section, so scoring against it would credit",
+    "the change with hits it did not earn.",
+    "",
+    "gold_pages are keyed per question to the document that answers it, because the",
+    "answers live in two documents. c02 is the only one whose answer is in",
+    "상표심사기준; the rest are 유사상품 심사기준.",
+    "",
+    "Run:  python scripts/eval_retrieval.py --fixture scripts/eval_questions_ko_colloquial.json"
+  ],
+  "document_filename": ["유사상품 심사기준.pdf", "상표심사기준.pdf"],
+  "questions": [
+    {
+      "id": "c01-어플-류지정상품",
+      "question": "어플 하나 만들어서 이름을 상표로 등록하려고 하는데, 몇 류로 내야 하고 지정상품은 뭐라고 적어야 하나요?",
+      "document": "유사상품 심사기준.pdf",
+      "gold_pages": [333],
+      "anchor": "◦ 컴퓨터 운영시스템 소프트웨어 ◦컴퓨터 게임 프로그램"
+    },
+    {
+      "id": "c02-출원서-등록대상",
+      "question": "상표 출원할 때 출원서에 등록대상은 뭘로 적어야 하나요?",
+      "document": "상표심사기준.pdf",
+      "gold_pages": [89],
+      "anchor": "4. 지정상품 및 산업통상자원부령으로 정하는 상품류"
+    },
+    {
+      "id": "c03-치킨집",
+      "question": "치킨집 차리는데 가게 이름을 상표로 등록하려면 어느 류로 내야 하나요?",
+      "document": "유사상품 심사기준.pdf",
+      "gold_pages": [971],
+      "anchor": "◦한식점업, 레스토랑서비스업"
+    },
+    {
+      "id": "c04-학원",
+      "question": "동네에서 애들 가르치는 학원 이름을 상표로 내고 싶은데 무슨 류인가요?",
+      "document": "유사상품 심사기준.pdf",
+      "gold_pages": [911],
+      "anchor": "◦ 학원업(교육대상의 영역을 구체적으로 기재)"
+    },
+    {
+      "id": "c05-강아지사료",
+      "question": "강아지 사료 브랜드를 만들었는데 상표 낼 때 상품류가 어떻게 되나요?",
+      "document": "유사상품 심사기준.pdf",
+      "gold_pages": [715],
+      "anchor": "◦가축 또는 애완동물용 먹이"
+    },
+    {
+      "id": "c06-커피",
+      "question": "원두 볶아서 파는데 커피 브랜드 이름 상표는 몇 류로 등록하나요?",
+      "document": "유사상품 심사기준.pdf",
+      "gold_pages": [708],
+      "anchor": "◦가공 커피 원두"
+    },
+    {
+      "id": "c07-마트",
+      "question": "동네 마트 이름을 상표로 등록하려는데 어떤 류에 넣어야 하나요?",
+      "document": "유사상품 심사기준.pdf",
+      "gold_pages": [774],
+      "anchor": "◦단일 경영주체가 일정 규모의 매장을 갖추고"
+    },
+    {
+      "id": "c08-옷브랜드",
+      "question": "티셔츠랑 니트 만들어 파는 옷 브랜드인데 상표 낼 때 지정상품을 뭐로 쓰나요?",
+      "document": "유사상품 심사기준.pdf",
+      "gold_pages": [628],
+      "anchor": "◦주로 피부에 닿거나 겉옷 안쪽에 입는 옷(속옷/내의)"
+    },
+    {
+      "id": "c09-사진관",
+      "question": "사진관 열었는데 스튜디오 이름 상표 등록은 몇 류로 하나요?",
+      "document": "유사상품 심사기준.pdf",
+      "gold_pages": [924],
+      "anchor": "◦마이크로필름기록업, 사진촬영업, 비디오녹화촬영업"
+    },
+    {
+      "id": "c10-게스트하우스",
+      "question": "게스트하우스 이름으로 상표를 내려고 하는데 류가 어떻게 되나요?",
+      "document": "유사상품 심사기준.pdf",
+      "gold_pages": [973],
+      "anchor": "◦하숙서비스업,모텔서비스업,유스호스텔업,호텔숙박시설업,숙박시설안내업"
+    }
+  ]
+}

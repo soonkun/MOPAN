@@ -33,7 +33,7 @@ def main() -> int:
             print(f"login failed: {response.status_code} {response.text[:200]}")
             return 1
 
-        answer, message_id = "", None
+        answer, message_id, citations = "", None, []
         with client.stream("POST", "/api/chat", json={"message": question}) as stream:
             if stream.status_code != 200:
                 stream.read()
@@ -45,16 +45,31 @@ def main() -> int:
                 frame = json.loads(line[5:])
                 if frame.get("type") == "token":
                     answer += frame.get("text", "")
+                elif frame.get("type") == "citations":
+                    citations = frame.get("citations") or []
                 elif frame.get("type") == "done":
                     # The answer arrives whole on `done` in this build, not as
                     # token frames; take whichever is populated.
                     answer = answer or frame.get("content", "")
                     message_id = frame.get("message_id")
+                    citations = citations or frame.get("citations") or []
                 elif frame.get("type") == "error":
                     print(f"stream error: {frame}")
 
         print(f"Q: {question}\n")
-        print(f"A: {answer.strip()[:1200]}\n")
+        print(f"A: {answer.strip()}\n")
+
+        # WHICH SENTENCE each citation rests on, not just how many there were.
+        # "cited 3" says nothing about whether the answer is grounded; the
+        # document, the page and the text under the marker are what say it.
+        for citation in citations:
+            print(
+                f"[{citation.get('index')}] {citation.get('filename')} "
+                f"p.{citation.get('page')} / {citation.get('section')}"
+            )
+            snippet = " ".join((citation.get("snippet") or "").split())
+            print(f"    {snippet[:400]}")
+        print()
 
         if not message_id:
             print("(no message_id in the stream - cannot read the trace)")

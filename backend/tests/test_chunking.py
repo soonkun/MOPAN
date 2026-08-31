@@ -592,10 +592,16 @@ async def test_semantic_chunking_clears_the_embedding_of_a_merged_candidate():
 def test_strategy_factory_honours_the_setting():
     from app.core.config import Settings
 
+    # The setting still decides how PROSE is chunked; what the factory returns is
+    # the classification-table wrapper around that choice, which steps aside for
+    # every document that is not a table.
     assert isinstance(
-        get_chunking_strategy(Settings(chunking_strategy="semantic")), StructureSemanticChunking
+        get_chunking_strategy(Settings(chunking_strategy="semantic")).fallback,
+        StructureSemanticChunking,
     )
-    assert isinstance(get_chunking_strategy(Settings(chunking_strategy="fixed")), FixedChunking)
+    assert isinstance(
+        get_chunking_strategy(Settings(chunking_strategy="fixed")).fallback, FixedChunking
+    )
     with pytest.raises(ValueError):
         get_chunking_strategy(Settings(chunking_strategy="nonsense"))
 
@@ -747,3 +753,120 @@ async def test_semantic_merge_respects_the_character_target():
 
     assert len(candidates) == 2, [c.content for c in candidates]
     assert all(c.char_count <= 100 for c in candidates), [c.char_count for c in candidates]
+
+
+# --- classification table ----------------------------------------------------
+
+from app.rag.chunking.table import (  # noqa: E402
+    ClassificationTableChunking,
+    is_classification_table,
+)
+
+
+def _goods_table(sections: int = 25, goods_per_section: int = 12) -> list[Block]:
+    """The shape 유사상품 심사기준 has: a bracketed class/similarity-group header,
+    then a scope line, then a long run of goods names with nothing in them that
+    says which class they belong to."""
+    blocks: list[Block] = []
+    for i in range(sections):
+        blocks.append(
+            Block(text=f"[제9류/G39{i:04d}] 소프트웨어{i}", block_type="heading", page=i, section="9류")
+        )
+        blocks.append(
+            Block(text=f"◦ 상품{i}의 범위", block_type="paragraph", page=i, section="9류")
+        )
+        for g in range(goods_per_section):
+            blocks.append(
+                Block(text=f"상품이름{i}-{g} goods name {i}-{g}", block_type="paragraph", page=i)
+            )
+    return blocks
+
+
+def test_a_prose_document_is_not_a_classification_table():
+    assert not is_classification_table(_heading_less_document())
+    # A prose document that QUOTES a handful of the codes is still prose.
+    assert not is_classification_table(
+        [Block(text=f"[제9류/G39{i:04d}] 소프트웨어", block_type="paragraph") for i in range(5)]
+    )
+
+
+def test_a_goods_table_is_a_classification_table():
+    assert is_classification_table(_goods_table())
+
+
+async def test_a_prose_document_is_handed_to_the_wrapped_strategy():
+    fallback = FixedChunking(chunk_size=400, overlap=0)
+    strategy = ClassificationTableChunking(fallback, max_chunk_tokens=1000, target_chars=400)
+
+    blocks = _heading_less_document()
+    assert await strategy.chunk(blocks, fake_embed_fn) == await fallback.chunk(
+        blocks, fake_embed_fn
+    )
+
+
+async def test_every_chunk_of_a_section_carries_its_class_and_group_code():
+    """The failure this exists for: a goods chunk with no code in it cannot be
+    retrieved by a question that names a class, and cannot ground an answer that
+    names one either."""
+    strategy = ClassificationTableChunking(
+        FixedChunking(chunk_size=400, overlap=0), max_chunk_tokens=1000, target_chars=200
+    )
+
+    candidates = await strategy.chunk(_goods_table(), fake_embed_fn)
+
+    assert all(c.content.startswith("[제9류/G39") for c in candidates), [
+        c.content[:40] for c in candidates if not c.content.startswith("[제9류/G39")
+    ]
+    assert all(c.section.startswith("[제9류/G39") for c in candidates)
+    assert all(c.metadata["strategy"] == "classification_table" for c in candidates)
+    # More than one chunk per section, or the fixture is not exercising the
+    # repetition this test is about.
+    assert len(candidates) > 25
+
+
+async def test_a_section_header_never_travels_without_its_goods():
+    """The header used to land at the tail of the PREVIOUS section's chunk, so
+    the section's own scope line was retrievable only as a footnote to somebody
+    else's goods."""
+    strategy = ClassificationTableChunking(
+        FixedChunking(chunk_size=400, overlap=0), max_chunk_tokens=1000, target_chars=400
+    )
+
+    candidates = await strategy.chunk(_goods_table(sections=25, goods_per_section=2), fake_embed_fn)
+
+    first = next(c for c in candidates if c.content.startswith("[제9류/G390001]"))
+    assert "◦ 상품1의 범위" in first.content
+    assert "상품0-" not in first.content, first.content
+
+
+async def test_the_prefix_is_charged_to_both_size_bounds():
+    strategy = ClassificationTableChunking(
+        FixedChunking(chunk_size=400, overlap=0), max_chunk_tokens=1000, target_chars=120
+    )
+
+    candidates = await strategy.chunk(_goods_table(), fake_embed_fn)
+
+    assert all(c.char_count <= 120 for c in candidates), [c.char_count for c in candidates]
+    assert all(c.char_count == len(c.content) for c in candidates)
+    assert all(c.token_count >= count_tokens(c.content) for c in candidates)
+
+
+async def test_a_class_preamble_is_not_stamped_with_the_previous_section_code():
+    """A 니스 class opens with a preamble that carries no code of its own. Left
+    inside the previous section it would ship a list of paints labelled as the
+    last similarity group of the class before it - a wrong class code, which is
+    worse here than no class code."""
+    strategy = ClassificationTableChunking(
+        FixedChunking(chunk_size=400, overlap=0), max_chunk_tokens=1000, target_chars=400
+    )
+    blocks = [
+        *_goods_table(sections=25, goods_per_section=2),
+        Block(text="본류에는 주로 페인트, 착색제, 부식방지제가 포함된다.", block_type="paragraph", page=99),
+        Block(text="- 공업용 페인트, 니스 및 래커", block_type="paragraph", page=99),
+    ]
+
+    candidates = await strategy.chunk(blocks, fake_embed_fn)
+
+    preamble = [c for c in candidates if "페인트" in c.content]
+    assert preamble, [c.content[:40] for c in candidates[-3:]]
+    assert all(not c.content.startswith("[제9류/") for c in preamble)
