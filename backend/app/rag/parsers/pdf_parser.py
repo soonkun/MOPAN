@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 import pdfplumber
 
-from app.rag.blocks import CLASS_GROUP_MARKER, Block, ParsedDocument
+from app.rag.blocks import Block, ParsedDocument
 from app.rag.parsers.base import Parser
 
 MAX_HEADING_CHARS = 80
@@ -109,7 +109,9 @@ class _Line(NamedTuple):
     ends_blank: bool
 
 
-def _is_heading(line: str, next_line: str) -> bool:
+def _is_heading(
+    line: str, next_line: str, section_marker: re.Pattern[str] | None = None
+) -> bool:
     """Deliberately conservative, because a false heading is not cheap: the
     detected text becomes current_section and is stamped on every block that
     follows, and section is what a citation shows the user. One misread line
@@ -119,18 +121,19 @@ def _is_heading(line: str, next_line: str) -> bool:
     if not stripped:
         return False
     # Before the length and punctuation guards, because this one is EVIDENCE and
-    # not a heuristic: a line that opens with a bracketed class/similarity-group
-    # code is a section header of a classification table by construction, and
-    # nothing else in these documents has that shape. It has to be here at all
-    # because every test below rejects it - the line is Hangul (the CJK guard
-    # returns False for anything cased-ambiguous), it is set in 10.5pt against a
-    # 9.5pt body so _is_font_heading misses it at the 1.15 ratio, and a long goods
-    # name pushes it past MAX_HEADING_CHARS. Measured on 유사상품 심사기준: 931
-    # such lines, of which only 63 survived into a block of their own; the other
-    # 868 were joined into the paragraph of the PREVIOUS section's goods list,
-    # which is why "[제9류/G390802] 소프트웨어" and its 상품의 범위 were retrievable
-    # only as the tail of a chunk about robots.
-    if CLASS_GROUP_MARKER.match(stripped):
+    # not a heuristic: the caller's collection SAYS this is what a section header
+    # looks like in its documents, so a line matching it is one by construction.
+    # It has to be here at all because every test below rejects the shape the
+    # shipped Korean-IP preset matches - the line is Hangul (the CJK guard returns
+    # False for anything cased-ambiguous), it is set in 10.5pt against a 9.5pt body
+    # so _is_font_heading misses it at the 1.15 ratio, and a long goods name pushes
+    # it past MAX_HEADING_CHARS. Measured on 유사상품 심사기준: 931 such lines, of
+    # which only 63 survived into a block of their own; the other 868 were joined
+    # into the paragraph of the PREVIOUS section's goods list, which is why
+    # "[제9류/G390802] 소프트웨어" and its 상품의 범위 were retrievable only as the
+    # tail of a chunk about robots. None means the collection configured no such
+    # pattern, and then only the heuristics below run.
+    if section_marker is not None and section_marker.match(stripped):
         return True
     if len(stripped) > MAX_HEADING_CHARS:
         return False
@@ -315,7 +318,7 @@ def _page_lines(page) -> list[_Line]:
 
 
 class PdfParser(Parser):
-    def parse(self, path: str) -> ParsedDocument:
+    def parse(self, path: str, section_marker: re.Pattern[str] | None = None) -> ParsedDocument:
         with pdfplumber.open(path) as pdf:
             pages: list[list[_Line]] = []
             for page in pdf.pages:
@@ -361,7 +364,10 @@ class PdfParser(Parser):
                 # catch it; its position can. First or last line of the page.
                 elif PAGE_NUMBER.match(line.text) and index in (0, len(page_lines) - 1):
                     continue
-                elif not (_is_font_heading(line, body_size) or _is_heading(line.text, next_text)):
+                elif not (
+                    _is_font_heading(line, body_size)
+                    or _is_heading(line.text, next_text, section_marker)
+                ):
                     paragraph.append(line)
                     continue
 

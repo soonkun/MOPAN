@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 import uuid
 
@@ -31,7 +32,14 @@ async def process_document(
     llm_provider: LLMProvider,
     chunking_strategy: ChunkingStrategy,
     document_id: str,
+    section_marker: re.Pattern[str] | None = None,
 ) -> None:
+    """`section_marker` is the collection's configured section-header pattern.
+    It reaches the PARSER, not the chunker: a line matching it has to survive as a
+    block of its own or the chunker never sees a boundary to cut on. Measured on
+    유사상품 심사기준, 868 of its 931 markers were swallowed into the previous
+    section's paragraph without it. The chunker gets the same pattern by a
+    different road - `chunking_strategy` was built from the same configuration."""
     document = await db.get(Document, uuid.UUID(document_id))
     if document is None:
         logger.warning("document %s no longer exists; nothing to process", document_id)
@@ -45,7 +53,7 @@ async def process_document(
         # on the worker's single event loop stalls every other queued job and
         # arq's own heartbeat. The chunking strategies thread their tiktoken
         # passes for the same reason.
-        parsed = await to_thread.run_sync(parser.parse, document.storage_path)
+        parsed = await to_thread.run_sync(parser.parse, document.storage_path, section_marker)
 
         await _set_status(db, document, "chunking")
         candidates = await chunking_strategy.chunk(parsed.blocks, llm_provider.embed)

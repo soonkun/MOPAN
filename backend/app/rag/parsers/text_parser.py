@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from app.rag.blocks import Block, ParsedDocument
@@ -7,7 +8,7 @@ from app.rag.parsers.base import Parser
 class TextParser(Parser):
     """Handles .txt and .md. Markdown '#' headings become heading blocks."""
 
-    def parse(self, path: str) -> ParsedDocument:
+    def parse(self, path: str, section_marker: re.Pattern[str] | None = None) -> ParsedDocument:
         text = Path(path).read_text(encoding="utf-8", errors="replace")
         blocks: list[Block] = []
         current_section: str | None = None

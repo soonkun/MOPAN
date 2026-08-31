@@ -162,6 +162,27 @@ def test_html_parser_does_not_emit_nested_tags_twice(tmp_path):
     assert [(b.text, b.block_type) for b in blocks] == [("only once", "table_cell")]
 
 
+def test_a_configured_section_marker_makes_a_line_a_heading():
+    """The pattern is the COLLECTION's, not the parser's. Without one these lines
+    are body text - too long, Hangul, body font - and the 931 markers of
+    유사상품 심사기준 are swallowed into the previous section's paragraph, which is
+    exactly where they used to go."""
+    import re
+
+    from app.rag.chunking import resolve
+
+    marker = resolve(
+        {"strategy": "classification_table", "preset": "korean_ip_classification"}
+    ).marker
+    line = "[제9류/G390702, G390799] 무선 이어셋, 헤드셋"
+
+    assert _is_heading(line, "", marker) is True
+    # No configured pattern means no such rule; the heuristics alone reject it.
+    assert _is_heading(line, "") is False
+    # Somebody else's pattern does not invent headings in this document either.
+    assert _is_heading(line, "", re.compile(r"^SKU-\d+")) is False
+
+
 def test_pdf_heading_heuristic_accepts_real_headings():
     assert _is_heading("3.2 Results", "Body text follows.") is True
     assert _is_heading("METHODOLOGY", "Body text follows.") is True

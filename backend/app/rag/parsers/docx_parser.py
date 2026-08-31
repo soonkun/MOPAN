@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from docx import Document as DocxDocument
@@ -7,7 +8,7 @@ from app.rag.parsers.base import Parser
 
 
 class DocxParser(Parser):
-    def parse(self, path: str) -> ParsedDocument:
+    def parse(self, path: str, section_marker: re.Pattern[str] | None = None) -> ParsedDocument:
         # python-docx raises PackageNotFoundError for a missing file, which is
         # not a FileNotFoundError - the structure endpoint's "source file is no
         # longer available" 404 would degrade into a 500 without this.

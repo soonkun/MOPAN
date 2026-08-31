@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from bs4 import BeautifulSoup
@@ -10,7 +11,7 @@ BLOCK_TAGS = [*HEADING_TAGS, "p", "li", "td", "th"]
 
 
 class HtmlParser(Parser):
-    def parse(self, path: str) -> ParsedDocument:
+    def parse(self, path: str, section_marker: re.Pattern[str] | None = None) -> ParsedDocument:
         soup = BeautifulSoup(Path(path).read_text(encoding="utf-8", errors="replace"), "html.parser")
         for tag in soup.find_all(["script", "style"]):
             tag.decompose()

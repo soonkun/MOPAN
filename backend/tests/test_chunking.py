@@ -592,18 +592,38 @@ async def test_semantic_chunking_clears_the_embedding_of_a_merged_candidate():
 def test_strategy_factory_honours_the_setting():
     from app.core.config import Settings
 
-    # The setting still decides how PROSE is chunked; what the factory returns is
-    # the classification-table wrapper around that choice, which steps aside for
-    # every document that is not a table.
+    # A collection that configures nothing gets the admin's prose strategy and
+    # nothing wrapped around it. The table cutter is opted INTO, never sniffed.
     assert isinstance(
-        get_chunking_strategy(Settings(chunking_strategy="semantic")).fallback,
+        get_chunking_strategy(Settings(chunking_strategy="semantic")),
         StructureSemanticChunking,
     )
-    assert isinstance(
-        get_chunking_strategy(Settings(chunking_strategy="fixed")).fallback, FixedChunking
-    )
+    assert isinstance(get_chunking_strategy(Settings(chunking_strategy="fixed")), FixedChunking)
     with pytest.raises(ValueError):
         get_chunking_strategy(Settings(chunking_strategy="nonsense"))
+
+
+def test_a_collection_selects_the_table_cutter_and_a_typo_is_reported():
+    from app.core.config import Settings
+    from app.rag.chunking.table import ClassificationTableChunking
+
+    settings = Settings(chunking_strategy="semantic")
+    chosen = get_chunking_strategy(
+        settings, {"strategy": "classification_table", "preset": "korean_ip_classification"}
+    )
+    assert isinstance(chosen, ClassificationTableChunking)
+    # The prose strategy is NOT consulted for a collection that chose this one.
+    assert not hasattr(chosen, "fallback")
+
+    # Silence is the one thing a misconfiguration must not buy.
+    with pytest.raises(ValueError):
+        get_chunking_strategy(settings, {"strategy": "clasification_table"})
+    with pytest.raises(ValueError):
+        get_chunking_strategy(settings, {"strategy": "classification_table", "preset": "nope"})
+    with pytest.raises(ValueError):
+        get_chunking_strategy(settings, {"strategy": "classification_table", "marker": "([a-z]+"})
+    with pytest.raises(ValueError):
+        get_chunking_strategy(settings, {"strategy": "classification_table"})
 
 
 # --- Character target and overlap --------------------------------------------
@@ -758,9 +778,16 @@ async def test_semantic_merge_respects_the_character_target():
 # --- classification table ----------------------------------------------------
 
 from app.rag.chunking.table import (  # noqa: E402
+    PRESETS,
     ClassificationTableChunking,
-    is_classification_table,
+    resolve,
 )
+
+KOREAN_IP = {"strategy": "classification_table", "preset": "korean_ip_classification"}
+
+
+def _table_strategy(**kwargs) -> ClassificationTableChunking:
+    return ClassificationTableChunking(resolve(KOREAN_IP), **kwargs)
 
 
 def _goods_table(sections: int = 25, goods_per_section: int = 12) -> list[Block]:
@@ -782,40 +809,42 @@ def _goods_table(sections: int = 25, goods_per_section: int = 12) -> list[Block]
     return blocks
 
 
-def test_a_prose_document_is_not_a_classification_table():
-    assert not is_classification_table(_heading_less_document())
-    # A prose document that QUOTES a handful of the codes is still prose.
-    assert not is_classification_table(
-        [Block(text=f"[제9류/G39{i:04d}] 소프트웨어", block_type="paragraph") for i in range(5)]
+def test_the_shipped_preset_matches_the_marker_shapes_the_document_really_has():
+    """PRESETS entries are configuration, and configuration that does not match
+    the documents it names is worth nothing. These four are the shapes measured in
+    유사상품 심사기준."""
+    marker = resolve(KOREAN_IP).marker
+    assert marker.match("[제9류/G390802] 소프트웨어").group("class_no") == "9"
+    assert marker.match("[제35류/S120602] 광고업").group("code") == "S120602"
+    assert marker.match("[제9류/G390702, G390799] 무선 이어셋, 헤드셋").group("name") == (
+        "무선 이어셋, 헤드셋"
     )
+    assert marker.match("[제9류/G3902, G3903]").group("name") == ""
+    # Prose that merely mentions a class is not a header.
+    assert marker.match("제9류에 해당하는 상품은 다음과 같다.") is None
 
 
-def test_a_goods_table_is_a_classification_table():
-    assert is_classification_table(_goods_table())
+async def test_a_document_with_no_markers_is_size_bounded_not_lost():
+    """Selecting this strategy for a collection whose document has no markers is
+    the user's business; losing the text would be ours."""
+    strategy = _table_strategy(max_chunk_tokens=1000, target_chars=400)
 
+    candidates = await strategy.chunk(_heading_less_document(), fake_embed_fn)
 
-async def test_a_prose_document_is_handed_to_the_wrapped_strategy():
-    fallback = FixedChunking(chunk_size=400, overlap=0)
-    strategy = ClassificationTableChunking(fallback, max_chunk_tokens=1000, target_chars=400)
-
-    blocks = _heading_less_document()
-    assert await strategy.chunk(blocks, fake_embed_fn) == await fallback.chunk(
-        blocks, fake_embed_fn
-    )
+    assert candidates
+    assert "classification_table" not in {c.metadata.get("strategy") for c in candidates}
 
 
 async def test_every_chunk_of_a_section_carries_its_class_and_group_code():
     """The failure this exists for: a goods chunk with no code in it cannot be
     retrieved by a question that names a class, and cannot ground an answer that
     names one either."""
-    strategy = ClassificationTableChunking(
-        FixedChunking(chunk_size=400, overlap=0), max_chunk_tokens=1000, target_chars=200
-    )
+    strategy = _table_strategy(max_chunk_tokens=1000, target_chars=200)
 
     candidates = await strategy.chunk(_goods_table(), fake_embed_fn)
 
-    assert all(c.content.startswith("[제9류/G39") for c in candidates), [
-        c.content[:40] for c in candidates if not c.content.startswith("[제9류/G39")
+    assert all("[제9류/G39" in c.content for c in candidates), [
+        c.content[:40] for c in candidates if "[제9류/G39" not in c.content
     ]
     assert all(c.section.startswith("[제9류/G39") for c in candidates)
     assert all(c.metadata["strategy"] == "classification_table" for c in candidates)
@@ -828,21 +857,17 @@ async def test_a_section_header_never_travels_without_its_goods():
     """The header used to land at the tail of the PREVIOUS section's chunk, so
     the section's own scope line was retrievable only as a footnote to somebody
     else's goods."""
-    strategy = ClassificationTableChunking(
-        FixedChunking(chunk_size=400, overlap=0), max_chunk_tokens=1000, target_chars=400
-    )
+    strategy = _table_strategy(max_chunk_tokens=1000, target_chars=400)
 
     candidates = await strategy.chunk(_goods_table(sections=25, goods_per_section=2), fake_embed_fn)
 
-    first = next(c for c in candidates if c.content.startswith("[제9류/G390001]"))
+    first = next(c for c in candidates if "[제9류/G390001]" in c.content)
     assert "◦ 상품1의 범위" in first.content
     assert "상품0-" not in first.content, first.content
 
 
 async def test_the_prefix_is_charged_to_both_size_bounds():
-    strategy = ClassificationTableChunking(
-        FixedChunking(chunk_size=400, overlap=0), max_chunk_tokens=1000, target_chars=120
-    )
+    strategy = _table_strategy(max_chunk_tokens=1000, target_chars=120)
 
     candidates = await strategy.chunk(_goods_table(), fake_embed_fn)
 
@@ -856,9 +881,7 @@ async def test_a_class_preamble_is_not_stamped_with_the_previous_section_code():
     inside the previous section it would ship a list of paints labelled as the
     last similarity group of the class before it - a wrong class code, which is
     worse here than no class code."""
-    strategy = ClassificationTableChunking(
-        FixedChunking(chunk_size=400, overlap=0), max_chunk_tokens=1000, target_chars=400
-    )
+    strategy = _table_strategy(max_chunk_tokens=1000, target_chars=400)
     blocks = [
         *_goods_table(sections=25, goods_per_section=2),
         Block(text="본류에는 주로 페인트, 착색제, 부식방지제가 포함된다.", block_type="paragraph", page=99),
@@ -869,4 +892,76 @@ async def test_a_class_preamble_is_not_stamped_with_the_previous_section_code():
 
     preamble = [c for c in candidates if "페인트" in c.content]
     assert preamble, [c.content[:40] for c in candidates[-3:]]
-    assert all(not c.content.startswith("[제9류/") for c in preamble)
+    assert all("[제9류/" not in c.content for c in preamble)
+
+
+async def test_every_chunk_opens_with_a_sentence_composed_from_its_own_marker():
+    """The dense arm's whole complaint: a bracket of codes over 400 bare product
+    names is not a sentence, so nothing sentence-shaped can be near it. Every
+    fact in the line comes from the marker - nothing is invented and no model is
+    called."""
+    strategy = _table_strategy(max_chunk_tokens=1000, target_chars=300)
+
+    candidates = await strategy.chunk(_goods_table(sections=25, goods_per_section=6), fake_embed_fn)
+    table = [c for c in candidates if c.metadata.get("strategy") == "classification_table"]
+
+    assert table
+    for candidate in table:
+        assert candidate.content.startswith("상표 출원 시 ")
+    first = next(c for c in table if "[제9류/G390003]" in c.content)
+    assert first.content.startswith(
+        "상표 출원 시 소프트웨어3의 상품류는 제9류, 유사군코드는 G390003입니다."
+    )
+    # The citation still shows the marker, never the sentence.
+    assert first.section == "[제9류/G390003] 소프트웨어3"
+
+
+async def test_a_marker_with_nothing_to_say_gets_no_half_sentence():
+    """A header that captured no name would otherwise ship "상품군 명칭은 입니다."
+    on every chunk of its section."""
+    strategy = _table_strategy(max_chunk_tokens=1000, target_chars=300)
+    blocks = [
+        Block(text="[제9류/G3902, G3903]", block_type="heading", page=1),
+        Block(text="상품이름 goods name", block_type="paragraph", page=1),
+    ]
+
+    candidates = await strategy.chunk(blocks, fake_embed_fn)
+
+    assert candidates[0].content.startswith("[제9류/G3902, G3903]")
+    assert "명칭은 입니다" not in candidates[0].content
+
+
+async def test_the_marker_and_the_sentence_are_configuration_not_korean():
+    """The same strategy over a parts catalogue, with no preset and no Korean.
+    If this needs a code change, the generalisation did not happen."""
+    strategy = ClassificationTableChunking(
+        resolve(
+            {
+                "strategy": "classification_table",
+                "marker": r"^(?P<sku>[A-Z]{2}-\d{4})\s+(?P<name>.+)$",
+                "head_line": "Part {sku} is a {name}.",
+            }
+        ),
+        max_chunk_tokens=1000,
+        target_chars=300,
+    )
+    blocks = [
+        Block(text="AB-1201 hydraulic pump", block_type="heading", page=1),
+        Block(text="Rated to 210 bar, cast iron body.", block_type="paragraph", page=1),
+        Block(text="CD-7788 relief valve", block_type="heading", page=2),
+        Block(text="Adjustable 20-250 bar.", block_type="paragraph", page=2),
+    ]
+
+    candidates = await strategy.chunk(blocks, fake_embed_fn)
+
+    assert candidates[0].content.startswith("Part AB-1201 is a hydraulic pump.")
+    assert candidates[0].section == "AB-1201 hydraulic pump"
+    assert candidates[1].content.startswith("Part CD-7788 is a relief valve.")
+
+
+def test_a_preset_is_a_starting_point_not_a_cage():
+    """Take the Korean-IP marker, keep it, replace only the sentence."""
+    markers = resolve({**KOREAN_IP, "head_line": "{class_no}류 {code}."})
+    assert markers.marker.pattern == PRESETS["korean_ip_classification"]["marker"]
+    assert markers.head_line == "{class_no}류 {code}."
+

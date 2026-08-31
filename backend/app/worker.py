@@ -3,14 +3,16 @@ import logging
 import uuid
 
 from arq.connections import RedisSettings
+from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.db import make_engine, make_sessionmaker
 from app.core.logging import configure_logging
 from app.core.settings_store import effective_settings
 from app.llm.openai_provider import OpenAIProvider
+from app.models.collection import Collection
 from app.models.document import TERMINAL_STATUSES, Document
-from app.rag.chunking import get_chunking_strategy
+from app.rag.chunking import get_chunking_strategy, resolve
 from app.rag.pipeline import USER_FACING_FAILURE
 from app.rag.pipeline import process_document as run_pipeline
 from app.retrieval.vector_store import PgVectorStore
@@ -89,12 +91,25 @@ async def process_document(ctx: dict, document_id: str) -> None:
                 # into current_sessionmaker, so the job's own session is passed
                 # explicitly.
                 settings = await effective_settings(db, ctx["settings"])
+                # HOW THIS DOCUMENT'S COLLECTION WANTS ITS DOCUMENTS CUT. One
+                # read, two consumers: the parser needs the marker pattern so a
+                # header survives as its own block, the chunker needs the whole
+                # configuration so it can compose the head line from what that
+                # pattern captured. Empty - which is every collection until
+                # somebody says otherwise - means prose, and `settings` decides.
+                chunking = await db.scalar(
+                    select(Collection.chunking)
+                    .join(Document, Document.collection_id == Collection.id)
+                    .where(Document.id == uuid.UUID(document_id))
+                )
+                markers = resolve(chunking)
                 await run_pipeline(
                     db,
                     PgVectorStore(db),
                     ctx["llm_provider"],
-                    get_chunking_strategy(settings),
+                    get_chunking_strategy(settings, chunking),
                     document_id,
+                    section_marker=markers.marker if markers else None,
                 )
     except BaseException as exc:
         # BaseException, and here rather than in a WorkerSettings hook: arq 0.26

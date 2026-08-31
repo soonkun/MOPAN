@@ -81,7 +81,12 @@ async def create_collection(
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db_session),
 ):
-    collection = Collection(name=payload.name, description=payload.description, created_by=admin.id)
+    collection = Collection(
+        name=payload.name,
+        description=payload.description,
+        chunking=payload.chunking or {},
+        created_by=admin.id,
+    )
     db.add(collection)
     try:
         await db.commit()
