@@ -1,4 +1,5 @@
 import Link from "next/link";
+import DataTable from "@/components/ui/DataTable";
 import type { DocumentItem, DocumentStatus } from "@/lib/types";
 
 // Keyed on the DocumentStatus union, not `string`, so a new backend status is a
@@ -62,8 +63,7 @@ export default function DocumentTable({
     return <p className="py-8 text-center text-body text-on-surface-variant">문서가 없습니다.</p>;
   }
   return (
-    <div className="overflow-x-auto rounded-sm">
-      <table className="w-full text-left text-body">
+    <DataTable caption="등록된 문서 목록">
         <thead>
           <tr className="bg-surface-container-low text-label font-medium text-on-surface-variant">
             <th scope="col" className="px-3 py-3">문서명</th>
@@ -141,7 +141,6 @@ export default function DocumentTable({
             </tr>
           ))}
         </tbody>
-      </table>
-    </div>
+    </DataTable>
   );
 }

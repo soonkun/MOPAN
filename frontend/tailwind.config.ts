@@ -119,6 +119,15 @@ const config: Config = {
       },
       maxWidth: {
         transcript: "768px",
+        // The admin page column at >=1536px, used by .page-shell. Below that
+        // the column is max-w-7xl (1280px); this is the one step it takes on a
+        // wide desktop, measured at 1920 and 2560 where a 1024px column left
+        // 308px and 768px of dead gutter on each side.
+        page: "1600px",
+        // The readable measure a paragraph keeps inside that 1600px column.
+        // Korean at 14/21 runs ~75 characters here; the full column would run
+        // ~115, which is past the point the eye finds the next line.
+        measure: "56rem",
       },
     },
   },

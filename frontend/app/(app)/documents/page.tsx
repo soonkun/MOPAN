@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, downloadDocument, errorMessage } from "@/lib/api";
 import DocumentTable, { STATUS_LABEL, TERMINAL } from "@/components/documents/DocumentTable";
 import UploadDropzone from "@/components/documents/UploadDropzone";
+import PageShell from "@/components/layout/PageShell";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { Collection, DocumentItem, User } from "@/lib/types";
 
@@ -101,7 +102,7 @@ export default function DocumentsPage() {
   }, [documents, search, statusFilter]);
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6">
+    <PageShell>
       <h1 className="text-headline font-medium">문서</h1>
       <ErrorBanner message={error} />
 
@@ -185,6 +186,6 @@ export default function DocumentsPage() {
       ) : (
         <DocumentTable documents={visible} onDownload={download} />
       )}
-    </div>
+    </PageShell>
   );
 }

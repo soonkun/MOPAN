@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
+import PageShell from "@/components/layout/PageShell";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import DataTable from "@/components/ui/DataTable";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { ManagedUser, User } from "@/lib/types";
 
@@ -70,7 +72,7 @@ export default function UsersPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6">
+    <PageShell>
       <h1 className="text-headline font-medium">사용자 관리</h1>
       <ErrorBanner message={loadError} />
 
@@ -79,8 +81,7 @@ export default function UsersPage() {
       ) : users.length === 0 ? (
         <p className="py-8 text-center text-body text-on-surface-variant">사용자가 없습니다.</p>
       ) : (
-        <div className="overflow-x-auto rounded-sm">
-          <table className="w-full text-left text-body">
+        <DataTable caption="등록된 사용자 목록">
             <thead>
               <tr className="bg-surface-container-low text-label font-medium text-on-surface-variant">
                 <th scope="col" className="px-3 py-3">이메일</th>
@@ -162,8 +163,7 @@ export default function UsersPage() {
                 </tr>
               ))}
             </tbody>
-          </table>
-        </div>
+        </DataTable>
       )}
 
       {deactivateTarget && (
@@ -175,6 +175,6 @@ export default function UsersPage() {
           onConfirm={() => patch(deactivateTarget.id, { is_active: false }, false)}
         />
       )}
-    </div>
+    </PageShell>
   );
 }

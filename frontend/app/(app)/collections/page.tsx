@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
+import PageShell from "@/components/layout/PageShell";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import DataTable from "@/components/ui/DataTable";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { Collection, DocumentItem, User } from "@/lib/types";
 
@@ -110,7 +112,7 @@ export default function CollectionsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6">
+    <PageShell>
       <h1 className="text-headline font-medium">분류 관리</h1>
       <ErrorBanner message={loadError} />
 
@@ -169,8 +171,7 @@ export default function CollectionsPage() {
           ) : collections.length === 0 ? (
             <p className="py-8 text-center text-body text-on-surface-variant">분류가 없습니다.</p>
           ) : (
-            <div className="overflow-x-auto rounded-sm">
-              <table className="w-full text-left text-body">
+            <DataTable caption="등록된 분류 목록">
                 <thead>
                   <tr className="bg-surface-container-low text-label font-medium text-on-surface-variant">
                     <th scope="col" className="px-3 py-3">분류 이름</th>
@@ -271,8 +272,7 @@ export default function CollectionsPage() {
                     );
                   })}
                 </tbody>
-              </table>
-            </div>
+            </DataTable>
           )}
         </>
       )}
@@ -292,6 +292,6 @@ export default function CollectionsPage() {
           }}
         />
       )}
-    </div>
+    </PageShell>
   );
 }

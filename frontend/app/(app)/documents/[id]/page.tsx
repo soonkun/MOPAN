@@ -3,6 +3,7 @@
 import { use, useEffect, useState } from "react";
 import { apiFetch, downloadDocument, errorMessage } from "@/lib/api";
 import ChunkViewer from "@/components/documents/ChunkViewer";
+import PageShell from "@/components/layout/PageShell";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { Chunk, DocumentItem } from "@/lib/types";
 
@@ -57,7 +58,7 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6">
+    <PageShell>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="min-w-0 break-all text-headline font-medium">{doc?.filename ?? "문서"}</h1>
         {doc && (
@@ -98,6 +99,6 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
           )}
         </section>
       )}
-    </div>
+    </PageShell>
   );
 }

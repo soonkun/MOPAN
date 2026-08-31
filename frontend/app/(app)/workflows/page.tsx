@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
 import GraphEditor from "@/components/workflows/GraphEditor";
 import WorkflowCanvas, { type Catalog, type Draft } from "@/components/workflows/WorkflowCanvas";
+import PageShell from "@/components/layout/PageShell";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import { placeGraphError, starterGraph } from "@/lib/graph";
@@ -259,7 +260,7 @@ export default function WorkflowsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6 px-4 py-6 sm:px-6">
+    <PageShell>
       <h1 className="text-headline font-medium">워크플로우</h1>
       <ErrorBanner message={loadError} />
 
@@ -528,6 +529,6 @@ export default function WorkflowsPage() {
           onClose={() => setDeleteTarget(null)}
         />
       )}
-    </div>
+    </PageShell>
   );
 }

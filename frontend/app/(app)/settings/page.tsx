@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
+import PageShell from "@/components/layout/PageShell";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { RuntimeSetting, SettingsPayload } from "@/lib/types";
 
@@ -136,7 +137,7 @@ export default function SettingsPage() {
   const groups = [...new Set(payload?.settings.map((s) => s.group) ?? [])];
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6">
+    <PageShell>
       <h1 className="text-headline font-medium">고급 설정</h1>
       <ErrorBanner message={loadError} />
 
@@ -149,18 +150,25 @@ export default function SettingsPage() {
               <h2 className="text-title font-medium">{GROUP_TITLE[group] ?? group}</h2>
               {GROUP_NOTE[group] && (
                 // Tone, not a rule: nothing has gone wrong, so this is a
-                // surface-container-high block rather than a banner. It is the
-                // sentence an admin who changes 청크 크기 and waits for the
-                // corpus to change would otherwise learn the slow way.
-                <p className="rounded-sm bg-surface-container-high p-4 text-body text-on-surface">
-                  {GROUP_NOTE[group]}
-                </p>
+                // .notice rather than a banner. It is the sentence an admin who
+                // changes 청크 크기 and waits for the corpus to change would
+                // otherwise learn the slow way.
+                <p className="notice">{GROUP_NOTE[group]}</p>
               )}
-              {payload.settings
-                .filter((s) => s.group === group)
-                .map((setting) => (
-                  <SettingRow key={setting.key} setting={setting} onSaved={load} />
-                ))}
+              {/* Two-up from 2xl. Each card holds a label, one sentence, a
+                  32-character input and a button - at 1600px a single column
+                  left roughly two thirds of every card empty and made the page
+                  2011px tall on a 1080px screen, which is the "빈 화면" the
+                  owner was looking at. The grid spends the width the shell
+                  gained instead of stretching one control across it. items-start
+                  so a card with an error banner does not stretch its neighbour. */}
+              <div className="grid gap-3 2xl:grid-cols-2 2xl:items-start">
+                {payload.settings
+                  .filter((s) => s.group === group)
+                  .map((setting) => (
+                    <SettingRow key={setting.key} setting={setting} onSaved={load} />
+                  ))}
+              </div>
             </section>
           ))}
 
@@ -169,22 +177,24 @@ export default function SettingsPage() {
             {/* Rendered from the API, not written into this file: the reason has
                 to live beside the decision in the settings store, where the next
                 person who wants to make one of these editable will read it. */}
-            <p className="rounded-sm bg-surface-container-high p-4 text-body text-on-surface">
+            <p className="notice">
               아래 값들은 바꾸면 이미 저장된 데이터와 어긋나므로 환경변수(.env)로만 관리합니다. 화면에서
               바꿀 수 있게 두면 코퍼스가 조용히 망가집니다.
             </p>
-            {payload.env_only.map((item) => (
-              <div key={item.key} className="rounded-md bg-surface-container-low p-4">
-                <div className="flex flex-wrap items-baseline gap-x-2">
-                  <h3 className="text-body font-medium text-on-surface">{item.label}</h3>
-                  <code className="text-caption text-on-surface-variant">{item.key}</code>
+            <div className="grid gap-3 2xl:grid-cols-2 2xl:items-start">
+              {payload.env_only.map((item) => (
+                <div key={item.key} className="rounded-md bg-surface-container-low p-4">
+                  <div className="flex flex-wrap items-baseline gap-x-2">
+                    <h3 className="text-body font-medium text-on-surface">{item.label}</h3>
+                    <code className="text-caption text-on-surface-variant">{item.key}</code>
+                  </div>
+                  <p className="mt-1 text-caption text-on-surface-variant">{item.reason}</p>
                 </div>
-                <p className="mt-1 text-caption text-on-surface-variant">{item.reason}</p>
-              </div>
-            ))}
+              ))}
+            </div>
           </section>
         </>
       )}
-    </div>
+    </PageShell>
   );
 }

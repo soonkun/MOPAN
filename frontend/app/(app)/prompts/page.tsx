@@ -2,7 +2,9 @@
 
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
+import PageShell from "@/components/layout/PageShell";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import DataTable from "@/components/ui/DataTable";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { PromptSummary, PromptVersion } from "@/lib/types";
 
@@ -140,13 +142,13 @@ export default function PromptsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6">
+    <PageShell>
       <h1 className="text-headline font-medium">프롬프트 관리</h1>
       <ErrorBanner message={loadError} />
 
       <form onSubmit={handleCreate} className="space-y-3 rounded-md bg-surface-container-low p-6">
         <h2 className="text-title font-medium">새 프롬프트</h2>
-        <p className="text-body text-on-surface-variant">
+        <p className="max-w-measure text-body text-on-surface-variant">
           워크플로우마다 다른 답변 지침을 쓰려면 여기에서 새 프롬프트를 만든 뒤, 워크플로우
           화면에서 선택하세요. 기존 이름은 덮어쓰지 않습니다.
         </p>
@@ -201,9 +203,7 @@ export default function PromptsPage() {
       ) : prompts.length === 0 ? (
         <p className="py-8 text-center text-body text-on-surface-variant">프롬프트가 없습니다.</p>
       ) : (
-        <div className="overflow-x-auto rounded-sm">
-          <table className="w-full text-left text-body">
-            <caption className="sr-only">등록된 프롬프트 목록</caption>
+        <DataTable caption="등록된 프롬프트 목록">
             <thead>
               <tr className="bg-surface-container-low text-label font-medium text-on-surface-variant">
                 <th scope="col" className="px-3 py-3">프롬프트</th>
@@ -256,8 +256,7 @@ export default function PromptsPage() {
                 </tr>
               ))}
             </tbody>
-          </table>
-        </div>
+        </DataTable>
       )}
 
       {active && (
@@ -269,8 +268,8 @@ export default function PromptsPage() {
 
             {/* The one thing an admin has to understand before typing here. It
                 is not an ErrorBanner - nothing has gone wrong - so it is a
-                surface-container-high block, per §1 and §4: tone, not a rule. */}
-            <div className="rounded-sm bg-surface-container-high p-4 text-body text-on-surface">
+                .notice: tone, not a rule, per §1 and §4. */}
+            <div className="notice">
               <p className="font-medium">이 내용은 모든 질문에서 모델에게 그대로 전달됩니다.</p>
               <ul className="mt-2 list-disc space-y-1 pl-5 text-on-surface-variant">
                 <li>
@@ -297,7 +296,10 @@ export default function PromptsPage() {
               </ul>
             </div>
 
-            <div>
+            {/* max-w-measure, not the full column: at 2xl the shell is 1600px
+                and an unbounded monospace textarea would set ~190 characters to
+                a line, which is not a width anyone edits a prompt at. */}
+            <div className="max-w-measure">
               <label htmlFor="prompt-text" className="text-label font-medium text-on-surface-variant">
                 프롬프트 내용
               </label>
@@ -359,11 +361,7 @@ export default function PromptsPage() {
             {versions === null ? (
               <p className="text-body text-on-surface-variant">불러오는 중...</p>
             ) : (
-              <div className="overflow-x-auto rounded-sm">
-                <table className="w-full text-left text-body">
-                  <caption className="sr-only">
-                    {PROMPT_LABEL[active.name] ?? active.name}의 버전 기록
-                  </caption>
+              <DataTable caption={`${PROMPT_LABEL[active.name] ?? active.name}의 버전 기록`}>
                   <thead>
                     <tr className="bg-surface-container-low text-label font-medium text-on-surface-variant">
                       <th scope="col" className="px-3 py-3">버전</th>
@@ -437,8 +435,7 @@ export default function PromptsPage() {
                       </Fragment>
                     ))}
                   </tbody>
-                </table>
-              </div>
+              </DataTable>
             )}
           </section>
         </>
@@ -453,6 +450,6 @@ export default function PromptsPage() {
           onClose={() => setActivateTarget(null)}
         />
       )}
-    </div>
+    </PageShell>
   );
 }

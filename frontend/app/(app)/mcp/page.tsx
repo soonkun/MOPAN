@@ -2,7 +2,9 @@
 
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
+import PageShell from "@/components/layout/PageShell";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import DataTable from "@/components/ui/DataTable";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { McpRiskLevel, McpServer, McpTool } from "@/lib/types";
 
@@ -113,17 +115,17 @@ export default function McpPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6">
+    <PageShell>
       <h1 className="text-headline font-medium">MCP 서버 관리</h1>
       <ErrorBanner message={loadError} />
 
       <form onSubmit={handleCreate} className="space-y-3 rounded-md bg-surface-container-low p-6">
         <h2 className="text-title font-medium">서버 등록</h2>
 
-        {/* Not an ErrorBanner - nothing has gone wrong - so a
-            surface-container-high block per §1 and §4: tone, not a rule. Both
-            bullets are things the admin has to know BEFORE typing a token. */}
-        <div className="rounded-sm bg-surface-container-high p-4 text-body text-on-surface">
+        {/* Not an ErrorBanner - nothing has gone wrong - so a .notice per §1
+            and §4: tone, not a rule. Every bullet is something the admin has to
+            know BEFORE typing a token. */}
+        <div className="notice">
           <ul className="list-disc space-y-1 pl-5 text-on-surface-variant">
             <li>
               HTTP(S) 방식의 MCP 서버만 등록할 수 있습니다. 내부망·루프백 주소는 보안상 거부됩니다.
@@ -201,9 +203,7 @@ export default function McpPage() {
           등록된 MCP 서버가 없습니다.
         </p>
       ) : (
-        <div className="overflow-x-auto rounded-sm">
-          <table className="w-full text-left text-body">
-            <caption className="sr-only">등록된 MCP 서버 목록</caption>
+        <DataTable caption="등록된 MCP 서버 목록">
             <thead>
               <tr className="bg-surface-container-low text-label font-medium text-on-surface-variant">
                 <th scope="col" className="px-3 py-3">서버</th>
@@ -377,8 +377,7 @@ export default function McpPage() {
                 </Fragment>
               ))}
             </tbody>
-          </table>
-        </div>
+        </DataTable>
       )}
 
       {deleteTarget && (
@@ -393,6 +392,6 @@ export default function McpPage() {
           onClose={() => setDeleteTarget(null)}
         />
       )}
-    </div>
+    </PageShell>
   );
 }

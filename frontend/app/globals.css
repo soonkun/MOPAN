@@ -143,18 +143,26 @@ body {
   }
 }
 
+/* whitespace-nowrap on all four variants is the fix for the 관리 column reading
+   as `v3 사용...` on a squeezed table. The height is fixed (h-10, h-8 under
+   .btn-compact) and the box does not clip, so a label allowed to wrap put its
+   second line OUTSIDE the button - measured on /prompts at 390 and 768px as
+   scrollHeight 40 against clientHeight 32 on eight buttons at once, which on
+   screen is a row of half-cut glyphs. Refusing the wrap also raises the table's
+   min-content width, which is what finally makes the wrapper's overflow-x-auto
+   scroll instead of squeezing the column to nothing. */
 @layer components {
   .btn-filled {
-    @apply inline-flex h-10 items-center justify-center rounded-sm bg-primary px-4 text-label font-medium text-on-primary transition-opacity duration-150 hover:opacity-90 disabled:opacity-50;
+    @apply inline-flex h-10 items-center justify-center whitespace-nowrap rounded-sm bg-primary px-4 text-label font-medium text-on-primary transition-opacity duration-150 hover:opacity-90 disabled:opacity-50;
   }
   .btn-tonal {
-    @apply inline-flex h-10 items-center justify-center rounded-sm bg-surface-container-high px-4 text-label font-medium text-on-surface transition-colors duration-150 hover:bg-surface-container-highest disabled:opacity-50;
+    @apply inline-flex h-10 items-center justify-center whitespace-nowrap rounded-sm bg-surface-container-high px-4 text-label font-medium text-on-surface transition-colors duration-150 hover:bg-surface-container-highest disabled:opacity-50;
   }
   .btn-text {
-    @apply inline-flex h-10 items-center justify-center rounded-sm bg-transparent px-4 text-label font-medium text-primary transition-colors duration-150 hover:bg-surface-container disabled:opacity-50;
+    @apply inline-flex h-10 items-center justify-center whitespace-nowrap rounded-sm bg-transparent px-4 text-label font-medium text-primary transition-colors duration-150 hover:bg-surface-container disabled:opacity-50;
   }
   .btn-danger {
-    @apply inline-flex h-10 items-center justify-center rounded-sm bg-error-container px-4 text-label font-medium text-on-error-container transition-opacity duration-150 hover:opacity-90 disabled:opacity-50;
+    @apply inline-flex h-10 items-center justify-center whitespace-nowrap rounded-sm bg-error-container px-4 text-label font-medium text-on-error-container transition-opacity duration-150 hover:opacity-90 disabled:opacity-50;
   }
   /* Row-level actions in the 분류/사용자 tables. 40px buttons stacked two to a
      cell push the row height past the text it is acting on. */
@@ -163,6 +171,14 @@ body {
   }
   .icon-btn {
     @apply inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-on-surface-variant transition-colors duration-150 hover:bg-surface-container-high disabled:opacity-50;
+  }
+  /* §1/§4 The "nothing has gone wrong, but read this first" block that four
+     admin screens each spelled out as the same class string. Tone, not a rule -
+     a container surface rather than a border. max-w-measure is what keeps the
+     paragraph readable once .page-shell opens up to 1600px at 2xl: without it
+     the same sentence runs the full column and the eye loses the next line. */
+  .notice {
+    @apply max-w-measure rounded-sm bg-surface-container-high p-4 text-body text-on-surface;
   }
   /* The one place a border still carries meaning: a text field's resting
      outline is what says "you can type here". */
