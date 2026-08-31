@@ -320,3 +320,38 @@ async def test_the_clarification_prompt_still_respects_the_token_budget():
     # Cut, not silently dropped whole: the branch reuses build_prompt, so `used`
     # is still what actually fit and the trace still says which items did not.
     assert [item["included"] for item in result.trace["evidence"]] == [True, False, False]
+
+
+def test_the_score_a_chunk_earns_does_not_move_with_the_candidate_depth():
+    """The variant count MULTIPLIES a chunk's RRF score; the candidate depth does
+    not, and this is what stops anyone normalising for depth the way `variants`
+    is normalised for.
+
+    A chunk both arms ranked first scores 2/(k+1) whether each arm was asked for
+    10 candidates or 40 - measured 0.0320 on the 52-question fixture at limit 10,
+    20 and 40 alike, identical to four decimals. Depth changes which chunks are
+    visible, not what a visible chunk is worth. Divide the score by any
+    increasing function of the depth and this assertion is what breaks first, on
+    the strongest evidence the pipeline can produce.
+    """
+    both_arms_first = [_evidence(rrf_score=2 / 61, vector_rank=1, keyword_rank=1)]
+    assert not evidence_is_weak(both_arms_first, min_rrf_score=THRESHOLD)
+    # The same evidence, found by one arm alone, is what the threshold is set to
+    # catch - also at every depth, because 1/(k+1) does not move either.
+    one_arm_first = [_evidence(rrf_score=1 / 61, vector_rank=1, keyword_rank=None)]
+    assert evidence_is_weak(one_arm_first, min_rrf_score=THRESHOLD)
+
+
+def test_a_candidate_depth_that_kills_the_threshold_is_rejected_not_deployed():
+    """The weakest corroboration a window of depth C can hold is 2/(k+C). Above
+    that the threshold rejects a chunk BOTH arms returned, so the score signal
+    contradicts the agreement signal beside it instead of complementing it.
+
+    RETRIEVAL_CANDIDATE_LIMIT is settable at runtime from the settings screen up
+    to 200, where the floor is 2/260 = 0.0077 against the deployed 0.0170 - a
+    detector that has silently stopped detecting. It is a boot/save failure
+    instead.
+    """
+    assert Settings(retrieval_candidate_limit=40, weak_evidence_rrf_score=0.0170)
+    with pytest.raises(ValueError, match="WEAK_EVIDENCE_RRF_SCORE"):
+        Settings(retrieval_candidate_limit=200, weak_evidence_rrf_score=0.0170)

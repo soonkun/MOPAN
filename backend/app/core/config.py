@@ -94,6 +94,51 @@ class Settings(BaseSettings):
 
     rrf_k: int = 60
     retrieval_top_n: int = 6
+    # HOW DEEP EACH ARM SEARCHES before RRF fuses them. DEPLOYED AT 10 through
+    # `app_settings`, and 10 is a measured choice, not the smallest safe number.
+    # Swept 10 / 20 / 40 at the deployed configuration (top_n 8, retry 3), three
+    # runs each:
+    #
+    #   52-question fixture   recall  anchor   retry   ms/q  tok/q   (deterministic)
+    #     limit 10             0.923   0.904    0/52  220.5   3271
+    #     limit 20             0.904   0.904    0/52  222.4   3306
+    #     limit 40             0.865   0.865    0/52  222.3   3329
+    #
+    #   colloquial fixture    recall  anchor  clarify  bestRRF  (3 runs, spread)
+    #     limit 10             0.500   0.200   6,6,6    0.0184-0.0195
+    #     limit 20        0.500-0.600  0.100-0.200  4,4,4  0.0219-0.0222
+    #     limit 40        0.500-0.600  0.100-0.200  3,4,3  0.0232-0.0234
+    #
+    # DEPTH BUYS NOTHING AND COSTS RECALL. On the corpus-vocabulary fixture it is
+    # a pure loss. On the colloquial one it halves the clarification rate while
+    # the anchor rate - whether the answer-bearing sentence reached the model at
+    # all - does not improve, so every clarification it removes becomes an answer
+    # written without the sentence that answers it.
+    #
+    # Measured on the owner's 상표출원 question, which is what raising this was
+    # proposed for. At limit 10 the two arms agree on nothing and the question is
+    # correctly diverted to the clarification. At limit 20 they agree on exactly
+    # two chunks - p.367 (긴급한 처리가 필요한 상표등록출원, dense 4 / sparse 18)
+    # and p.131 (요지변경, dense 10 / sparse 12) - neither of which has anything
+    # to do with the question, and that is the whole of what lifts the best score
+    # from 0.0164 to 0.0284 and switches both weak-evidence signals off. The
+    # answer that then ships cites NOTHING, three runs out of three, and invents
+    # its 상품류 list ("소프트웨어, 모바일 애플리케이션, 온라인 서비스"); the
+    # correct 제9류/G390802 appears in none of them.
+    #
+    # p.89, the chunk raising the depth was supposed to rescue, is not what any
+    # depth rescues. Its ranks over the whole corpus, per arm, measured:
+    #
+    #                          dense   sparse
+    #   full question           91        2     <- the §36① chunk
+    #   등록대상 alone          282        1     <- same chunk
+    #   등록대상 alone           15       62     <- a DIFFERENT p.89 chunk
+    #
+    # The chunk that carries "3. 상표 4. 지정상품 및 ... 상품류" is at sparse 1-2
+    # and dense 91-282, so no depth an operator can set corroborates it, and it
+    # was being DELIVERED at limit 10 the whole time - the clarify branch is what
+    # threw it away. Depth does not fix that; it only silences the branch using
+    # chunks that have nothing to do with the question.
     retrieval_candidate_limit: int = 20
 
     # HOW THE SPARSE ARM TOKENISES, at ingest AND at query time - the two must
@@ -569,6 +614,38 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"WEAK_EVIDENCE_RRF_SCORE must satisfy 0 <= value < {2 / (self.rrf_k + 1):.6f} "
                 f"at RRF_K={self.rrf_k}"
+            )
+        # THE SAME CEILING AT THE BOTTOM OF THE CANDIDATE WINDOW, which is the
+        # only way candidate depth enters the weak-evidence threshold at all.
+        #
+        # The score of a given chunk does NOT scale with RETRIEVAL_CANDIDATE_LIMIT
+        # the way it scales with the variant count - a chunk both arms rank first
+        # scores 2/(k+1) at every depth, measured 0.0320 on the 52-question
+        # fixture at limit 10, 20 and 40 alike, identical to four decimals. What
+        # depth changes is which chunks are VISIBLE: a chunk the other arm ranked
+        # 18th contributes nothing at limit 10 and 1/(k+18) at limit 20. So there
+        # is no factor to divide out, and dividing by any increasing function of
+        # the depth would push the strongest evidence the pipeline can produce -
+        # the one whose score never moved - under the bar.
+        #
+        # What IS depth-dependent is the weakest corroboration the window can
+        # hold: both arms at the very bottom score 2/(k+limit). Above that the
+        # threshold rejects a chunk BOTH arms returned, which makes the score arm
+        # contradict the agreement arm beside it rather than complement it, and
+        # the pair stops being separable entirely at limit >= k+2 where
+        # 2/(k+limit) falls to the 1/(k+1) of a single arm at rank 1.
+        #
+        # RETRIEVAL_CANDIDATE_LIMIT is runtime-settable from the settings screen
+        # (max 200), so this is reachable without a deploy: at 200 and RRF_K=60
+        # the floor is 0.0077 against a 0.0170 threshold. Rejecting the pair on
+        # the write path beats a detector that silently stops detecting.
+        corroboration_floor = 2 / (self.rrf_k + self.retrieval_candidate_limit)
+        if self.weak_evidence_rrf_score >= corroboration_floor:
+            raise ValueError(
+                f"WEAK_EVIDENCE_RRF_SCORE must stay below {corroboration_floor:.6f} at "
+                f"RRF_K={self.rrf_k} and RETRIEVAL_CANDIDATE_LIMIT="
+                f"{self.retrieval_candidate_limit}, or the threshold rejects evidence both "
+                f"arms returned"
             )
         # Same shape: a negative budget boots fine and then degrades into one
         # below-the-floor log per request forever, never an error.
