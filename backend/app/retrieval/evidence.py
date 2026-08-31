@@ -26,6 +26,12 @@ class RetrievedChunk:
     # Slice 5's trace view has to change the retrieval return type.
     vector_rank: int | None = None
     keyword_rank: int | None = None
+    # Did the DENSE arm and the KEYWORD arm both return this chunk, for any query
+    # variant? Not derivable from the two ranks above: those are the original
+    # query's positions, kept that way so a trace explains itself, while under
+    # query expansion the arms may only have agreed on a rewrite. The
+    # weak-evidence detector reads this and nothing else for its second signal.
+    corroborated: bool = False
     rrf_score: float = 0.0
     rerank_score: float | None = None
     # What neighbour expansion folded into `content`, one entry per neighbour.
@@ -63,6 +69,7 @@ def chunk_to_evidence(chunk: RetrievedChunk) -> Evidence:
             "section": chunk.section,
             "vector_rank": chunk.vector_rank,
             "keyword_rank": chunk.keyword_rank,
+            "corroborated": chunk.corroborated,
             "rrf_score": chunk.rrf_score,
             "rerank_score": chunk.rerank_score,
             # The identity fields above all still name the PRIMARY chunk after

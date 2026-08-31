@@ -41,6 +41,7 @@ def _evidence(index: int = 1, content: str = "본문") -> Evidence:
             "section": None,
             "vector_rank": 1,
             "keyword_rank": 1,
+            "corroborated": True,
             "rrf_score": 0.0328,
         },
     )

@@ -21,7 +21,7 @@ from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import Settings
+from app.core.config import MAX_EXTRA_QUERIES, Settings
 
 logger = logging.getLogger("mopan.settings")
 
@@ -103,6 +103,22 @@ RUNTIME_SAFE_SETTINGS: dict[str, SettingSpec] = {
                 "그중 상위 '답변에 사용할 근거 수'만 답변에 쓰이므로, 이 값은 그 순위 경쟁에 "
                 "참여하는 후보의 범위입니다. 환경변수 RERANK_MODEL을 설정한 경우에만 재순위 "
                 "모델이 이 후보 전체를 다시 정렬하며, 기본값은 재순위 없음입니다."
+            ),
+        ),
+        SettingSpec(
+            key="QUERY_EXPANSION_COUNT",
+            field="query_expansion_count",
+            kind=int,
+            minimum=0,
+            maximum=MAX_EXTRA_QUERIES,
+            group=RETRIEVAL,
+            label="질문 다시 쓰기 개수",
+            help=(
+                "질문 하나를 검색용 질문 N개로 더 바꿔서, 원래 질문과 함께 검색합니다. 0이면 이 "
+                "단계는 실행되지 않고 비용도 0입니다. 문서가 쓰는 단어와 사용자가 쓰는 단어가 "
+                "다를 때(어플/애플리케이션 소프트웨어) 그리고 한 질문이 여러 가지를 물을 때 "
+                "효과가 있습니다. 52문항 기준 anchor 0.865 → 0.885, 대신 질문마다 값싼 "
+                "completion 한 번이 붙어 약 4.5초와 $0.00015가 더 듭니다."
             ),
         ),
         SettingSpec(

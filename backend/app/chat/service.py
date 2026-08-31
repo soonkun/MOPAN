@@ -168,6 +168,13 @@ def evidence_is_weak(items: list[Evidence], *, min_rrf_score: float) -> bool:
        rewrites feed both arms, and one arm agreeing with itself N times is not
        agreement.
 
+       Read off `metadata["corroborated"]`, which `hybrid_search` computes over
+       EVERY variant's ranked lists - not off the vector_rank/keyword_rank pair,
+       which are the original query's positions and are None for a chunk that
+       both arms found only for a rewrite. Reading the pair made this signal fire
+       on 상표등록출원서 + 류 + 지정상품 at expansion 3 while the answer-bearing
+       chunk sat in slot 1 at four times the threshold.
+
     SCATTER - top hits landing in unrelated sections - was considered and
     rejected. The questions whose evidence legitimately scatters are the
     cross-reference ones (준용/crossref), which are the hardest questions the
@@ -183,10 +190,7 @@ def evidence_is_weak(items: list[Evidence], *, min_rrf_score: float) -> bool:
         return False
     if max(item.metadata.get("rrf_score") or 0.0 for item in items) < min_rrf_score:
         return True
-    return not any(
-        item.metadata.get("vector_rank") is not None and item.metadata.get("keyword_rank") is not None
-        for item in items
-    )
+    return not any(item.metadata.get("corroborated") for item in items)
 
 
 def _citations_from(answer_text: str, used: list[Evidence]) -> list[dict]:

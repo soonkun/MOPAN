@@ -130,6 +130,12 @@ class Settings(BaseSettings):
     # the question. 0 is off and off costs nothing - `hybrid_search` makes no
     # completion call at 0. Every variant feeds BOTH arms, so N variants produce
     # 2N ranked lists. See app/retrieval/expansion.py.
+    #
+    # RUNTIME-SAFE: it is on the 고급 설정 screen, because this is the one stage
+    # that measurably bridges a user's word to the corpus's (어플 ->
+    # 애플리케이션 소프트웨어) and splits a question that asks three things, and
+    # whether ~4.5 s and $0.00015 per question is worth anchor 0.865 -> 0.885 is
+    # the operator's call, not a value to be picked here on their behalf.
     query_expansion_count: int = 0
     # Env-only, not on the settings screen: it is a model name, not a number, and
     # it must stay a CHEAP model - expansion runs in front of every question and

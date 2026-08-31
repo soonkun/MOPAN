@@ -116,15 +116,32 @@ async def hybrid_search(
 
     rankings: list[list[str]] = []
     weights: list[float] = []
+    # WHICH ARM SAW A CHUNK, across every variant, which is a different question
+    # from the ranks reported below. The weak-evidence detector asks "did the
+    # dense arm and the keyword arm agree on anything" and it used to read that
+    # off `vector_rank`/`keyword_rank`, i.e. off the ORIGINAL query's two lists
+    # alone. With expansion on, a chunk both arms found for a rewrite - the
+    # rewrite being the whole reason expansion exists - showed None/None there and
+    # counted as uncorroborated, so the clarify branch fired on evidence that was
+    # corroborated four times over. Measured: 상표등록출원서 + 류 + 지정상품 at
+    # expansion 3 put 상표심사기준 p.89 in slot 1 at rrf 0.065, four times the
+    # threshold, and was still diverted to the clarify prompt.
+    #
+    # At query_expansion=0 these two sets are exactly rankings[0] and rankings[1],
+    # so the detector's verdict is unchanged for every caller that does not expand
+    # - which today is every caller.
+    dense_seen: set[str] = set()
+    sparse_seen: set[str] = set()
     for variant, embedding in zip(variants, embeddings, strict=True):
         hits = await vector_store.search(embedding, candidate_limit, collection_ids)
         rankings.append([hit.chunk_id for hit in hits])
+        dense_seen.update(rankings[-1])
         weights.append(1.0)
-        rankings.append(
-            await keyword_search(
-                db, variant, candidate_limit, collection_ids, tokenizer=sparse_tokenizer
-            )
+        keywords = await keyword_search(
+            db, variant, candidate_limit, collection_ids, tokenizer=sparse_tokenizer
         )
+        rankings.append(keywords)
+        sparse_seen.update(keywords)
         weights.append(sparse_weight)
 
     # The dense list is weighted 1.0 and the sparse list at `sparse_weight`. The
@@ -181,6 +198,7 @@ async def hybrid_search(
                 chunk_index=chunk.chunk_index,
                 vector_rank=vector_rank.get(chunk_id),
                 keyword_rank=keyword_rank.get(chunk_id),
+                corroborated=chunk_id in dense_seen and chunk_id in sparse_seen,
                 rrf_score=score,
             )
         )
@@ -220,6 +238,7 @@ async def hybrid_search(
         candidates=len(candidates),
         floored=evidence_floor,
         reranked=reranker is not None,
+        documents=len({chunk.document_id for chunk in selected}),
         selected=len(selected),
         expanded=sum(1 for chunk in selected if chunk.neighbors),
         duration_ms=round((time.perf_counter() - started) * 1000, 2),

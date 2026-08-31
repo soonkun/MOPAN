@@ -30,8 +30,14 @@ def _evidence(
     rrf_score: float = 0.0328,
     vector_rank: int | None = 1,
     keyword_rank: int | None = 1,
+    corroborated: bool | None = None,
     source_type: str = "rag",
 ) -> Evidence:
+    # Defaults to what the two ranks imply, which is what `hybrid_search` computes
+    # when query expansion is off - so every test written before the flag existed
+    # keeps asserting the same thing. A test that expands passes it explicitly.
+    if corroborated is None:
+        corroborated = vector_rank is not None and keyword_rank is not None
     return Evidence(
         source_type=source_type,
         ref=f"chunk:{index}",
@@ -45,6 +51,7 @@ def _evidence(
             "section": None,
             "vector_rank": vector_rank,
             "keyword_rank": keyword_rank,
+            "corroborated": corroborated,
             "rrf_score": rrf_score,
         },
     )
@@ -114,6 +121,23 @@ def test_evidence_no_arm_corroborates_is_weak_even_when_it_scores_well():
     ]
 
     assert evidence_is_weak(items, min_rrf_score=THRESHOLD) is True
+
+
+def test_evidence_both_arms_found_only_for_a_rewrite_is_not_weak():
+    """The mirror of the test above, and the bug that shipped for weeks.
+
+    `vector_rank`/`keyword_rank` are the ORIGINAL query's positions - kept that
+    way so a trace explains itself - so a chunk that both arms returned for a
+    REWRITE carries None in both and used to count as uncorroborated. The live
+    case: 상표등록출원서 + 류 + 지정상품 at expansion 3, the answer-bearing chunk in
+    slot 1 at rrf 0.065 (four times the threshold), diverted to the clarify prompt
+    with its own answer sitting in the evidence.
+    """
+    items = [
+        _evidence(index=1, rrf_score=0.0650, vector_rank=None, keyword_rank=2, corroborated=True),
+    ]
+
+    assert evidence_is_weak(items, min_rrf_score=THRESHOLD) is False
 
 
 def test_no_evidence_at_all_is_weak():

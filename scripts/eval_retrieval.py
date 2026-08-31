@@ -10,6 +10,11 @@ A SCRIPT, not a test: it talks to the running stack's Postgres and embeds each
 question once against the live OpenAI API. Every embedding is cached on disk
 keyed by (model, text), so re-running a sweep costs zero further API calls.
 
+IT MEASURES THE DEPLOYED CONFIGURATION. Defaults come from `effective_settings`
+- .env with the `app_settings` table layered on top - which is the same read the
+request path makes, so `--top-n`/`--limit` omitted means "whatever the product is
+running right now". Every run prints that configuration on its first line.
+
 EVERY ROW IS ONE PIPELINE CONFIGURATION and rows are a cross product of
 --arm x --dense x --sparse x --expand x --rerank x --expansion. That shape is
 the point: the redesign is decided one stage at a time, and a stage that cannot
@@ -662,22 +667,49 @@ async def main() -> int:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.core.config import get_settings
+    from app.core.settings_store import effective_settings
     from app.core.tokens import count_tokens
     from app.retrieval.rrf import reciprocal_rank_fusion
 
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
     questions = fixture["questions"]
-    settings = get_settings()
-    top_n = args.top_n or settings.retrieval_top_n
-    limit = args.limit or settings.retrieval_candidate_limit
-    rrf_k = args.rrf_k if args.rrf_k is not None else settings.rrf_k
-    weights = [float(w) for w in (args.weights or str(settings.sparse_weight)).split(",")]
-    modes = [m.strip() for m in (args.expansion or settings.neighbor_expansion).split(",")]
+    env_settings = get_settings()
 
-    engine = create_async_engine(settings.database_url.replace("@postgres:", "@127.0.0.1:"))
+    engine = create_async_engine(env_settings.database_url.replace("@postgres:", "@127.0.0.1:"))
     maker = async_sessionmaker(engine, expire_on_commit=False)
 
     async with maker() as session:
+        # THE DEPLOYED CONFIGURATION, not the .env one. `get_settings()` reads the
+        # environment and nothing else, but the running application reads it
+        # through `get_app_settings`, which layers the `app_settings` table on top
+        # - and that table is what the owner's 고급 설정 screen writes. Until this
+        # line existed the harness measured RETRIEVAL_TOP_N/CANDIDATE_LIMIT from
+        # .env while the product ran on the admin's values, and every number
+        # reported was taken at a configuration nobody was running: 14/20 in the
+        # report against 5/10 in the database, worth 0.10 of anchor@N.
+        #
+        # --top-n / --limit / --rrf-k still win, so a sweep can still name a
+        # configuration; what changed is the DEFAULT, which is now the deployed
+        # one rather than a third thing.
+        settings = await effective_settings(session, env_settings)
+        top_n = args.top_n or settings.retrieval_top_n
+        limit = args.limit or settings.retrieval_candidate_limit
+        rrf_k = args.rrf_k if args.rrf_k is not None else settings.rrf_k
+        weights = [float(w) for w in (args.weights or str(settings.sparse_weight)).split(",")]
+        modes = [m.strip() for m in (args.expansion or settings.neighbor_expansion).split(",")]
+        # Printed on every run so a pasted table says which configuration produced
+        # it. A number without this line is not comparable to anything.
+        print(
+            f"config: top_n={top_n} candidate_limit={limit} rrf_k={rrf_k} "
+            f"sparse_weight={weights} tokenizer={settings.sparse_tokenizer} "
+            f"expansion={modes} weak_evidence={settings.weak_evidence_rrf_score}"
+            + (
+                ""
+                if (top_n, limit) == (settings.retrieval_top_n, settings.retrieval_candidate_limit)
+                else f"  (deployed: {settings.retrieval_top_n}/{settings.retrieval_candidate_limit})"
+            )
+        )
+
         if args.drop_lex:
             for name in [*LEX_TOKENIZERS, "kiwi_legacy"]:
                 await session.execute(text(f"DROP TABLE IF EXISTS eval_lex_{name}"))
@@ -690,23 +722,42 @@ async def main() -> int:
         from app.models.chunk import Chunk
         from app.models.document import Document
 
-        rows = (
-            await session.execute(
-                select(
-                    Chunk.id, Chunk.page, Chunk.content, Chunk.document_id,
-                    Chunk.chunk_index, Chunk.section,
-                )
-                .join(Document, Document.id == Chunk.document_id)
-                .where(Document.filename == fixture["document_filename"])
-            )
-        ).all()
+        columns = (
+            Chunk.id, Chunk.page, Chunk.content, Chunk.document_id,
+            Chunk.chunk_index, Chunk.section,
+        )
+        # THE WHOLE CORPUS, because that is what the product searches. The dense
+        # arm used to be built over the fixture's document alone while the shipped
+        # sparse arm (`sparse_current` -> `keyword_search`) searched every
+        # collection, so the harness measured a 2578-chunk haystack for one arm
+        # and a 14273-chunk one for the other. Every distractor the other four
+        # documents contribute was invisible, and so was the thing that made this
+        # matter: the weak-evidence detector fires when NOTHING is corroborated by
+        # both arms, and a corpus five times larger is a corpus where the two arms
+        # agree far less often. On the small index the false-trigger rate reads
+        # 0/52 and in production the branch fires on answerable questions.
+        corpus_rows = (await session.execute(select(*columns))).all()
+        rows = [r for r in corpus_rows if r.document_id in {
+            d for (d,) in (await session.execute(
+                select(Document.id).where(Document.filename == fixture["document_filename"])
+            )).all()
+        }]
         if not rows:
             print(f"no chunks for {fixture['document_filename']!r} - is the corpus ingested?")
             return 1
+        # GOLD PAGES stay keyed to the fixture's document only. A page number is
+        # unique per document, not per corpus, so a foreign chunk that happens to
+        # sit on page 593 must not score as a hit for the manual's page 593;
+        # `pages.get()` returning None is what makes that true.
         pages = {str(r.id): r.page for r in rows}
         docs = {str(r.id): r.content for r in rows}
-        meta = {str(r.id): r for r in rows}
-        print(f"corpus: {len(rows)} chunks, {len(set(pages.values()))} pages")
+        # `meta` is the whole corpus: a foreign chunk that wins a slot has to be
+        # loadable, or it silently costs nothing in the anchor score it displaced.
+        meta = {str(r.id): r for r in corpus_rows}
+        print(
+            f"corpus: {len(corpus_rows)} chunks searched, "
+            f"{len(rows)} in {fixture['document_filename']} ({len(set(pages.values()))} pages)"
+        )
 
         # Anchors are the fixture's own regression check: if extraction changes
         # and a gold page no longer carries the passage, every number below is a
@@ -731,8 +782,8 @@ async def main() -> int:
             await setup_lex(session, name, docs)
 
         # --- dense arms -------------------------------------------------
-        chunk_ids = [str(r.id) for r in rows]
-        chunk_texts = [r.content for r in rows]
+        # corpus_rows, not rows: same haystack as the sparse arm and the product.
+        chunk_texts = [r.content for r in corpus_rows]
         questions_text = [e["question"] for e in questions]
         units = [u for u in args.unit.split(",") if u]
         sent_texts, sent_parents = sentence_units(rows)
@@ -768,15 +819,25 @@ async def main() -> int:
                     }
                     qvecs, _ = await embed_openai(model, questions_text, settings)
                     vecs = {
-                        **{r.content: stored[str(r.id)] for r in rows if str(r.id) in stored},
+                        **{r.content: stored[str(r.id)] for r in corpus_rows if str(r.id) in stored},
                         **qvecs,
                     }
                 else:
+                    print(
+                        f"  about to embed {len(body)} chunks with {model}: "
+                        f"~${sum(count_tokens(t) for t in body) / 1e6 * rate:.4f}"
+                    )
                     vecs, _ = await embed_openai(model, body + questions_text, settings)
                 if name in TRUNCATE:
                     vecs = {t: v[: TRUNCATE[name]] for t, v in vecs.items()}
                 if unit == "chunk":
-                    dense_indexes[key] = DenseIndex(chunk_ids, [vecs[t] for t in chunk_texts])
+                    # A chunk whose embedding column is NULL has no vector and is
+                    # dropped from the index rather than crashing the row; the
+                    # count printed above is the one that was actually indexed.
+                    indexed = [r for r in corpus_rows if r.content in vecs]
+                    dense_indexes[key] = DenseIndex(
+                        [str(r.id) for r in indexed], [vecs[r.content] for r in indexed]
+                    )
                 else:
                     dense_indexes[key] = SentenceIndex(
                         sent_texts, [vecs[t] for t in sent_texts], sent_parents
@@ -842,7 +903,7 @@ async def main() -> int:
                                     if n_expand:
                                         label += f"/x{n_expand}"
                                     if rerank_model:
-                                        label += f"/rr"
+                                        label += "/rr"
                                     label += f"/{mode}"
                                     await measure_row(
                                         label, session, provider, settings, questions, groups,
@@ -909,16 +970,24 @@ async def measure_row(
 
         rankings: list[list[str]] = []
         row_weights: list[float] = []
+        # Which ARM saw a chunk, over every variant - `hybrid_search` records the
+        # same two sets, and the weak-evidence detector reads them rather than the
+        # original query's rank pair. Tracked here too or the clarify column
+        # measures a field this harness never sets.
+        dense_seen: set[str] = set()
+        sparse_seen: set[str] = set()
         for variant in queries:
             if arm in ("dense", "hybrid") and dense_name != "none":
                 vector = dense_vectors[dense_name].get(variant)
                 if vector is None:
                     vector = (await _embed_one(dense_name, variant, settings))
                 rankings.append(dense_indexes[dense_name].search(vector, limit))
+                dense_seen.update(rankings[-1])
                 row_weights.append(1.0)
                 cost += query_cost
             if arm in ("sparse", "hybrid") and sparse_name != "none":
                 rankings.append(await sparse_arms[sparse_name](session, variant, limit))
+                sparse_seen.update(rankings[-1])
                 row_weights.append(weight)
 
         fused = fuse(rankings, k=rrf_k, weights=row_weights)[:limit] if rankings else []
@@ -977,6 +1046,7 @@ async def measure_row(
 
         for chunk, cid in zip(chunks, selected, strict=False):
             chunk.rrf_score = fused_scores.get(cid, 0.0)
+            chunk.corroborated = cid in dense_seen and cid in sparse_seen
             chunk.vector_rank = vector_rank.get(cid)
             chunk.keyword_rank = keyword_rank.get(cid)
         bucket["clarify"].append(
