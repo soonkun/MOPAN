@@ -45,7 +45,7 @@ class ChatRequest(BaseModel):
     # reasons attachment_ids' is: it is operator configuration, and a
     # Field(max_length=...) would freeze it at import time and answer in English.
     tool_calls: list[ToolCallRequest] | None = None
-    # Slice 3's Super Agent, OPT-IN and defaulting to off, chosen per question
+    # 슈퍼 에이전트, OPT-IN and defaulting to off, chosen per question
     # the way `model` is. The direct RAG path of Slice 1 stays the default until
     # the orchestrator measures better on scripts/eval_questions_ko.json: a
     # planner is a new failure mode, and making it mandatory on day one would put
@@ -55,18 +55,24 @@ class ChatRequest(BaseModel):
     # still ride the turn, and a tool the USER picked in `tool_calls` still runs
     # before the plan does. The planner decides what ELSE to reach for.
     orchestrator: bool = False
-    # Slice 4's agent, chosen per question the way `model` is. None is the
-    # DEFAULT AGENT - no prompt override, no restriction, orchestrator off -
-    # which is this app exactly as it behaved before agents existed, so an empty
-    # `agents` table changes nothing about this request.
+    # THE WORKFLOW, chosen per question the way `model` is - this is what the
+    # composer's `@` menu puts in the request. None means no workflow: no prompt
+    # override, no restriction and no graph, which is this app exactly as it
+    # behaved before any of this existed, so an empty `workflows` table changes
+    # nothing about this request.
     #
-    # It does not merely supply defaults for the fields above it: the agent's
+    # It does not merely supply defaults for the fields above it: the workflow's
     # collection and tool lists are a BOUNDARY, so `collection_ids` and
     # `tool_calls` are narrowed and refused against it server-side
-    # (app/agents/service.py). Resolved in the router before the response starts,
-    # like the model and the attachment ids, for the reason they are: a refusal
-    # after a StreamingResponse has begun is an error frame inside a 200.
-    agent_id: uuid.UUID | None = None
+    # (app/workflow/catalogue.py). Resolved in the router before the response
+    # starts, like the model and the attachment ids, for the reason they are: a
+    # refusal after a StreamingResponse has begun is an error frame inside a 200.
+    #
+    # With `orchestrator` also on, the model writes the graph and this row
+    # supplies the boundary, the prompt and the answer model - 슈퍼 에이전트 is a
+    # way of AUTHORING a graph, so a saved graph and an authored one never both
+    # run on one turn.
+    workflow_id: uuid.UUID | None = None
 
 
 class ApprovalDecision(BaseModel):
@@ -74,7 +80,7 @@ class ApprovalDecision(BaseModel):
     paused on a high-risk step.
 
     A TOKEN AND A SECOND REQUEST, not a generator held open across the pause.
-    The reasoning is in app/orchestrator/approval.py; the short version is that a
+    The reasoning is in app/workflow/approval.py; the short version is that a
     held-open generator dies with the connection, and the pause is exactly when a
     user walks away. The token is opaque, single-use and owner-checked.
 
@@ -141,11 +147,12 @@ class MessageResponse(BaseModel):
     # reloaded conversation cannot say which model gave which answer, which is the
     # whole point of being able to pick one.
     model: str | None = None
-    # WHICH AGENT ANSWERED. Null on every user turn, on every answer written
-    # before agents existed, and on every answer the default agent gave - all
-    # three of which the transcript renders the same way, because they are the
-    # same thing: the app answering as it always did.
-    agent_name: str | None = None
+    # WHICH WORKFLOW ANSWERED, and which VERSION of it. Null on every user turn,
+    # on every answer written before workflows existed, and on every answer given
+    # without one - all three of which the transcript renders the same way,
+    # because they are the same thing: the app answering as it always did.
+    workflow_name: str | None = None
+    workflow_version: int | None = None
     # The CALLER's own rating, null when they have not rated this answer. It
     # rides the transcript rather than a second request because the alternative
     # is one fetch per assistant message on every conversation open. Always the

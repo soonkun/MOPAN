@@ -64,7 +64,21 @@ _WHITESPACE = re.compile(r"\s+")
 # tests/test_neighbors.py recomputes it from `_fence` itself and fails the moment
 # it moves. Same for the allowance the prompt is assumed to fit inside.
 # build_prompt, not this module, remains the authority on what actually fits.
-FENCE_RESERVE_TOKENS = 59
+# 71, not 59, and this is a BUG FIX rather than a tuning change. The fence
+# carries `new_nonce()` TWICE, and a nonce is 16 random uppercase hex characters:
+# how many tokens that is depends on the draw. Measured over 5000 nonces the
+# charge ranges 49-69 with a median of 57, so a reserve of 59 was under the real
+# charge on about one request in five - and
+# tests/test_neighbors.py:test_the_fence_reserve_still_matches_what_build_prompt_charges
+# recomputes it from a FRESH nonce, so that test failed at the same rate. It was
+# flaky, not stale, which is why re-running it made the failure go away.
+#
+# 71 is the arithmetic upper bound rather than the largest number anybody
+# happened to observe: the fence without a nonce is 39 tokens, and the worst case
+# for two 16-character nonces is one token per character, 39 + 32. A reserve is
+# meant to be an upper bound; a percentile is what put an evidence item off the
+# end of the prompt on the unlucky draw.
+FENCE_RESERVE_TOKENS = 71
 
 # One evidence item's "[n] (filename, p.593, section)\n" label (measured at 40 on
 # a real citation of this corpus) plus the "\n\n" that joins it to the previous

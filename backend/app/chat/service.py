@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.service import DEFAULT_AGENT, ResolvedAgent
 from app.attachments.service import claim as claim_attachments
 from app.chat.prompt import (
     MANDATORY_TOKEN_ALLOWANCE,
@@ -26,6 +25,7 @@ from app.retrieval.evidence import Evidence
 from app.retrieval.reranker import Reranker
 from app.retrieval.service import hybrid_search
 from app.retrieval.vector_store import VectorStore
+from app.workflow.catalogue import DEFAULT_WORKFLOW, ResolvedWorkflow
 
 logger = logging.getLogger("mopan.chat")
 
@@ -60,18 +60,22 @@ async def retrieve(
     *,
     settings: Settings,
     collection_ids: list[uuid.UUID] | None = None,
-    agent: ResolvedAgent = DEFAULT_AGENT,
+    workflow: ResolvedWorkflow = DEFAULT_WORKFLOW,
 ) -> list[Evidence]:
-    """Slice 3's Orchestrator will produce list[Evidence] a different way (a plan
-    running RAG and MCP steps) and hand it to the same answer() below.
+    """The DIRECT RAG path, unchanged since Slice 1 and still the default.
 
-    THE AGENT'S COLLECTION RESTRICTION IS APPLIED HERE, not by the caller, for
+    Slice 6's workflow executor produces list[Evidence] a different way (a graph
+    running RAG, MCP and nested-workflow nodes) and hands it to the same answer()
+    below. This function is what runs when no graph does, and what the fallback
+    lands on when a graph produced nothing.
+
+    THE WORKFLOW'S COLLECTION RESTRICTION IS APPLIED HERE, not by the caller, for
     the same reason this function owns its own commit below: a boundary a caller
     has to remember is not a boundary. The router narrows too, and that is fine -
-    `scope_collections` is idempotent - but this is the line that makes "an agent
-    restricted to A cannot return evidence from B" true of the direct RAG path
-    however it is reached. DEFAULT_AGENT restricts nothing, so /api/search and
-    every pre-agent caller behave exactly as before."""
+    `scope_collections` is idempotent - but this is the line that makes "a
+    workflow restricted to A cannot return evidence from B" true of the direct
+    RAG path however it is reached. DEFAULT_WORKFLOW restricts nothing, so
+    /api/search and every caller that names none behave exactly as before."""
     # hybrid_search embeds before its first statement, so it opens no transaction
     # across that network call - but only half the property is its to keep. The
     # caller has typically just read the conversation and its history from this
@@ -83,7 +87,7 @@ async def retrieve(
     # reads, and rollback would silently discard a caller's pending write.
     # Depends on expire_on_commit=False (app.core.db.make_sessionmaker), so the
     # caller's already-loaded Conversation survives the commit unexpired.
-    scoped = agent.scope_collections(collection_ids)
+    scoped = workflow.scope_collections(collection_ids)
     await db.commit()
     return await hybrid_search(
         db,
@@ -105,6 +109,15 @@ async def retrieve(
         neighbor_expansion=settings.neighbor_expansion,
         chunk_overlap=settings.chunk_overlap,
         token_budget=settings.answer_context_token_budget,
+        # Multi-query expansion is opted into at the same choke point and for the
+        # same reason. It is NOT passed by `app/workflow/tools.py`'s RagTool, on
+        # purpose: a workflow graph has already decomposed the question into
+        # several RAG nodes, so expanding each of those would be paying a
+        # completion to re-derive a decomposition the planner just made.
+        # QUERY_EXPANSION_COUNT is 0 by default, so this line costs nothing until
+        # someone turns it on.
+        query_expansion=settings.query_expansion_count,
+        query_expansion_model=settings.query_expansion_model,
     )
 
 
@@ -258,12 +271,12 @@ async def answer(
     an execution plan over RAG and MCP steps, merges the results into one
     list[Evidence], and calls this function unchanged.
 
-    `prompt_name` is Slice 4's agent, and it is a defaulted keyword rather than a
-    new collaborator: an agent picks WHICH stored prompt answers, so this stays
+    `prompt_name` is the workflow's, and it is a defaulted keyword rather than a
+    new collaborator: a workflow picks WHICH stored prompt answers, so this stays
     one `get_prompt` call and the signature that
     tests/test_chat_service.py pins - no session, no retrieval collaborator -
-    is unchanged. The default is the name every caller used before agents
-    existed, which is why the default agent is not a second code path."""
+    is unchanged. The default is the name every caller used before workflows
+    existed, which is why naming no workflow is not a second code path."""
     template = await get_prompt(prompt_name)
     messages, used_evidence = build_prompt(
         question,
@@ -339,7 +352,8 @@ async def persist_turn(
     chat_answer: ChatAnswer,
     retrieval_ms: int,
     attachment_ids: list[uuid.UUID] | None = None,
-    agent_name: str | None = None,
+    workflow_name: str | None = None,
+    workflow_version: int | None = None,
 ) -> uuid.UUID:
     """Returns the ASSISTANT message's id, which the SSE `done` frame carries so
     that the answer on screen can be rated and traced without a reload. Before
@@ -362,10 +376,11 @@ async def persist_turn(
         model=chat_answer.model,
         prompt_name=chat_answer.prompt_name,
         prompt_version=chat_answer.prompt_version,
-        # NULL for the default agent, which is the app behaving as it always
+        # NULL when no workflow answered, which is the app behaving as it always
         # did. Written beside `model` for the same reason: it survives a reload,
         # so a transcript can still say what answered it.
-        agent_name=agent_name,
+        workflow_name=workflow_name,
+        workflow_version=workflow_version,
         usage=chat_answer.usage,
         latency_ms=chat_answer.latency_ms,
         retrieval_ms=retrieval_ms,

@@ -147,68 +147,136 @@ async def variant_none(session, query, limit):
     return []
 
 
-async def variant_prefix(session, query, limit):
+def make_prefix(min_len: int):
     """Josa-strip each query token, then ask tsquery for a PREFIX match.
 
     '공지예외주장은' -> '공지예외주장':* , which the index answers with every
     lexeme that starts with the stem - 공지예외주장은/을/의 all match. Two
     statements because the stripping happens in Python between them; the token
     list goes back as a bound array, never concatenated into SQL.
+
+    `min_len` is the gate, and it is the whole question this variant exists to
+    answer: a stem shorter than it is a wildcard, not a stem - '이':* matched 1766
+    of 2578 chunks and '출원':* 1556 - so the gate is what separates "recall" from
+    "the corpus". Swept, not picked: run --prefix-min 2,3,4,5,6.
+
+    Below the gate the ORIGINAL lexeme is matched exactly, not the stem. Matching
+    the bare stem there is strictly worse than today: '역병은' stems to '역병',
+    which as an exact term no longer matches the '역병은' the document wrote, so
+    the strip would have removed a match that the unchanged code already had.
+    Stripping only earns its keep when the ':*' that follows it can pay it back.
     """
-    from sqlalchemy import ARRAY, Text, bindparam, func, select, text
 
-    from app.models.chunk import Chunk
-    from app.retrieval.keyword_search import KOREAN_STOPWORDS
+    async def variant_prefix(session, query, limit):
+        from sqlalchemy import ARRAY, Text, bindparam, func, select, text
 
-    lexemes = (
-        await session.scalars(
-            text(
-                """SELECT lexeme FROM unnest(to_tsvector('simple', :q))
-                    WHERE to_tsvector('english', lexeme) <> ''::tsvector
-                      AND NOT lexeme = ANY(:ko)"""
-            ).bindparams(
-                bindparam("q", value=query),
-                bindparam("ko", value=list(KOREAN_STOPWORDS), type_=ARRAY(Text)),
+        from app.models.chunk import Chunk
+        from app.retrieval.keyword_search import KOREAN_STOPWORDS
+
+        lexemes = (
+            await session.scalars(
+                text(
+                    """SELECT lexeme FROM unnest(to_tsvector('simple', :q))
+                        WHERE to_tsvector('english', lexeme) <> ''::tsvector
+                          AND NOT lexeme = ANY(:ko)"""
+                ).bindparams(
+                    bindparam("q", value=query),
+                    bindparam("ko", value=list(KOREAN_STOPWORDS), type_=ARRAY(Text)),
+                )
             )
+        ).all()
+        prefixed, exact = set(), set()
+        for lex in lexemes:
+            s = stem(lex)
+            (prefixed if len(s) >= min_len else exact).add(s if len(s) >= min_len else lex)
+        if not prefixed and not exact:
+            return []
+        ts = text(
+            """to_tsquery('simple', (SELECT string_agg(t, ' | ') FROM (
+                   SELECT quote_literal(s) || ':*' AS t FROM unnest(:pre) s
+                   UNION ALL SELECT quote_literal(s) FROM unnest(:exa) s) u))"""
+        ).bindparams(
+            bindparam("pre", value=sorted(prefixed), type_=ARRAY(Text)),
+            bindparam("exa", value=sorted(exact), type_=ARRAY(Text)),
         )
-    ).all()
-    stems = sorted({stem(lex) for lex in lexemes})
-    if not stems:
-        return []
-    # A one-character prefix is a wildcard, not a stem: '이':* would match every
-    # lexeme starting with 이. Short stems are matched exactly.
-    ts = text(
-        """to_tsquery('simple',
-             (SELECT string_agg(quote_literal(s) || CASE WHEN length(s) > 1 THEN ':*' ELSE '' END,
-                                ' | ')
-                FROM unnest(:stems) s))"""
-    ).bindparams(bindparam("stems", value=stems, type_=ARRAY(Text)))
-    query_ = (
-        select(Chunk.id)
-        .where(Chunk.content_tsv.op("@@", is_comparison=True)(ts))
-        .order_by(func.ts_rank(Chunk.content_tsv, ts).desc(), Chunk.id)
-        .limit(limit)
-    )
-    return [str(cid) for cid in await session.scalars(query_)]
+        query_ = (
+            select(Chunk.id)
+            .where(Chunk.content_tsv.op("@@", is_comparison=True)(ts))
+            .order_by(func.ts_rank(Chunk.content_tsv, ts).desc(), Chunk.id)
+            .limit(limit)
+        )
+        return [str(cid) for cid in await session.scalars(query_)]
+
+    return variant_prefix
 
 
-async def variant_trgm(session, query, limit):
+def make_trgm_gated(threshold: float):
+    """trgm, but behind the SAME stopword filter the shipped sparse arm uses.
+
+    make_trgm() measures pg_trgm as a REPLACEMENT for the sparse arm, and a
+    replacement loses the abstention: word_similarity has no notion of a stopword,
+    so 'how does it?' scores a real extent against the chunk made of those words
+    and puts pure noise at sparse rank 1 - the exact displacement the shipped
+    tsquery abstains to avoid, and what three tests pin. This variant keeps the
+    filter in front and abstains when nothing survives it, which is what a
+    shippable pg_trgm would have to do. Whether the filtered lexemes are still a
+    good trigram probe is the thing to measure: word_similarity scores the FIRST
+    argument as one string, and joining surviving lexemes with spaces makes a
+    string no document contains a continuous extent of.
+    """
+
+    async def variant(session, query, limit):
+        from sqlalchemy import ARRAY, Text, bindparam, text
+
+        from app.retrieval.keyword_search import KOREAN_STOPWORDS
+
+        lexemes = (
+            await session.scalars(
+                text(
+                    """SELECT lexeme FROM unnest(to_tsvector('simple', :q))
+                        WHERE to_tsvector('english', lexeme) <> ''::tsvector
+                          AND NOT lexeme = ANY(:ko)"""
+                ).bindparams(
+                    bindparam("q", value=query),
+                    bindparam("ko", value=list(KOREAN_STOPWORDS), type_=ARRAY(Text)),
+                )
+            )
+        ).all()
+        if not lexemes:
+            return []
+        return await make_trgm(threshold)(session, " ".join(sorted(lexemes)), limit)
+
+    return variant
+
+
+def make_trgm(threshold: float):
     """pg_trgm word_similarity: best-matching substring extent, not whole-string.
 
     similarity() would be hopeless here - a 40-char question against a 900-char
     chunk scores near zero however good the match is.
-    """
-    from sqlalchemy import bindparam, text
 
-    rows = await session.scalars(
-        text(
-            """SELECT id FROM chunks
-                WHERE word_similarity(:q, content) > 0.3
-                ORDER BY word_similarity(:q, content) DESC, id
-                LIMIT :lim"""
-        ).bindparams(bindparam("q", value=query), bindparam("lim", value=limit))
-    )
-    return [str(cid) for cid in rows]
+    `threshold` is this variant's fitted constant, and it gets swept for the same
+    reason the prefix gate does: --trgm-min 0.2,0.3,0.4,0.5.
+    """
+
+    async def variant_trgm(session, query, limit):
+        from sqlalchemy import bindparam, text
+
+        rows = await session.scalars(
+            text(
+                """SELECT id FROM chunks
+                    WHERE word_similarity(:q, content) > :thr
+                    ORDER BY word_similarity(:q, content) DESC, id
+                    LIMIT :lim"""
+            ).bindparams(
+                bindparam("q", value=query),
+                bindparam("thr", value=threshold),
+                bindparam("lim", value=limit),
+            )
+        )
+        return [str(cid) for cid in rows]
+
+    return variant_trgm
 
 
 async def variant_pgbigram(session, query, limit):
@@ -341,24 +409,27 @@ async def measure_orchestrator(
 ) -> None:
     """Slice 3's Super Agent on the same questions, against the same corpus.
 
-    It runs the SHIPPED code - `plan()` then `PlanRun`, the same objects
+    It runs the SHIPPED code - `plan()` then `WorkflowRun`, the same objects
     /api/chat builds - rather than a re-implementation, because a re-implementation
-    would measure the eval script's idea of the orchestrator and not the product's.
-    Tool steps are excluded from the numbers: a tool result has no chunk id and no
+    would measure the eval script's idea of 슈퍼 에이전트 and not the product's.
+    Since Slice 6 the planner emits a WORKFLOW GRAPH and there is one executor, so
+    what this measures is the same class a saved 워크플로우 runs through.
+    Tool nodes are excluded from the numbers: a tool result has no chunk id and no
     page, so it can neither hit nor miss a gold page, and counting it would
-    silently penalise a plan for reaching outside the corpus.
+    silently penalise a graph for reaching outside the corpus.
 
     A question whose plan is REFUSED or EMPTY falls back to the direct path here
     exactly as it does in the router, because that is what a user gets. Reporting
     the orchestrator's number over only the questions it planned successfully
     would be reporting a system nobody runs.
     """
-    from app.orchestrator.executor import PlanRun
-    from app.orchestrator.plan import PlanError, load_available
-    from app.orchestrator.planner import plan as make_plan
     from app.retrieval.keyword_search import keyword_search
     from app.retrieval.reranker import NoneReranker
     from app.retrieval.rrf import reciprocal_rank_fusion
+    from app.workflow.catalogue import load_available
+    from app.workflow.executor import WorkflowRun
+    from app.workflow.graph import GraphError
+    from app.workflow.planner import plan as make_plan
 
     async with maker() as session:
         resources = await load_available(session)
@@ -380,23 +451,24 @@ async def measure_orchestrator(
     for entry in questions:
         rows["direct"].append(await direct(entry))
         try:
-            execution_plan = await make_plan(
+            graph = await make_plan(
                 entry["question"], resources, llm_provider=provider, settings=settings
             )
-        except PlanError as exc:
+        except GraphError as exc:
             refused += 1
             fell_back += 1
-            print(f"  {entry['id']}: plan refused ({exc}) -> direct")
+            print(f"  {entry['id']}: graph refused ({exc}) -> direct")
             rows["orchestrator"].append(rows["direct"][-1])
             continue
-        step_counts.append(len(execution_plan.steps))
-        if not execution_plan.steps:
+        step_counts.append(len(graph.tool_nodes()))
+        if not graph.tool_nodes():
             fell_back += 1
             rows["orchestrator"].append(rows["direct"][-1])
             continue
-        run = PlanRun(
-            execution_plan,
+        run = WorkflowRun(
+            graph,
             resources,
+            question=entry["question"],
             settings=settings,
             llm_provider=provider,
             sessionmaker=maker,
@@ -460,6 +532,17 @@ async def main() -> int:
         help="also measure Slice 3's Super Agent on the same questions. ONE planner "
         "call per question against the live API, plus one embedding per plan step, "
         "so it is the only mode here that is not free to re-run.",
+    )
+    parser.add_argument(
+        "--prefix-min",
+        default="2,3,4,5,6",
+        help="comma-separated minimum stem lengths for the prefix variants: a stem "
+        "shorter than this is matched exactly, one at least this long as ':*'.",
+    )
+    parser.add_argument(
+        "--trgm-min",
+        default="0.2,0.3,0.4,0.5",
+        help="comma-separated word_similarity thresholds for the trgm variants.",
     )
     parser.add_argument("--detail", action="store_true", help="per-question hit counts")
     parser.add_argument("--show", default="", help="question id to print per-slot detail for")
@@ -538,8 +621,20 @@ async def main() -> int:
         variants: dict = {
             "current": variant_current,
             "none": variant_none,
-            "prefix": variant_prefix,
-            "trgm": variant_trgm,
+            **{
+                f"prefix{n}": make_prefix(int(n))
+                for n in args.prefix_min.split(",")
+                if n.strip()
+            },
+            **{
+                name: make(float(t))
+                for t in args.trgm_min.split(",")
+                if t.strip()
+                for name, make in (
+                    (f"trgm{t.strip()}", make_trgm),
+                    (f"trgmgated{t.strip()}", make_trgm_gated),
+                )
+            },
             "pgbigram": variant_pgbigram,
             **build_lexical_variants(docs),
         }
@@ -549,7 +644,7 @@ async def main() -> int:
         wanted = (
             args.variants.split(",")
             if args.variants
-            else [v for v in variants if v not in ("trgm", "pgbigram")]
+            else [v for v in variants if not v.startswith("trgm") and v != "pgbigram"]
         )
 
         store = PgVectorStore(session)

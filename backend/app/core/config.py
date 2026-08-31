@@ -16,6 +16,15 @@ EMBEDDING_INPUT_TOKEN_LIMIT = 8191
 # Element ceiling for one embeddings request's input array.
 EMBEDDING_MAX_BATCH_SIZE = 2048
 
+# Hard ceiling on the EXTRA queries multi-query expansion may generate, whatever
+# QUERY_EXPANSION_COUNT asks for. Each one is a dense search plus a sparse search
+# plus two more RRF rankings, and past a handful the added rankings are
+# near-duplicates of each other while the latency is not. Here rather than in
+# app/retrieval/expansion.py for the same reason as the line above: the value
+# bounds a setting, so the validator that rejects the setting has to see it
+# without importing retrieval.
+MAX_EXTRA_QUERIES = 5
+
 # There is no capability query on the chat endpoint - a model that cannot see
 # images answers an image part with an opaque 400 - so vision support has to be
 # asserted, not discovered. Deliberately a short, conservative PREFIX allowlist:
@@ -86,6 +95,52 @@ class Settings(BaseSettings):
     rrf_k: int = 60
     retrieval_top_n: int = 6
     retrieval_candidate_limit: int = 20
+
+    # MULTI-QUERY EXPANSION: how many EXTRA retrieval queries an LLM writes from
+    # the question. 0 is off and off costs nothing - `hybrid_search` makes no
+    # completion call at 0. See app/retrieval/expansion.py for the mechanism.
+    #
+    # OFF BY DEFAULT BECAUSE IT DID NOT EARN ITS COST. Measured on the real
+    # 2578-chunk manual with the 31-question fixture, top_n=14:
+    #
+    #                                   recall@14  anchor@14  +latency  +cost/q
+    #   baseline                            0.935      0.871         -        -
+    #   expansion(3)                        0.935      0.871    ~0.9 s  ~$0.00005
+    #
+    # Identical on every group, including the two "josa" questions it was written
+    # for. The reason is structural and worth keeping: the dense half of the
+    # hybrid already embeds the question, and an embedding does not care which
+    # josa is attached - so the surface forms expansion generates were already
+    # being found by the vector side, and the sparse side they were meant to
+    # rescue contributes at EXPANSION_WEIGHT, below what the dense list already
+    # scored. A per-question completion for zero measured movement is exactly the
+    # stage that should ship off. Reproduce with
+    # `python scripts/eval_retrieval.py --variants current --expand-queries 0,3`.
+    query_expansion_count: int = 0
+    # Env-only, not on the settings screen: it is a model name, not a number, and
+    # it must stay a CHEAP model - expansion runs in front of every question and
+    # is worth a fraction of a cent, not a frontier completion.
+    query_expansion_model: str = "gpt-4o-mini"
+
+    # RERANK: the model name, and "" means no reranker. `make_reranker` reads
+    # exactly this; see app/retrieval/reranker.py for why the implementation is
+    # an LLM listwise rerank and not a local cross-encoder.
+    #
+    # OFF BY DEFAULT, and this one is a closer call than expansion. Same fixture,
+    # same corpus, top_n=14, candidate_limit=40:
+    #
+    #                                   recall@14  anchor@14  +latency  +cost/q
+    #   baseline (limit 20)                 0.935      0.871         -        -
+    #   rerank, gpt-4o-mini (limit 40)      0.935      0.839    ~3.4 s  ~$0.0021
+    #
+    # It costs ~$0.002 and three seconds per question to move anchor@14 DOWN. The
+    # candidate pool it is given is the thing to fix first (see
+    # RETRIEVAL_CANDIDATE_LIMIT), not the switch.
+    rerank_model: str = ""
+    # Well under LLM_TIMEOUT_SECONDS on purpose: a rerank that has not answered by
+    # then is worth less than the RRF order it would replace, and `LLMReranker`
+    # treats the timeout as its degradation path rather than as an error.
+    rerank_timeout_seconds: float = 20.0
     # The sparse ranking's weight in RRF. Textbook RRF is 1.0 - every retriever a
     # peer - and that is the value this was measured against, on the real 854-page
     # Korean examination manual with the 20-question set in
@@ -285,6 +340,29 @@ class Settings(BaseSettings):
     # validated against `selectable_models`: that allowlist is what a CLIENT may
     # name, and this is the operator's own choice.
     planner_model: str = ""
+    # Slice 6. The four ORCHESTRATOR_* bounds above now bound ONE executor,
+    # whoever authored the graph - a workflow a person drew is under the same
+    # wall clock and the same tool-call ceiling as a graph 슈퍼 에이전트 wrote,
+    # because there is one executor. They kept their names: an operator's .env is
+    # not the place the "에이전트" rename buys anything, and renaming a setting
+    # silently reverts a deployment to the default.
+    #
+    # Two new ones, because a graph can do two things a plan could not.
+    #
+    # NODES, not steps. A person's graph carries `input`, `answer` and possibly a
+    # `branch`, none of which is a step and none of which costs anything, so
+    # ORCHESTRATOR_MAX_STEPS (5) would refuse a perfectly ordinary four-search
+    # canvas. This is the ceiling on the whole picture, checked at SAVE and again
+    # at RUN - a graph row can be edited in the database, and a saved graph
+    # outlives the settings that were in force when it was saved.
+    workflow_max_nodes: int = 20
+    # HOW DEEP A WORKFLOW MAY CALL A WORKFLOW. Cycles are refused statically at
+    # save, but static refusal can only see the graphs that exist at that moment:
+    # a callee edited afterwards makes a cycle nobody re-checked. This is the
+    # counter that catches it at run, and it is why cycle detection is double.
+    # 3 rather than larger because each level multiplies the tool-call budget's
+    # worst case by the nodes at that level, and nobody has asked for deeper.
+    workflow_max_depth: int = 3
 
     @property
     def selectable_models(self) -> list[str]:
@@ -382,6 +460,15 @@ class Settings(BaseSettings):
             raise ValueError("RETRIEVAL_TOP_N must be >= 1")
         if self.retrieval_candidate_limit < 1:
             raise ValueError("RETRIEVAL_CANDIDATE_LIMIT must be >= 1")
+        # `expand_queries` clamps to MAX_EXTRA_QUERIES anyway, so this is not what
+        # protects the cost - it is what stops the clamp from being SILENT. An
+        # operator who sets 20 and gets 5 has a bill and a latency they did not
+        # ask for and no message saying why. Negative is off, which 0 already
+        # says, so it is a typo rather than an intention.
+        if not 0 <= self.query_expansion_count <= MAX_EXTRA_QUERIES:
+            raise ValueError(f"QUERY_EXPANSION_COUNT must satisfy 0 <= value <= {MAX_EXTRA_QUERIES}")
+        if self.rerank_timeout_seconds <= 0:
+            raise ValueError("RERANK_TIMEOUT_SECONDS must be > 0")
         # Same shape: a negative budget boots fine and then degrades into one
         # below-the-floor log per request forever, never an error.
         if self.answer_context_token_budget < 1:
@@ -413,6 +500,15 @@ class Settings(BaseSettings):
             raise ValueError("ORCHESTRATOR_TIMEOUT_SECONDS must be > 0")
         if self.orchestrator_approval_ttl_seconds < 1:
             raise ValueError("ORCHESTRATOR_APPROVAL_TTL_SECONDS must be >= 1")
+        # 3 is the floor, not 1: input + answer + one tool node is the smallest
+        # graph that does anything, and a ceiling below it would refuse every
+        # workflow at save with a message about a limit nobody set on purpose.
+        if self.workflow_max_nodes < 3:
+            raise ValueError("WORKFLOW_MAX_NODES must be >= 3")
+        # 1 means "a workflow may not call a workflow", which is a legitimate
+        # deployment choice; 0 would refuse the top-level run itself.
+        if self.workflow_max_depth < 1:
+            raise ValueError("WORKFLOW_MAX_DEPTH must be >= 1")
         # A typo here is the one that matters: an unrecognised level would make
         # `RISK_LEVELS.index(...)` raise on the first plan that names a tool, and
         # an operator who wrote "destructve" would get an unattended destructive

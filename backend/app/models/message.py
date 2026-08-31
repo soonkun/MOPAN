@@ -50,18 +50,23 @@ class Message(Base):
 
     # Observability seam (Slice 5 reads these; Slice 4 fills prompt_version).
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    # WHICH AGENT ANSWERED, beside the model and the prompt version because it is
-    # the same kind of fact: what this answer was produced under. NULL means the
-    # default agent - the app behaving exactly as it did before agents existed -
-    # which is also every row written before migration 0008.
+    # WHICH WORKFLOW ANSWERED, beside the model and the prompt version because it
+    # is the same kind of fact: what this answer was produced under. NULL means no
+    # workflow was named - the app behaving exactly as it did before any of this
+    # existed - which is also every row written before migration 0008.
     #
-    # A NAME, not a foreign key into `agents`, and that is the deliberate part:
+    # A NAME, not a foreign key into `workflows`, and that is the deliberate part:
     # `model` and `prompt_name` are already denormalised strings for this reason.
-    # An agent is configuration an admin deletes when it stops being useful, and
-    # a transcript that answers "which agent said this" with a 404 - or worse,
-    # cascades the message away with it - is not a record. uq_agents_name makes
+    # A workflow is configuration an admin deletes when it stops being useful, and
+    # a transcript that answers "which workflow said this" with a 404 - or worse,
+    # cascades the message away with it - is not a record. uq_workflows_name makes
     # the name identify one row while it exists, and the string outlives it.
-    agent_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    workflow_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # WHICH VERSION of it. An integer for the same reason the name is a string:
+    # `workflow_versions` rows go away with their workflow, and "answered by
+    # 현장 도우미 v2" has to stay readable afterwards. NULL on every row written
+    # before Slice 6 and on every answer no workflow produced.
+    workflow_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     prompt_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     prompt_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
     usage: Mapped[dict] = mapped_column(

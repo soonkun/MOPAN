@@ -7,16 +7,16 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.service import (
-    DEFAULT_AGENT,
-    TOOL_NOT_ALLOWED_MESSAGE,
-    ResolvedAgent,
-)
 from app.core.config import Settings
 from app.core.logging import log_event
 from app.mcp.client import MCPClient, MCPError, MCPTarget
 from app.models.mcp import DEFAULT_RISK_LEVEL, McpServer, McpTool
 from app.retrieval.evidence import Evidence
+from app.workflow.catalogue import (
+    DEFAULT_WORKFLOW,
+    TOOL_NOT_ALLOWED_MESSAGE,
+    ResolvedWorkflow,
+)
 
 logger = logging.getLogger("mopan.mcp")
 
@@ -151,7 +151,7 @@ class PendingToolCall:
 async def load_tool_calls(
     db: AsyncSession,
     requested: list[tuple[uuid.UUID, dict]],
-    agent: ResolvedAgent = DEFAULT_AGENT,
+    workflow: ResolvedWorkflow = DEFAULT_WORKFLOW,
 ) -> list[PendingToolCall]:
     """Resolve tool ids to callable targets, or refuse.
 
@@ -161,13 +161,13 @@ async def load_tool_calls(
     no status line left to set - a 404 would degrade into an error frame inside
     a 200.
 
-    THE AGENT CHECK IS HERE, not in the router, because this is the manual half
-    of the same boundary `load_available` keeps for the planner. Restricting an
-    agent to read-only tools would mean nothing if the user could pick a
+    THE WORKFLOW CHECK IS HERE, not in the router, because this is the manual
+    half of the same boundary `load_available` keeps for a graph. Restricting a
+    workflow to read-only tools would mean nothing if the user could pick a
     `destructive` one out of the composer's own tool picker on the very same
-    turn - the planner would be fenced and the human would not be, which is the
-    wrong way round. DEFAULT_AGENT allows everything, so the pre-agent behaviour
-    is unchanged.
+    turn - the graph would be fenced and the human would not be, which is the
+    wrong way round. DEFAULT_WORKFLOW allows everything, so a request that names
+    no workflow behaves exactly as it always did.
     """
     if not requested:
         return []
@@ -191,9 +191,9 @@ async def load_tool_calls(
             # 409, not the 404 above: the row exists and an admin turned it off,
             # so there is nothing to conceal - only a state to explain.
             raise HTTPException(status_code=409, detail=TOOL_UNAVAILABLE_MESSAGE)
-        if not agent.allows_tool(tool.id):
+        if not workflow.allows_tool(tool.id):
             # 403, not the 409 above: the tool is fine and enabled, the CALLER is
-            # not allowed to reach it through this agent. Checked before the
+            # not allowed to reach it through this workflow. Checked before the
             # risk_level rule so the message names the real reason.
             raise HTTPException(status_code=403, detail=TOOL_NOT_ALLOWED_MESSAGE)
         if tool.risk_level == "destructive":

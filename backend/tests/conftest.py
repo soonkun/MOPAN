@@ -32,13 +32,16 @@ TABLES_IN_DELETE_ORDER = (
     "messages",
     "conversations",
     # Before `collections` and `mcp_tools`, which they point at, and before
-    # `agents`, which they cascade from. Without these two here a "when the
-    # agents table is empty" test would pass with its guard removed, because the
-    # table would never actually be empty - the trap this list already documents
-    # for app_settings.
-    "agent_collections",
-    "agent_tools",
-    "agents",
+    # `workflows`, which they cascade from. Without these here a "when the
+    # workflows table is empty" test would pass with its guard removed, because
+    # the table would never actually be empty - the trap this list already
+    # documents for app_settings. `workflow_versions` is in the same position:
+    # it cascades from `workflows`, and a leftover version row is a graph that
+    # would still be listed in the `@` menu.
+    "workflow_collections",
+    "workflow_tools",
+    "workflow_versions",
+    "workflows",
     "chunks",
     "documents",
     "collections",

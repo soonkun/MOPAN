@@ -6,6 +6,7 @@
     "every re-ingestion, page numbers do not. `anchor` is a verbatim substring of the gold",
     "passage - if the extractor changes and a page shifts, grep the anchor to re-locate it.",
     "`group` splits the set. Absent or \"base\" is the original 21 questions. \"neighbor\" is the 8 written FROM measured proviso splits: the rule is in one chunk and the 다만/그러나 that qualifies it is in the NEXT one, so retrieving only the rule chunk yields a confidently wrong answer. Their `anchor` is the proviso sentence, which is what makes them able to detect NEIGHBOR_EXPANSION at all - the base questions cannot, because none of them was chosen for spanning a chunk boundary.",
+    "\"josa\" is the 2 written FROM the measured josa-mismatch bug, one in each direction: q30 asks a bare noun the corpus only ever writes with a josa glued on (query shorter than the document token), q31 asks with a josa the corpus writes bare (query longer). A fix that only strips or only extends in one direction moves one of these two and not the other, which is the point of having both.",
     "Run with: python scripts/eval_retrieval.py"
   ],
   "document_filename": "특허·실용신안 심사기준.pdf",
@@ -286,6 +287,24 @@
         78
       ],
       "anchor": "신청인이 책임질 수 없는 사유가 발생하거나 국내단계에 진입하는 국제특허출원 등 지정기간의 추가 연장이 필요하다고 인정되는 경우에는 추가 연장이 가능하다"
+    },
+    {
+      "id": "q30-상표등록출원-조약우선권기초",
+      "group": "josa",
+      "question": "상표등록출원",
+      "gold_pages": [
+        573
+      ],
+      "anchor": "상표등록출원이나 서비스마크는 성격상 특허의 우선권주장의 기초 출원으로 인정할 수 없다"
+    },
+    {
+      "id": "q31-특허고객번호-출원서기재사항",
+      "group": "josa",
+      "question": "특허고객번호는 어디에 기재하나요?",
+      "gold_pages": [
+        148
+      ],
+      "anchor": "그 외에도 특허고객번호, 우선권주장여부"
     }
   ]
 }

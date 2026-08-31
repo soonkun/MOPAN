@@ -86,12 +86,12 @@ class TraceRetrieval(BaseModel):
 
 
 class TracePlanStep(BaseModel):
-    """One step of a Super Agent plan, as it actually ran.
+    """One NODE of a workflow graph, as it actually ran.
 
-    `state` is the field worth reading: `done`, `failed` (recorded and the plan
-    carried on), `skipped` (the human refused it), or `timeout` (the plan's wall
-    clock ran out before it started). `error` carries the Korean sentence that
-    goes with the last three.
+    `state` is the field worth reading: `done`, `failed` (recorded and the run
+    carried on), `skipped` (the human refused it, or a branch did not select it),
+    or `timeout` (the run's wall clock ran out before it started). `error`
+    carries the Korean sentence that goes with the last three.
     """
 
     id: str
@@ -107,18 +107,33 @@ class TracePlanStep(BaseModel):
     evidence_count: int = 0
     ms: int = 0
     error: str | None = None
+    # How deep this node ran. 0 is the graph the request named; 1 and above are
+    # nodes inside a workflow another workflow called, which is the one thing a
+    # flat step list could not otherwise show.
+    depth: int = 0
 
 
 class TracePlan(BaseModel):
-    """The plan behind an answer, or the record that there was not one.
+    """The graph behind an answer, or the record that there was not one.
 
-    Absent entirely on the direct RAG path - the orchestrator is opt-in, and most
-    answers have no plan. Present with `steps: []` and `refused` set when the
-    planner produced something the executor would not run, which is the case this
-    screen exists to explain: the answer came from the direct path and the reason
-    is a sentence, not a shrug.
+    **ONE SHAPE, whoever authored the graph.** `author` is the only field that
+    differs between a 워크플로우 a person drew and one 슈퍼 에이전트 wrote, and it is
+    a field rather than a second trace on purpose: two trace shapes would make
+    "which one am I looking at" unanswerable on the screen.
+
+    Absent entirely on the direct RAG path, which is still the default and still
+    most answers. Present with `steps: []` and `refused` set when an author
+    produced something the executor would not run, which is the case this screen
+    exists to explain: the answer came from the direct path and the reason is a
+    sentence, not a shrug.
     """
 
+    # 사람 or 슈퍼 에이전트. None on every trace written before Slice 6.
+    author: str | None = None
+    # Which workflow, and which version of it. Both null when 슈퍼 에이전트 ran
+    # without one selected.
+    workflow_name: str | None = None
+    workflow_version: int | None = None
     steps: list[TracePlanStep] = Field(default_factory=list)
     step_count: int = 0
     tool_step_count: int = 0
@@ -128,7 +143,9 @@ class TracePlan(BaseModel):
     refused: str | None = None
     budget_seconds: float | None = None
     max_steps: int | None = None
+    max_nodes: int | None = None
     max_tool_calls: int | None = None
+    max_depth: int | None = None
     approval_risk_level: str | None = None
 
 
@@ -139,10 +156,11 @@ class TraceResponse(BaseModel):
 
     # Straight off the Message columns Slice 1 added for this.
     model: str | None = None
-    # WHICH AGENT ANSWERED. Null for the default agent and for every answer
-    # written before agents existed, which the screen renders as 기본 - the same
-    # sentence, because they are the same fact.
-    agent_name: str | None = None
+    # WHICH WORKFLOW ANSWERED, and which version. Null when none was named and
+    # for every answer written before workflows existed, which the screen renders
+    # as 기본 - the same sentence, because they are the same fact.
+    workflow_name: str | None = None
+    workflow_version: int | None = None
     prompt_name: str | None = None
     prompt_version: str | None = None
     latency_ms: int | None = None

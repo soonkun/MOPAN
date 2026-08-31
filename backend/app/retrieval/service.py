@@ -10,6 +10,7 @@ from app.llm.base import LLMProvider
 from app.models.chunk import Chunk
 from app.models.document import Document
 from app.retrieval.evidence import Evidence, RetrievedChunk, chunk_to_evidence
+from app.retrieval.expansion import EXPANSION_WEIGHT, expand_queries
 from app.retrieval.keyword_search import keyword_search
 from app.retrieval.neighbors import ExpansionMode, expand
 from app.retrieval.reranker import Reranker
@@ -58,8 +59,12 @@ async def hybrid_search(
     neighbor_expansion: ExpansionMode = "off",
     chunk_overlap: int = 0,
     token_budget: int = 0,
+    query_expansion: int = 0,
+    query_expansion_model: str = "",
+    query_expansion_weight: float = EXPANSION_WEIGHT,
 ) -> list[Evidence]:
-    """Query -> (dense + sparse) -> RRF -> rerank -> top-N -> expand -> Evidence.
+    """Query -> expand -> (dense + sparse) per query -> RRF -> rerank -> top-N
+    -> neighbours -> Evidence.
 
     RRF and the reranker are separate, separately configurable stages: RRF is
     arithmetic over two rank lists, the reranker is a model. Swapping in a
@@ -72,29 +77,61 @@ async def hybrid_search(
     after the top-N cut - a neighbour is not a candidate competing for a slot, it
     is text added to a slot that was already won - and BEFORE build_prompt's
     budget, which is why `token_budget` is passed rather than assumed.
+
+    QUERY EXPANSION is the last three arguments and they DEFAULT TO OFF for the
+    same reason: at `query_expansion=0` nothing here calls a completion model, so
+    the shape of this function is unchanged and so is its bill. Above 0 the
+    question becomes several queries (app/retrieval/expansion.py) and EACH one
+    contributes its own dense and sparse rankings to RRF as separate lists -
+    which is the point, and is why `reciprocal_rank_fusion` had to stop relying
+    on two-term float sums before this landed; see its docstring.
     """
     started = time.perf_counter()
-    # Embedding first, before the first DB statement, so THIS function opens no
-    # transaction across the network call. That is only half of it: the property
+    # Both network calls happen before the first DB statement, so THIS function
+    # opens no transaction across either. That is only half of it: the property
     # holds end to end only if the caller has nothing open either. A caller that
     # loads the conversation from `db` and then calls in here re-opens the exact
     # hazard - Task 17 is that caller, and it must commit or close first.
-    [query_embedding] = await llm_provider.embed([query])
+    queries = (
+        await expand_queries(
+            llm_provider, query, count=query_expansion, model=query_expansion_model
+        )
+        if query_expansion > 0
+        else [query]
+    )
+    # ONE embed call for every query, not one per query: the endpoint batches, and
+    # `expand_queries` guarantees the original is queries[0] so the correspondence
+    # below needs nothing threaded through it.
+    embeddings = await llm_provider.embed(queries)
 
-    vector_hits = await vector_store.search(query_embedding, candidate_limit, collection_ids)
-    vector_ids = [hit.chunk_id for hit in vector_hits]
-    keyword_ids = await keyword_search(db, query, candidate_limit, collection_ids)
+    rankings: list[list[str]] = []
+    weights: list[float] = []
+    for position, (text, embedding) in enumerate(zip(queries, embeddings, strict=True)):
+        # The original question's two rankings are weighted 1.0; every expansion's
+        # are demoted, because a paraphrase is a guess about what was meant and
+        # must not be able to seat its own rank 1 above the real question's
+        # results. See EXPANSION_WEIGHT for the arithmetic.
+        weight = 1.0 if position == 0 else query_expansion_weight
+        hits = await vector_store.search(embedding, candidate_limit, collection_ids)
+        rankings.append([hit.chunk_id for hit in hits])
+        weights.append(weight)
+        rankings.append(await keyword_search(db, text, candidate_limit, collection_ids))
+        # The dense list is weighted 1.0 and the sparse list below it, because on
+        # the Korean corpus they are not peers - see the note over
+        # Settings.sparse_weight for the measurement. The default here is 1.0,
+        # plain RRF, so this function keeps its textbook behaviour for a caller
+        # that says nothing; only the application wiring in chat/service.py opts
+        # into the demotion.
+        weights.append(weight * sparse_weight)
 
-    # The dense list is weighted 1.0 and the sparse list below it, because on the
-    # Korean corpus they are not peers - see the note over Settings.sparse_weight
-    # for the measurement. The default here is 1.0, plain RRF, so this function
-    # keeps its textbook behaviour for a caller that says nothing; only the
-    # application wiring in chat/service.py opts into the demotion.
-    fused = reciprocal_rank_fusion(
-        [vector_ids, keyword_ids], k=rrf_k, weights=[1.0, sparse_weight]
-    )[:candidate_limit]
-    vector_rank = _ranks(vector_ids)
-    keyword_rank = _ranks(keyword_ids)
+    fused = reciprocal_rank_fusion(rankings, k=rrf_k, weights=weights)[:candidate_limit]
+    # The ORIGINAL question's ranks, deliberately, not the union's. `vector_rank`
+    # in a trace answers "where did the user's own question put this?", and a
+    # chunk that only an expansion found reads as rank None - which is true and is
+    # the interesting fact about it. rankings[0] and [1] are the original's
+    # because expand_queries puts it first.
+    vector_rank = _ranks(rankings[0])
+    keyword_rank = _ranks(rankings[1])
 
     # The union of two candidate_limit-long lists can be twice candidate_limit,
     # so the slice above is a real cap on what the reranker is asked to score.
@@ -145,8 +182,9 @@ async def hybrid_search(
     log_event(
         logger,
         "hybrid_search",
-        vector_hits=len(vector_ids),
-        keyword_hits=len(keyword_ids),
+        queries=len(queries),
+        vector_hits=len(rankings[0]),
+        keyword_hits=len(rankings[1]),
         candidates=len(candidates),
         selected=len(selected),
         expanded=sum(1 for chunk in selected if chunk.neighbors),

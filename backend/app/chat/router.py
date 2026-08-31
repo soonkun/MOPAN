@@ -11,7 +11,6 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.agents.service import AgentScopeError, ResolvedAgent, load_agent
 from app.attachments.service import (
     attachment_root,
     load_claimable,
@@ -33,21 +32,8 @@ from app.models.attachment import Attachment
 from app.models.conversation import Conversation
 from app.models.message import Message
 from app.models.user import User
-from app.orchestrator.approval import (
-    APPROVAL_NOT_FOUND_MESSAGE,
-    consume_pending,
-    store_pending,
-)
-from app.orchestrator.executor import (
-    PlanRun,
-    empty_plan_trace,
-    evidence_from_dict,
-    evidence_to_dict,
-)
-from app.orchestrator.plan import ExecutionPlan, PlanError, load_available, validate_plan
-from app.orchestrator.planner import plan as make_plan
 from app.retrieval.evidence import Evidence
-from app.retrieval.reranker import NoneReranker
+from app.retrieval.reranker import make_reranker
 from app.retrieval.vector_store import PgVectorStore
 from app.schemas.chat import (
     AnswerModelResponse,
@@ -57,6 +43,27 @@ from app.schemas.chat import (
     MessageResponse,
 )
 from app.schemas.search import EvidenceResponse, SearchRequest, SearchResponse
+from app.workflow.approval import (
+    APPROVAL_NOT_FOUND_MESSAGE,
+    consume_pending,
+    store_pending,
+)
+from app.workflow.catalogue import (
+    ResolvedWorkflow,
+    WorkflowScopeError,
+    load_available,
+    load_workflow,
+)
+from app.workflow.executor import (
+    AUTHOR_HUMAN,
+    AUTHOR_SUPER_AGENT,
+    WorkflowRun,
+    empty_run_trace,
+    evidence_from_dict,
+    evidence_to_dict,
+)
+from app.workflow.graph import GraphError, WorkflowGraph, validate_graph
+from app.workflow.planner import plan as make_plan
 
 logger = logging.getLogger("mopan.chat")
 router = APIRouter(prefix="/api", tags=["chat"])
@@ -98,8 +105,8 @@ def _sse(payload: dict) -> str:
 
 async def _pause_frame(
     redis: Redis,
-    run: PlanRun,
-    execution_plan: ExecutionPlan,
+    run: WorkflowRun,
+    graph: WorkflowGraph,
     *,
     settings: Settings,
     user: User,
@@ -109,28 +116,32 @@ async def _pause_frame(
     collection_ids: list[uuid.UUID] | None,
     attachment_ids: list[uuid.UUID],
     tool_evidence: list[Evidence],
-    agent: ResolvedAgent,
+    workflow: ResolvedWorkflow,
 ) -> dict:
     """Store everything the resume needs and return the frame that asks.
 
-    WHAT IS STORED IS NAMES, not resolved objects: the plan goes back to the
-    JSON shape the planner emitted, and the resume re-loads the catalogue and
-    re-validates against it. So a tool an admin disabled while the user was
-    deciding is refused on resume exactly as it would have been on a fresh
-    request - and no MCP auth token is written to Redis at any point.
+    **UNCHANGED FROM SLICE 3 IN EVERY RESPECT THAT MATTERS**, which is why it was
+    reused rather than redesigned: single-use token, `GETDEL` on consume, burned
+    on refusal, and NAMES stored rather than resolved objects.
+
+    WHAT IS STORED IS NAMES: the graph goes back to the JSON shape it was
+    authored in, and the resume re-loads the catalogue and re-validates against
+    it. So a tool an admin disabled while the user was deciding is refused on
+    resume exactly as it would have been on a fresh request - and no MCP auth
+    token is written to Redis at any point.
 
     The evidence already gathered rides along, so approving does not re-run the
-    steps that already finished. Re-running a `write` tool because a LATER step
+    nodes that already finished. Re-running a `write` tool because a LATER node
     needed its own approval is precisely the unattended repeat this gate exists
     to prevent.
 
-    The AGENT is stored as an id, for the same reason the plan is stored as
-    names: the resume re-loads it and re-narrows the catalogue against it, so an
-    agent an admin disabled - or whose tool list they trimmed - while the user
-    was deciding refuses the resumed plan exactly as it would refuse a fresh one.
+    The WORKFLOW is stored as an id, for the same reason the graph is stored as
+    names: the resume re-loads it and re-narrows the catalogue against it, so a
+    workflow an admin disabled - or whose tool list they trimmed - while the user
+    was deciding refuses the resumed run exactly as it would refuse a fresh one.
     """
-    step = run.pause
-    assert step is not None and step.tool is not None
+    node = run.pause
+    assert node is not None
     token = await store_pending(
         redis,
         {
@@ -138,17 +149,18 @@ async def _pause_frame(
             "conversation_id": str(conversation.id),
             "question": question,
             "model": model,
-            "agent_id": str(agent.id) if agent.id else None,
+            "workflow_id": str(workflow.id) if workflow.id else None,
+            "author": run.author,
             "collection_ids": [str(c) for c in collection_ids] if collection_ids else None,
             "attachment_ids": [str(a) for a in attachment_ids],
-            "plan": execution_plan.to_raw(),
+            "graph": graph.to_raw(),
             "results": {
-                step_id: [evidence_to_dict(item) for item in items]
-                for step_id, items in run.results.items()
+                node_id: [evidence_to_dict(item) for item in items]
+                for node_id, items in run.results.items()
             },
-            "step_trace": run.step_trace,
+            "node_trace": run.node_trace,
             "tool_evidence": [evidence_to_dict(item) for item in tool_evidence],
-            "awaiting": step.id,
+            "awaiting": node.id,
             "approved": sorted(run.approved),
             "denied": sorted(run.denied),
             "plan_ms": run.elapsed_ms,
@@ -161,12 +173,15 @@ async def _pause_frame(
         "expires_in": settings.orchestrator_approval_ttl_seconds,
         "conversation_id": str(conversation.id),
         "step": {
-            "id": step.id,
-            "label": step.label,
-            "server": step.tool.server_name,
-            "tool": step.tool.tool_name,
-            "risk_level": step.tool.risk_level,
-            "arguments": step.arguments,
+            "id": node.id,
+            "label": node.label,
+            # `server` is None for a `workflow:` node: there is no MCP server
+            # behind it, and the risk level it carries is the maximum of what its
+            # own graph calls. The client renders `tool` either way.
+            "server": node.tool.server_name if node.tool else None,
+            "tool": node.tool_ref,
+            "risk_level": node.risk_level,
+            "arguments": node.arguments,
         },
     }
 
@@ -187,26 +202,27 @@ async def _complete(
     images: list[str] | None,
     model: str,
     attachment_ids: list[uuid.UUID],
-    agent: ResolvedAgent,
+    workflow: ResolvedWorkflow,
 ) -> AsyncIterator[str]:
     """Everything after the evidence has been gathered: retrieve if there is
     none, answer, persist, emit `citations` and `done`.
 
     Shared by POST /api/chat and POST /api/chat/approve, which differ only in how
-    they got their evidence. A resumed plan has to end exactly the way a fresh
-    one does - same fallback, same trace, same `done` frame carrying the real row
-    id - and two copies of this would have diverged on the first bug fix.
+    they got their evidence. A resumed run has to end exactly the way a fresh one
+    does - same fallback, same trace, same `done` frame carrying the real row id -
+    and two copies of this would have diverged on the first bug fix.
 
-    `evidence` is what the turn already carries whatever the orchestrator did:
-    the user's own attachments, then the tools they picked by hand.
+    `evidence` is what the turn already carries whatever the graph did: the
+    user's own attachments, then the tools they picked by hand.
     """
     retrieval_ms = plan_ms
     fell_back = not plan_evidence
     if fell_back:
-        # THE FALLBACK. A plan that yielded nothing - refused, empty, every step
-        # failed, or the clock ran out before the first result - must not produce
-        # an ungrounded answer. It answers from the plain RAG path instead, which
-        # is also what keeps the Korean uncited-answer notice meaningful.
+        # THE FALLBACK. A run that yielded nothing - refused, a graph of just
+        # input and answer, every node failed, or the clock ran out before the
+        # first result - must not produce an ungrounded answer. It answers from
+        # the plain RAG path instead, which is also what keeps the Korean
+        # uncited-answer notice meaningful.
         yield _sse({"type": "status", "status": "searching"})
         started = time.perf_counter()
         async with sessionmaker() as retrieval_db:
@@ -214,16 +230,17 @@ async def _complete(
                 retrieval_db,
                 PgVectorStore(retrieval_db),
                 llm_provider,
-                NoneReranker(),
+                make_reranker(settings, llm_provider),
                 question,
                 settings=settings,
                 collection_ids=collection_ids,
                 # THE FALLBACK IS INSIDE THE BOUNDARY TOO. This is the path a
-                # refused or empty plan lands on, and an agent restricted to one
-                # collection whose plan was thrown away must not answer from the
-                # whole corpus instead. `retrieve` narrows again itself; passing
-                # the agent here is what makes that narrowing reachable.
-                agent=agent,
+                # refused or empty graph lands on, and a workflow restricted to
+                # one collection whose graph was thrown away must not answer from
+                # the whole corpus instead. `retrieve` narrows again itself;
+                # passing the workflow here is what makes that narrowing
+                # reachable.
+                workflow=workflow,
             )
         retrieval_ms += int((time.perf_counter() - started) * 1000)
     if plan_trace is not None:
@@ -238,7 +255,7 @@ async def _complete(
         settings=settings,
         images=images,
         model=model,
-        prompt_name=agent.prompt_name,
+        prompt_name=workflow.prompt_name,
     )
     if plan_trace is not None:
         # THE ACCEPTANCE TEST FOR THIS SLICE IS THAT answer() DID NOT CHANGE, so
@@ -256,7 +273,8 @@ async def _complete(
             chat_answer,
             retrieval_ms,
             attachment_ids=attachment_ids,
-            agent_name=agent.name,
+            workflow_name=workflow.name,
+            workflow_version=workflow.version,
         )
 
     yield _sse({"type": "citations", "citations": chat_answer.citations})
@@ -268,10 +286,11 @@ async def _complete(
             "content": chat_answer.content,
             "citations": chat_answer.citations,
             "model": chat_answer.model,
-            # Null for the default agent. Carried on the frame so the answer on
-            # screen says what produced it without waiting for a reload, exactly
-            # as `model` is.
-            "agent_name": agent.name,
+            # Null when no workflow answered. Carried on the frame so the answer
+            # on screen says what produced it without waiting for a reload,
+            # exactly as `model` is.
+            "workflow_name": workflow.name,
+            "workflow_version": workflow.version,
         }
     )
 
@@ -287,9 +306,15 @@ async def chat(
     redis: Redis = Depends(get_redis),
 ):
     """Server-Sent Events. Slice 1 emits status -> citations -> done; Slice 2
-    added `calling_tool`; Slice 3 adds `planning`, a `step` frame per plan step
-    and an `approval_required` frame the client answers with a second request.
-    The `token` event type is still reserved."""
+    added `calling_tool`; Slice 3 added `planning`, a `step` frame per step and an
+    `approval_required` frame the client answers with a second request. Slice 6
+    keeps every one of them and changes what produces them: a `step` frame is now
+    a graph NODE, and the graph is either the workflow's or one 슈퍼 에이전트 just
+    wrote. The `token` event type is still reserved.
+
+    **THERE IS ONE EXECUTION PATH BELOW.** A saved workflow and 슈퍼 에이전트 differ
+    only in where the graph came from; both then go through `WorkflowRun`. If
+    that ever stops being true, the slice has been undone."""
     # Resolved BEFORE the response starts. Once StreamingResponse begins the status
     # line is already on the wire, so nothing raised inside the generator can set
     # one: an unowned conversation id would degrade from 404 to a 200 carrying an
@@ -305,36 +330,41 @@ async def chat(
     # pays per call and this allowlist is the only thing standing between a forged
     # body and gpt-4o pricing - or a model that does not exist, whose 400 would
     # otherwise arrive as an error frame inside a 200 after the row was written.
-    # THE AGENT FIRST, because everything below is resolved against it. A missing
-    # id is a 404 and a disabled one a 409, both before the conversation exists -
-    # the rule every other pre-flight check in this function follows.
-    agent = await load_agent(db, payload.agent_id)
+    # THE WORKFLOW FIRST, because everything below is resolved against it. A
+    # missing id is a 404 and a disabled one a 409, both before the conversation
+    # exists - the rule every other pre-flight check in this function follows.
+    workflow = await load_workflow(db, payload.workflow_id)
 
-    # The agent supplies the DEFAULT, never the ceiling: the allowlist below is
+    # The workflow supplies the DEFAULT, never the ceiling: the allowlist below is
     # still the only thing that decides what reaches the provider, so a row whose
     # model an operator later dropped from ANSWER_MODELS is refused here exactly
     # as a forged body would be. An explicit `model` in the request still wins,
-    # which is what keeps the composer's own picker meaningful when an agent is
+    # which is what keeps the composer's own picker meaningful when a workflow is
     # selected.
-    model = payload.model or agent.answer_model or settings.answer_model
+    model = payload.model or workflow.answer_model or settings.answer_model
     if model not in settings.selectable_models:
         raise HTTPException(status_code=400, detail=f"사용할 수 없는 답변 모델입니다: {model}")
 
     # THE COLLECTION BOUNDARY, resolved before anything is written. `retrieve`
     # and `load_available` both narrow again on their own - this is not the
     # enforcement, it is the refusal: a question scoped to a collection this
-    # agent cannot reach gets a Korean 400 rather than an answer built from
+    # workflow cannot reach gets a Korean 400 rather than an answer built from
     # nothing, which would read as "the corpus does not say".
     try:
-        collection_ids = agent.scope_collections(payload.collection_ids)
-    except AgentScopeError as exc:
+        collection_ids = workflow.scope_collections(payload.collection_ids)
+    except WorkflowScopeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # An agent that carries the orchestrator turns it on; the per-question toggle
-    # can still turn it on for an agent that does not. There is deliberately no
-    # way to turn it OFF for an agent configured with it - that is the agent's
-    # configuration, and the composer shows the toggle forced on and says so.
-    use_orchestrator = payload.orchestrator or agent.orchestrator
+    # 슈퍼 에이전트 IS A PER-CONVERSATION CHOICE AND NOTHING ELSE NOW. It used to
+    # be turnable on by a row - `agents.orchestrator` - which is precisely how a
+    # fixed procedure ended up switching on autonomous planning. Migration 0010
+    # dropped that column; a workflow's remaining job on this path is the scope
+    # check, and it is applied below either way.
+    #
+    # When BOTH are present the model writes the graph and the workflow supplies
+    # the boundary, the prompt and the model: 슈퍼 에이전트 is a way of AUTHORING a
+    # graph, so a saved graph and an authored one cannot both run on one turn.
+    use_planner = payload.orchestrator
 
     attachment_ids = payload.attachment_ids or []
     if len(attachment_ids) > settings.max_attachments_per_message:
@@ -367,17 +397,35 @@ async def chat(
             detail=f"도구는 한 번에 최대 {settings.max_tool_calls_per_message}개까지 호출할 수 있습니다.",
         )
     pending_tool_calls = await load_tool_calls(
-        db, [(t.tool_id, t.arguments) for t in tool_requests], agent
+        db, [(t.tool_id, t.arguments) for t in tool_requests], workflow
     )
 
     # Loaded here, before the response starts, for the same reason everything
-    # above it is: this is the ONLY set of names the planner may use, and reading
-    # it needs the request's session. Narrowed by `collection_ids`, so a question
-    # scoped to one collection produces a plan that cannot search another.
-    # `agent` goes in with it: a tool the agent does not carry never enters the
-    # catalogue, so a plan naming it cannot be validated and is refused WHOLE
+    # above it is: this is the ONLY set of names a graph may use, and reading it
+    # needs the request's session. Narrowed by `collection_ids`, so a question
+    # scoped to one collection produces a graph that cannot search another.
+    # `workflow` goes in with it: a tool it does not carry never enters the
+    # catalogue, so a graph naming it cannot be validated and is refused WHOLE
     # rather than filtered - the same treatment a hallucinated name gets.
-    resources = await load_available(db, collection_ids, agent) if use_orchestrator else None
+    #
+    # ONE CATALOGUE FOR BOTH AUTHORS. The saved graph is re-validated against it
+    # too, never trusted because it was valid at save: an admin may have disabled
+    # a tool since, and a graph naming it has to be refused now.
+    needs_graph = use_planner or workflow.graph is not None
+    resources = await load_available(db, collection_ids, workflow) if needs_graph else None
+    saved_graph: WorkflowGraph | None = None
+    saved_graph_refused: str | None = None
+    if not use_planner and workflow.graph is not None:
+        try:
+            saved_graph = validate_graph(
+                workflow.graph, resources, settings=settings, self_id=workflow.id
+            )
+        except GraphError as exc:
+            # NOT a 400. The world changed under a graph that was valid when it
+            # was saved, and the question is still answerable from the direct
+            # path - the same posture a refused plan gets, recorded in the trace.
+            log_event(logger, "workflow_graph_refused", detail=str(exc))
+            saved_graph_refused = str(exc)
 
     if payload.conversation_id is None:
         conversation = Conversation(user_id=user.id, title=payload.message[:80])
@@ -409,66 +457,80 @@ async def chat(
                 yield _sse({"type": "status", "status": "calling_tool"})
                 tool_evidence = await run_tool_calls(pending_tool_calls, settings=settings)
 
-            # Phase 1: the plan, if the user asked for one. Every session below
-            # lives inside an `async with`, so a client disconnect - which reaches
-            # this generator as GeneratorExit/CancelledError at a yield - still
+            # Phase 1: the GRAPH. One of two things put it here - a person saved
+            # it, or the model just wrote it - and from the `WorkflowRun` below
+            # there is no difference at all. Every session inside the run lives
+            # in an `async with`, so a client disconnect - which reaches this
+            # generator as GeneratorExit/CancelledError at a yield - still
             # returns the connection.
             plan_evidence: list[Evidence] = []
             plan_trace: dict | None = None
             plan_ms = 0
-            if resources is not None:
+            graph: WorkflowGraph | None = saved_graph
+            author = AUTHOR_HUMAN
+            if saved_graph_refused is not None:
+                plan_trace = empty_run_trace(settings, refused=saved_graph_refused, author=AUTHOR_HUMAN)
+            if use_planner and resources is not None:
+                author = AUTHOR_SUPER_AGENT
                 yield _sse({"type": "status", "status": "planning"})
-                execution_plan: ExecutionPlan | None = None
                 try:
-                    execution_plan = await make_plan(
+                    graph = await make_plan(
                         payload.message, resources, llm_provider=llm_provider, settings=settings
                     )
-                except PlanError as exc:
-                    # A refused plan is a PLANNER failure, not a user error: the
+                except GraphError as exc:
+                    # A refused graph is a PLANNER failure, not a user error: the
                     # question is still answerable from the direct path, so it is
                     # recorded in the trace and the fallback below runs. This is
                     # where a hallucinated tool name ends up.
                     log_event(logger, "plan_refused", detail=str(exc))
-                    plan_trace = empty_plan_trace(settings, refused=str(exc))
-                if execution_plan is not None and execution_plan.steps:
-                    run = PlanRun(
-                        execution_plan,
-                        resources,
-                        settings=settings,
-                        llm_provider=llm_provider,
-                        sessionmaker=sessionmaker,
-                        reranker=NoneReranker(),
-                    )
-                    async for frame in run.stream():
-                        yield _sse(frame)
-                    if run.pause is not None:
-                        yield _sse(
-                            await _pause_frame(
-                                redis,
-                                run,
-                                execution_plan,
-                                settings=settings,
-                                user=user,
-                                conversation=conversation,
-                                question=payload.message,
-                                model=model,
-                                collection_ids=collection_ids,
-                                attachment_ids=attachment_ids,
-                                tool_evidence=tool_evidence,
-                                agent=agent,
-                            )
+                    plan_trace = empty_run_trace(settings, refused=str(exc), author=author)
+                    graph = None
+            if graph is not None and graph.tool_nodes():
+                # THE ONE EXECUTOR. Nothing below this line knows which author
+                # produced the graph except the `author` field it records.
+                run = WorkflowRun(
+                    graph,
+                    resources,
+                    question=payload.message,
+                    settings=settings,
+                    llm_provider=llm_provider,
+                    sessionmaker=sessionmaker,
+                    reranker=make_reranker(settings, llm_provider),
+                    author=author,
+                    workflow_name=workflow.name,
+                    workflow_version=workflow.version,
+                )
+                async for frame in run.stream():
+                    yield _sse(frame)
+                if run.pause is not None:
+                    yield _sse(
+                        await _pause_frame(
+                            redis,
+                            run,
+                            graph,
+                            settings=settings,
+                            user=user,
+                            conversation=conversation,
+                            question=payload.message,
+                            model=model,
+                            collection_ids=collection_ids,
+                            attachment_ids=attachment_ids,
+                            tool_evidence=tool_evidence,
+                            workflow=workflow,
                         )
-                        # TERMINAL. No answer is produced: the user is being asked
-                        # whether a high-risk tool may run, and answering now would
-                        # be answering a question that is still open.
-                        return
-                    plan_evidence = run.evidence()
-                    plan_trace = run.trace()
-                    plan_ms = run.elapsed_ms
-                elif execution_plan is not None:
-                    # An empty plan is a legitimate answer from the planner - "one
-                    # plain search would do" - and it falls through to exactly that.
-                    plan_trace = empty_plan_trace(settings)
+                    )
+                    # TERMINAL. No answer is produced: the user is being asked
+                    # whether a high-risk tool may run, and answering now would
+                    # be answering a question that is still open.
+                    return
+                plan_evidence = run.evidence()
+                plan_trace = run.trace()
+                plan_ms = run.elapsed_ms
+            elif graph is not None:
+                # A graph of just input and answer is a legitimate answer from the
+                # planner - "one plain search would do" - and a legitimate thing
+                # for a person to draw. It falls through to exactly that.
+                plan_trace = empty_run_trace(settings, author=author)
 
             # Phases 2 and 3. The user's own files first: they are the most
             # specific thing in the request, and build_prompt fills evidence in
@@ -495,7 +557,7 @@ async def chat(
                 images=images,
                 model=model,
                 attachment_ids=attachment_ids,
-                agent=agent,
+                workflow=workflow,
             ):
                 yield frame
         except LLMError:
@@ -565,8 +627,12 @@ async def approve(
     settings: Settings = Depends(get_app_settings),
     redis: Redis = Depends(get_redis),
 ):
-    """Resume a plan that paused on a high-risk step. Same SSE contract as
+    """Resume a run that paused on a high-risk node. Same SSE contract as
     POST /api/chat, because it is the same stream continued.
+
+    **The mechanism is Slice 3's, reused unchanged**: single-use token, `GETDEL`
+    on consume, burned on refusal, names in Redis rather than resolved objects.
+    What it resumes is a workflow graph now, whoever authored it.
 
     Everything that can refuse does so BEFORE the response starts, exactly as
     /api/chat resolves its model and its tool ids first: once a StreamingResponse
@@ -583,13 +649,13 @@ async def approve(
         raise HTTPException(status_code=404, detail=APPROVAL_NOT_FOUND_MESSAGE)
 
     conversation = await get_owned_conversation(db, uuid.UUID(stored["conversation_id"]), user)
-    # RE-LOADED, not carried across the pause, for the reason the plan is
-    # re-validated below: an admin may have disabled the agent or trimmed its
+    # RE-LOADED, not carried across the pause, for the reason the graph is
+    # re-validated below: an admin may have disabled the workflow or trimmed its
     # tool list while the user was deciding, and the resumed request has to be
-    # refused exactly as a fresh one would be. load_agent raises the same 404/409
-    # it raises on /api/chat, before the response starts.
-    stored_agent_id = stored.get("agent_id")
-    agent = await load_agent(db, uuid.UUID(stored_agent_id) if stored_agent_id else None)
+    # refused exactly as a fresh one would be. load_workflow raises the same
+    # 404/409 it raises on /api/chat, before the response starts.
+    stored_workflow_id = stored.get("workflow_id")
+    workflow = await load_workflow(db, uuid.UUID(stored_workflow_id) if stored_workflow_id else None)
     collection_ids = [uuid.UUID(c) for c in stored.get("collection_ids") or []] or None
     attachment_ids = [uuid.UUID(a) for a in stored.get("attachment_ids") or []]
     attachments = await load_claimable(db, attachment_ids, user)
@@ -597,24 +663,24 @@ async def approve(
     attachment_evidence = to_evidence(attachments)
 
     # RE-VALIDATED, not trusted across the pause. An admin may have disabled the
-    # tool or the whole server while the user was deciding, and a plan that names
+    # tool or the whole server while the user was deciding, and a graph that names
     # it must then be refused the way a fresh one would be - which is exactly what
-    # load_available + validate_plan already do, with no second rule to keep in
+    # load_available + validate_graph already do, with no second rule to keep in
     # step.
     try:
-        resources = await load_available(db, collection_ids, agent)
-    except AgentScopeError as exc:
-        # The agent's collections were trimmed under the pause and no longer
-        # cover the scope this question was asked with. Same 409 the refused plan
+        resources = await load_available(db, collection_ids, workflow)
+    except WorkflowScopeError as exc:
+        # The workflow's collections were trimmed under the pause and no longer
+        # cover the scope this question was asked with. Same 409 the refused graph
         # gets below, and for the same reason: the request was fine, the world
         # changed.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     try:
-        execution_plan = validate_plan(stored.get("plan"), resources, settings=settings)
-    except PlanError as exc:
+        graph = validate_graph(stored.get("graph"), resources, settings=settings)
+    except GraphError as exc:
         # 409, not 404: the request is well-formed and the token was real; the
         # world changed under it. Korean, because it reaches the user.
-        log_event(logger, "approval_plan_no_longer_valid", detail=str(exc))
+        log_event(logger, "approval_graph_no_longer_valid", detail=str(exc))
         raise HTTPException(
             status_code=409,
             detail="승인을 기다리는 동안 계획을 실행할 수 없게 되었습니다. 질문을 다시 보내 주세요.",
@@ -626,8 +692,8 @@ async def approve(
     (approved if payload.approved else denied).add(awaiting)
     log_event(
         logger,
-        "plan_approval_decided",
-        step=awaiting,
+        "workflow_approval_decided",
+        node=awaiting,
         approved=payload.approved,
         user_id=str(user.id),
     )
@@ -637,34 +703,40 @@ async def approve(
     model = stored["model"]
     tool_evidence = [evidence_from_dict(item) for item in stored.get("tool_evidence") or []]
     results = {
-        step_id: [evidence_from_dict(item) for item in items]
-        for step_id, items in (stored.get("results") or {}).items()
+        node_id: [evidence_from_dict(item) for item in items]
+        for node_id, items in (stored.get("results") or {}).items()
     }
 
     async def stream() -> AsyncIterator[str]:
         try:
-            run = PlanRun(
-                execution_plan,
+            run = WorkflowRun(
+                graph,
                 resources,
+                question=question,
                 settings=settings,
                 llm_provider=llm_provider,
                 sessionmaker=sessionmaker,
-                reranker=NoneReranker(),
+                reranker=make_reranker(settings, llm_provider),
                 approved=frozenset(approved),
                 denied=frozenset(denied),
                 results=results,
-                step_trace=list(stored.get("step_trace") or []),
+                node_trace=list(stored.get("node_trace") or []),
+                # Carried across the pause so the trace still says who wrote the
+                # graph. It is the only field the two authors differ on.
+                author=stored.get("author") or AUTHOR_HUMAN,
+                workflow_name=workflow.name,
+                workflow_version=workflow.version,
             )
             async for frame in run.stream():
                 yield _sse(frame)
             if run.pause is not None:
-                # A SECOND high-risk step. A new token, because the first one is
-                # already burned - approving one step is never approval of the next.
+                # A SECOND high-risk node. A new token, because the first one is
+                # already burned - approving one node is never approval of the next.
                 yield _sse(
                     await _pause_frame(
                         redis,
                         run,
-                        execution_plan,
+                        graph,
                         settings=settings,
                         user=user,
                         conversation=conversation,
@@ -673,7 +745,7 @@ async def approve(
                         collection_ids=collection_ids,
                         attachment_ids=attachment_ids,
                         tool_evidence=tool_evidence,
-                        agent=agent,
+                        workflow=workflow,
                     )
                 )
                 return
@@ -692,7 +764,7 @@ async def approve(
                 images=images,
                 model=model,
                 attachment_ids=attachment_ids,
-                agent=agent,
+                workflow=workflow,
             ):
                 yield frame
         except LLMError:
@@ -730,7 +802,7 @@ async def search(
         db,
         PgVectorStore(db),
         llm_provider,
-        NoneReranker(),
+        make_reranker(settings, llm_provider),
         payload.query,
         settings=effective,
         collection_ids=payload.collection_ids,

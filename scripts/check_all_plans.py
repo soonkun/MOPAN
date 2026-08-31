@@ -32,6 +32,11 @@ PLANS = [
     "docs/superpowers/plans/2026-08-30-prompt-budget.md",
     "docs/superpowers/plans/2026-08-31-ui-masthead-composer-sidebar.md",
     "docs/superpowers/plans/2026-08-31-agent-builder.md",
+    # Slice 6. It supersedes the backend halves of the slice-3, slice-4 and
+    # agent-builder plans: `app/orchestrator/` and `app/agents/` no longer exist,
+    # and rule 3 reads a later plan's block for a path as replacing an earlier
+    # one's. It says nothing about `frontend/`, which is another agent's.
+    "docs/superpowers/plans/2026-08-31-workflow-engine.md",
 ]
 
 missing = [p for p in PLANS if not (REPO / p).exists()]

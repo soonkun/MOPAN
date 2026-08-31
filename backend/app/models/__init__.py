@@ -1,4 +1,3 @@
-from app.models.agent import Agent, agent_collections, agent_tools
 from app.models.app_setting import AppSetting
 from app.models.attachment import ATTACHMENT_KINDS, Attachment
 from app.models.base import Base
@@ -17,13 +16,20 @@ from app.models.mcp import (
 from app.models.message import MESSAGE_ROLES, Message
 from app.models.prompt import Prompt
 from app.models.user import USER_ROLES, User
+from app.models.workflow import (
+    Workflow,
+    WorkflowVersion,
+    workflow_collections,
+    workflow_tools,
+)
 
 __all__ = [
     "Base",
     "User",
-    "Agent",
-    "agent_collections",
-    "agent_tools",
+    "Workflow",
+    "WorkflowVersion",
+    "workflow_collections",
+    "workflow_tools",
     "Collection",
     "Document",
     "Chunk",
