@@ -31,6 +31,8 @@ def _evidence(
     vector_rank: int | None = 1,
     keyword_rank: int | None = 1,
     corroborated: bool | None = None,
+    candidates_corroborated: bool | None = None,
+    variants: int = 1,
     source_type: str = "rag",
 ) -> Evidence:
     # Defaults to what the two ranks imply, which is what `hybrid_search` computes
@@ -38,6 +40,11 @@ def _evidence(
     # keeps asserting the same thing. A test that expands passes it explicitly.
     if corroborated is None:
         corroborated = vector_rank is not None and keyword_rank is not None
+    # Defaults to the delivered item's own verdict, which is what `hybrid_search`
+    # computes whenever the corroborated candidate survived the top_n cut. A test
+    # about the cut passes the two apart.
+    if candidates_corroborated is None:
+        candidates_corroborated = corroborated
     return Evidence(
         source_type=source_type,
         ref=f"chunk:{index}",
@@ -52,6 +59,8 @@ def _evidence(
             "vector_rank": vector_rank,
             "keyword_rank": keyword_rank,
             "corroborated": corroborated,
+            "candidates_corroborated": candidates_corroborated,
+            "variants": variants,
             "rrf_score": rrf_score,
         },
     )
@@ -136,6 +145,74 @@ def test_evidence_both_arms_found_only_for_a_rewrite_is_not_weak():
     items = [
         _evidence(index=1, rrf_score=0.0650, vector_rank=None, keyword_rank=2, corroborated=True),
     ]
+
+    assert evidence_is_weak(items, min_rrf_score=THRESHOLD) is False
+
+
+def test_corroboration_below_the_top_n_cut_still_counts_as_corroboration():
+    """The second bug in the same signal, and the owner's question is the case.
+
+    The delivered items are what survived RETRIEVAL_TOP_N; the question the
+    detector asks is about RETRIEVAL. On 상표등록출원서 + 류 + 지정상품 the
+    corroborated chunk sat at fused rank 8-9 of a 10-candidate set, TOP_N=5 cut
+    it, and the delivered five all carried corroborated=False - so the detector
+    read "the arms agreed on nothing" while 4 of the top 10 candidates were
+    agreed on, five runs out of five, at bestRRF 0.0489-0.0653 against a 0.0170
+    threshold. Every one was diverted to the clarify prompt.
+    """
+    items = [
+        _evidence(
+            index=1,
+            rrf_score=0.0492,
+            vector_rank=1,
+            keyword_rank=None,
+            corroborated=False,
+            candidates_corroborated=True,
+        ),
+    ]
+
+    assert evidence_is_weak(items, min_rrf_score=THRESHOLD) is False
+
+
+def test_a_candidate_set_that_corroborated_nothing_is_still_weak():
+    """The mirror, so the test above is not passing on a flag nothing can unset:
+    when neither reading finds agreement the verdict is unchanged."""
+    items = [
+        _evidence(
+            index=1,
+            rrf_score=0.0492,
+            vector_rank=1,
+            keyword_rank=None,
+            corroborated=False,
+            candidates_corroborated=False,
+        ),
+    ]
+
+    assert evidence_is_weak(items, min_rrf_score=THRESHOLD) is True
+
+
+def test_a_score_stacked_by_four_rewrites_does_not_clear_a_two_list_threshold():
+    """The retry must not be able to mark its own homework.
+
+    Every variant adds TWO ranked lists, so at expansion 3 a chunk that only the
+    sparse arm ever returned - at rank 1 for all four variants - scores
+    4/61 = 0.0656 and clears a 0.0170 bar four times over while nothing has
+    corroborated it. Measured live on the owner's question: the unexpanded pass
+    scored 0.0164 and was correctly clarified; the retry scored 0.0653 on the
+    same kind of evidence and answered "제9류" citing a passage about using
+    another's trademark in a goods name. Corroborated is pinned True here so the
+    agreement arm is out of the picture and only the scale is under test.
+    """
+    items = [_evidence(index=1, rrf_score=0.0656, variants=4, corroborated=True)]
+
+    assert evidence_is_weak(items, min_rrf_score=THRESHOLD) is True
+
+
+def test_the_same_score_from_one_query_is_not_weak():
+    """The mirror: 0.0656 off a SINGLE query is four arms-worth of agreement on
+    two lists, and diverting that would be the false trigger this file exists to
+    prevent. The number did not change; the number of lists behind it did."""
+    items = [_evidence(index=1, rrf_score=0.0656, variants=1, corroborated=True)]
 
     assert evidence_is_weak(items, min_rrf_score=THRESHOLD) is False
 

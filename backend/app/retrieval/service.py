@@ -175,6 +175,18 @@ async def hybrid_search(
     vector_rank = _ranks(vector_ids)
     keyword_rank = _ranks(keyword_ids)
 
+    # DID RETRIEVAL CORROBORATE ANYTHING, over the whole fused candidate set.
+    # Computed here rather than read off the delivered items downstream, because
+    # `selected` below is `fused` cut to top_n and the cut is exactly what hid
+    # this: on 상표등록출원서 + 류 + 지정상품 the corroborated chunk sat at fused
+    # rank 8-9, RETRIEVAL_TOP_N=5 dropped it, and the weak-evidence detector read
+    # the surviving five as "the arms agreed on nothing" - five runs, every one
+    # diverted to the clarify prompt while bestRRF was 3-4x its threshold. The
+    # question the detector asks is about the SEARCH, so it is answered where the
+    # search's own candidate set is still in scope.
+    any_corroborated = any(
+        chunk_id in dense_seen and chunk_id in sparse_seen for chunk_id, _ in fused
+    )
     # The union of two candidate_limit-long lists can be twice candidate_limit,
     # so the slice above is a real cap on what the reranker is asked to score.
     loaded = await _load_chunks(db, [chunk_id for chunk_id, _ in fused]) if fused else {}
@@ -199,6 +211,8 @@ async def hybrid_search(
                 vector_rank=vector_rank.get(chunk_id),
                 keyword_rank=keyword_rank.get(chunk_id),
                 corroborated=chunk_id in dense_seen and chunk_id in sparse_seen,
+                candidates_corroborated=any_corroborated,
+                variants=len(variants),
                 rrf_score=score,
             )
         )
@@ -238,6 +252,7 @@ async def hybrid_search(
         candidates=len(candidates),
         floored=evidence_floor,
         reranked=reranker is not None,
+        corroborated=any_corroborated,
         documents=len({chunk.document_id for chunk in selected}),
         selected=len(selected),
         expanded=sum(1 for chunk in selected if chunk.neighbors),

@@ -32,6 +32,25 @@ class RetrievedChunk:
     # query expansion the arms may only have agreed on a rewrite. The
     # weak-evidence detector reads this and nothing else for its second signal.
     corroborated: bool = False
+    # Did ANY candidate in the fused set - not just the top_n that survived the
+    # truncation - get found by both arms? The field above answers "was THIS
+    # chunk corroborated", which is a different question from the one the
+    # weak-evidence detector asks, and reading the first for the second is what
+    # made the detector fire on 상표등록출원서 + 류 + 지정상품: the corroborated
+    # chunk sat at fused rank 8-9 and RETRIEVAL_TOP_N=5 cut it, so the delivered
+    # five carried False five times over while retrieval had in fact agreed.
+    # Same value on every item of one search, because it is a property of the
+    # search and not of the chunk.
+    candidates_corroborated: bool = False
+    # HOW MANY QUERIES PRODUCED `rrf_score`. 1 for an unexpanded search, N+1 when
+    # the retry expanded. It is here because the RRF score is NOT comparable
+    # across those two cases and the weak-evidence threshold is a constant: every
+    # variant adds two ranked lists, so a chunk one arm alone found at rank 1 for
+    # all four variants scores 4/61 = 0.0656 - four times a threshold that was
+    # calibrated on two lists, where the same chunk scores 1/61 = 0.0164. Without
+    # this the retry marks its own homework with a ruler that grew, and a
+    # measured live case turned a clarification into a confidently wrong answer.
+    variants: int = 1
     rrf_score: float = 0.0
     rerank_score: float | None = None
     # What neighbour expansion folded into `content`, one entry per neighbour.
@@ -70,6 +89,8 @@ def chunk_to_evidence(chunk: RetrievedChunk) -> Evidence:
             "vector_rank": chunk.vector_rank,
             "keyword_rank": chunk.keyword_rank,
             "corroborated": chunk.corroborated,
+            "candidates_corroborated": chunk.candidates_corroborated,
+            "variants": chunk.variants,
             "rrf_score": chunk.rrf_score,
             "rerank_score": chunk.rerank_score,
             # The identity fields above all still name the PRIMARY chunk after

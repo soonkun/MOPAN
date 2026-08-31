@@ -485,6 +485,136 @@ async def test_hybrid_search_logs_its_stage_counts(db, corpus, caplog):
     assert fields["duration_ms"] >= 0
 
 
+# --- The corroboration signal, and the retry it triggers ---------------------
+
+
+async def test_corroboration_is_read_over_the_candidates_not_over_the_delivered(db, corpus):
+    """Two different questions, and the detector must ask the second one.
+
+    "Was THIS chunk found by both arms" is per item; "did retrieval corroborate
+    anything" is per search, and reading the first for the second turns
+    RETRIEVAL_TOP_N into part of the answer. Staged with the reverse reranker,
+    which is the cheapest way to push every corroborated candidate below the cut:
+    the delivered item is the one the dense arm alone found, while two chunks the
+    two arms agreed on sit in the candidate set above it.
+
+    The live case is the owner's 상표등록출원서 + 류 + 지정상품 question, where the
+    corroborated chunk sat at fused rank 8-9 of ten candidates and TOP_N=5 cut it.
+    """
+    from app.chat.service import evidence_is_weak
+
+    evidence = await _search(db, corpus, top_n=1, reranker=ReverseReranker())
+
+    assert len(evidence) == 1
+    assert evidence[0].metadata["corroborated"] is False
+    assert evidence[0].metadata["candidates_corroborated"] is True
+    # min_rrf_score=0 takes the SCORE arm out of the picture on purpose: this
+    # staged item scores 1/63 and the detector is an OR, so at the shipped
+    # threshold the verdict would be True for a reason this test is not about.
+    assert evidence_is_weak(evidence, min_rrf_score=0.0) is False
+
+
+class RewritingProvider(FakeLLMProvider):
+    """Query expansion faked at the provider seam - no network, and no rewrite is
+    ever produced by accident: `chat` is what expansion calls and nothing else in
+    this file calls it."""
+
+    def __init__(self, query_vector, rewrites=("토마토 역병 방제", "tomato blight")):
+        super().__init__(query_vector)
+        self.rewrites = list(rewrites)
+        self.chat_calls = 0
+        self.embedded: list[list[str]] = []
+
+    async def embed(self, texts):
+        self.embedded.append(list(texts))
+        # One vector per text, which is the contract `hybrid_search` zips against.
+        return [self.query_vector for _ in texts]
+
+    async def chat(self, messages, **kwargs):
+        from app.llm.base import ChatResult
+
+        self.chat_calls += 1
+        return ChatResult(content="\n".join(self.rewrites), model="gpt-4o-mini")
+
+
+def _retry_settings(**overrides):
+    from app.core.config import Settings
+
+    return Settings().model_copy(
+        update={
+            "query_expansion_count": 3,
+            # This fixture's rows were written by the 'simple' tokenizer; see the
+            # note on `corpus`. Left at the shipped 'bigram' the sparse arm would
+            # return nothing and every question here would look weak.
+            "sparse_tokenizer": "simple",
+            "neighbor_expansion": "off",
+            **overrides,
+        }
+    )
+
+
+async def test_a_first_pass_that_retrieves_well_never_pays_for_a_rewrite(db, corpus):
+    """The whole reason expansion can ship at all. Always-on cost the 52-question
+    fixture anchor 0.846 -> 0.788 and 0.18 s -> 10.2 s per question; a question the
+    corpus answers in its own vocabulary must not pay any of that."""
+    from app.chat.service import retrieve
+
+    provider = RewritingProvider(vec(1.0, 0.0, 0.0))
+    evidence = await retrieve(
+        db, PgVectorStore(db), provider, None, "tomato blight", settings=_retry_settings()
+    )
+
+    assert evidence
+    assert provider.chat_calls == 0
+    assert len(provider.embedded) == 1
+
+
+async def test_a_weak_first_pass_is_retried_with_rewrites_before_anyone_is_asked(db, corpus):
+    """'durian ripeness' reaches the durian chunk through the sparse arm only -
+    it has no embedding - while the dense arm returns the tomato chunks, so the
+    two arms agree on nothing and the best fused score is one arm at rank 1
+    (1/61 = 0.0164, under the 0.0170 threshold). Both signals fire, which is
+    exactly the state that used to go straight to the clarify prompt.
+
+    Ordering is the point: the rewrite is tried FIRST, and the user is asked only
+    if the retry also fails. Asking someone to rephrase before trying the rewrite
+    ourselves is asking them to do work we declined to do.
+    """
+    from app.chat.service import retrieve
+
+    provider = RewritingProvider(vec(1.0, 0.0, 0.0))
+    evidence = await retrieve(
+        db, PgVectorStore(db), provider, None, "durian ripeness", settings=_retry_settings()
+    )
+
+    assert provider.chat_calls == 1
+    # Two searches: the question alone, then the question plus its rewrites.
+    assert len(provider.embedded) == 2
+    assert provider.embedded[0] == ["durian ripeness"]
+    assert provider.embedded[1][0] == "durian ripeness"
+    assert len(provider.embedded[1]) > 1
+    assert evidence
+
+
+async def test_expansion_count_zero_makes_no_detector_call_and_no_completion(db, corpus):
+    """OFF IS ABSENT FROM THE CALL PATH, the rule this project deleted a
+    NoneReranker over. At 0 the retry is one `and` that short-circuits."""
+    from app.chat.service import retrieve
+
+    provider = RewritingProvider(vec(1.0, 0.0, 0.0))
+    await retrieve(
+        db,
+        PgVectorStore(db),
+        provider,
+        None,
+        "durian ripeness",
+        settings=_retry_settings(query_expansion_count=0),
+    )
+
+    assert provider.chat_calls == 0
+    assert len(provider.embedded) == 1
+
+
 async def test_keyword_search_scopes_to_the_named_collections(db, corpus):
     scoped = await keyword_search(db, "tomato blight", 20, collection_ids=[corpus["b"].id])
     assert scoped == [str(corpus["chunks"][2].id)]

@@ -3,6 +3,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from functools import partial
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -89,7 +90,8 @@ async def retrieve(
     # caller's already-loaded Conversation survives the commit unexpired.
     scoped = workflow.scope_collections(collection_ids)
     await db.commit()
-    return await hybrid_search(
+    search = partial(
+        hybrid_search,
         db,
         vector_store,
         llm_provider,
@@ -114,9 +116,8 @@ async def retrieve(
         # purpose: a workflow graph has already decomposed the question into
         # several RAG nodes, so expanding each of those would be paying a
         # completion to re-derive a decomposition the planner just made.
-        # QUERY_EXPANSION_COUNT is 0 by default, so this line costs nothing until
-        # someone turns it on.
-        query_expansion=settings.query_expansion_count,
+        # `query_expansion` itself is NOT bound here - it is the one argument
+        # that differs between the two passes below.
         query_expansion_model=settings.query_expansion_model,
         # A timeout, not a retry: expansion is an optimisation, so the arriving
         # answer must never wait on it longer than the search it was meant to
@@ -133,6 +134,52 @@ async def retrieve(
         # want one, and leaving it unreachable would mean re-deriving it later.
         evidence_floor=settings.evidence_floor_rrf_score,
     )
+
+    # EXPANSION IS A RETRY, NOT A STAGE. Measured at QUERY_EXPANSION_COUNT=3 on
+    # the 52-question fixture, always-on: anchor 0.846 -> 0.788, recall
+    # 0.846 -> 0.827, and 0.18 s -> 10.2 s PER QUESTION. Always-on cannot ship at
+    # that price, and always-off leaves the question that needs it unanswered -
+    # so the choice is not between the two. A question the corpus answers in its
+    # own vocabulary retrieves well on the first pass and never pays the second;
+    # a question phrased outside that vocabulary is exactly the one whose first
+    # pass comes back weak, and it gets the rewrite that rescues it.
+    #
+    # THE TRIGGER IS THE WEAK-EVIDENCE SIGNAL, the same judgement `answer()` uses
+    # to decide whether to ask the user back. One signal, two consequences, in
+    # this order: retry first, ask only if the retry ALSO failed. Asking a user
+    # to rephrase before trying the rewrite ourselves is asking them to do the
+    # work we declined to.
+    #
+    # At QUERY_EXPANSION_COUNT=0 the `and` short-circuits: no detector call, no
+    # completion, one comparison. Independent of CLARIFY_ON_WEAK_EVIDENCE on
+    # purpose - the retry is a retrieval improvement whether or not the operator
+    # wants the clarification branch.
+    evidence = await search(query_expansion=0)
+    if settings.query_expansion_count and evidence_is_weak(
+        evidence, min_rrf_score=settings.weak_evidence_rrf_score
+    ):
+        # For the same reason the caller had to commit before the first pass:
+        # `hybrid_search` has just loaded chunks, so this session holds an open
+        # read transaction, and the retry embeds before its first statement.
+        # Without this the connection sits idle-in-transaction across that round
+        # trip - the hazard the docstring above spends a paragraph on.
+        await db.commit()
+        retried = await search(query_expansion=settings.query_expansion_count)
+        log_event(
+            logger,
+            "retrieval_retried",
+            expansion=settings.query_expansion_count,
+            before=len(evidence),
+            after=len(retried),
+            # Did the second pass actually rescue it, or is this question about to
+            # reach the clarify branch anyway? The only number that says whether
+            # the retry earns its latency in production.
+            rescued=not evidence_is_weak(
+                retried, min_rrf_score=settings.weak_evidence_rrf_score
+            ),
+        )
+        evidence = retried
+    return evidence
 
 
 # The name of the prompt the weak-evidence branch answers with. A stored prompt
@@ -155,25 +202,45 @@ def evidence_is_weak(items: list[Evidence], *, min_rrf_score: float) -> bool:
     interrogates users who asked answerable questions is worse than the dead end
     it replaces.
 
-    1. THE BEST RRF SCORE is below `min_rrf_score`. RRF scores are comparable
-       across queries at a fixed rrf_k, which is what makes a threshold mean
-       anything: at k=60 a chunk found by BOTH arms at rank 1 scores 2/61, one
-       found by a single arm at rank 1 scores 1/61 = 0.0164, below the 0.0170
-       default. The best score, not `items[0]`'s: the reranker is allowed to
-       reorder this list, and taking the maximum is the reading that triggers
-       least often.
-    2. NOTHING IS CORROBORATED - no item was found by the dense arm AND the
-       keyword arm. With sparse_weight=1.0 and no query expansion this is
+    1. THE BEST RRF SCORE is below `min_rrf_score`, PER QUERY VARIANT. RRF scores
+       are comparable across queries at a fixed rrf_k, which is what makes a
+       threshold mean anything: at k=60 a chunk found by BOTH arms at rank 1
+       scores 2/61, one found by a single arm at rank 1 scores 1/61 = 0.0164,
+       below the 0.0170 default. The best score, not `items[0]`'s: the reranker
+       is allowed to reorder this list, and taking the maximum is the reading
+       that triggers least often.
+
+       THE DIVISION BY `variants` IS NOT A TWEAK OF THE THRESHOLD - it is what
+       keeps the threshold comparing like with like once the retry expands. Every
+       variant adds TWO ranked lists, so with four variants a chunk that only the
+       sparse arm ever returned, at rank 1 each time, scores 4/61 = 0.0656 and
+       clears a 0.0170 bar four times over while nothing has corroborated it.
+       Measured live on the owner's question: the first pass scored 0.0164 and
+       was correctly sent to the clarification; the retry scored 0.0653 on the
+       same kind of evidence, cleared this signal on inflation alone, and
+       answered "제9류" citing a passage about using someone else's trademark in
+       a goods name and a patent claim-drafting guide. A retry that marks its own
+       homework with a ruler that grew turns a dead end into a fabrication, which
+       is strictly worse than the dead end this whole branch exists to replace.
+    2. RETRIEVAL CORROBORATED NOTHING - no candidate was found by the dense arm
+       AND the keyword arm. With sparse_weight=1.0 and no query expansion this is
        implied by (1) and adds no new trigger; it stops being implied when N
        rewrites feed both arms, and one arm agreeing with itself N times is not
        agreement.
 
-       Read off `metadata["corroborated"]`, which `hybrid_search` computes over
-       EVERY variant's ranked lists - not off the vector_rank/keyword_rank pair,
-       which are the original query's positions and are None for a chunk that
-       both arms found only for a rewrite. Reading the pair made this signal fire
-       on 상표등록출원서 + 류 + 지정상품 at expansion 3 while the answer-bearing
-       chunk sat in slot 1 at four times the threshold.
+       THE SET IT READS IS THE FUSED CANDIDATE SET, not the delivered items -
+       `metadata["candidates_corroborated"]`, which `hybrid_search` computes
+       before the top_n truncation. The delivered reading asked "did a
+       corroborated item survive RETRIEVAL_TOP_N", which is a question about a
+       cut, not about retrieval, and it answers wrong whenever the corroborated
+       chunk lands below the cut: measured on 상표등록출원서 + 류 + 지정상품,
+       0 of the delivered 5 were corroborated while 4 of the top-10 candidates
+       were, five runs out of five, with bestRRF 0.0489-0.0653 against a 0.0170
+       threshold. Every one of those runs was diverted to the clarify prompt.
+
+       `metadata["corroborated"]` is still ORed in so that evidence built by
+       hand - a test, the eval harness's older rows - keeps its old verdict; a
+       delivered corroborated item is corroboration by any reading.
 
     SCATTER - top hits landing in unrelated sections - was considered and
     rejected. The questions whose evidence legitimately scatters are the
@@ -188,9 +255,16 @@ def evidence_is_weak(items: list[Evidence], *, min_rrf_score: float) -> bool:
     # attached the answer to is the worst false trigger available here.
     if any(item.source_type != "rag" for item in items):
         return False
-    if max(item.metadata.get("rrf_score") or 0.0 for item in items) < min_rrf_score:
+    best = max(
+        (item.metadata.get("rrf_score") or 0.0) / max(item.metadata.get("variants") or 1, 1)
+        for item in items
+    )
+    if best < min_rrf_score:
         return True
-    return not any(item.metadata.get("corroborated") for item in items)
+    return not any(
+        item.metadata.get("candidates_corroborated") or item.metadata.get("corroborated")
+        for item in items
+    )
 
 
 def _citations_from(answer_text: str, used: list[Evidence]) -> list[dict]:

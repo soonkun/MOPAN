@@ -5,6 +5,7 @@
     python scripts/eval_retrieval.py --sparse current,word_bm25,kiwi_bm25
     python scripts/eval_retrieval.py --dense small,large,bgem3
     python scripts/eval_retrieval.py --expand 0,3 --rerank ""  # stage by stage
+    python scripts/eval_retrieval.py --retry 3                 # expansion as a RETRY
 
 A SCRIPT, not a test: it talks to the running stack's Postgres and embeds each
 question once against the live OpenAI API. Every embedding is cached on disk
@@ -644,6 +645,13 @@ async def main() -> int:
     parser.add_argument("--dense", default="small", help=f"{','.join(DENSE_MODELS)} or none")
     parser.add_argument("--sparse", default="current", help="current,none,prefix,kiwi_ts,*_bm25")
     parser.add_argument("--expand", default="0", help="extra LLM-written queries, comma-separated")
+    parser.add_argument(
+        "--retry",
+        default="0",
+        help="CONDITIONAL expansion: rewrite the question into N extra queries and search "
+        "again ONLY when the first pass comes back weak by the weak-evidence signal. This "
+        "is the shape the product runs; --expand is the always-on one.",
+    )
     parser.add_argument("--rerank", default="", help="rerank model names, comma-separated; '' = off")
     parser.add_argument("--expansion", default=None, help="neighbour modes: off,targeted,blanket")
     parser.add_argument("--top-n", type=int, default=None)
@@ -885,14 +893,15 @@ async def main() -> int:
 
         # --- stages -----------------------------------------------------
         expands = [int(x) for x in args.expand.split(",") if x != ""]
+        retries = [int(x) for x in args.retry.split(",") if x != ""]
         floors = [float(x) for x in args.floor.split(",") if x != ""]
         reranks = args.rerank.split(",")
         arms = [a for a in args.arm.split(",") if a]
 
         header = (
             f"{'row':<40} {'group':<10} {'n':>3} {'recall':>7} {'anchor':>7} "
-            f"{'prec':>6} {'ms/q':>8} {'$/q':>10} {'clarify':>8} {'wk<':>4} {'wk!':>4} "
-            f"{'bestRRF':>8} {'deliv':>6}"
+            f"{'prec':>6} {'ms/q':>8} {'$/q':>10} {'clarify':>8} {'retry':>6} "
+            f"{'wk<':>4} {'wk!':>4} {'bestRRF':>8} {'deliv':>6} {'tok/q':>7}"
         )
 
         from app.llm.openai_provider import OpenAIProvider
@@ -914,6 +923,7 @@ async def main() -> int:
                     for weight in weights:
                         for floor in floors:
                           for n_expand in expands:
+                           for n_retry in retries:
                             for rerank_model in reranks:
                                 for mode in modes:
                                     label = f"{arm}/{dense_name}/{sparse_name}"
@@ -923,6 +933,8 @@ async def main() -> int:
                                         label += f"/f{floor}"
                                     if n_expand:
                                         label += f"/x{n_expand}"
+                                    if n_retry:
+                                        label += f"/r{n_retry}"
                                     if rerank_model:
                                         label += "/rr"
                                     label += f"/{mode}"
@@ -931,6 +943,7 @@ async def main() -> int:
                                         pages, docs, meta, dense_indexes, dense_vectors,
                                         sparse_arms, arm=arm, dense_name=dense_name,
                                         sparse_name=sparse_name, weight=weight, n_expand=n_expand,
+                                        n_retry=n_retry,
                                         rerank_model=rerank_model, mode=mode, top_n=top_n,
                                         limit=limit, rrf_k=rrf_k, show=args.show, floor=floor,
                                         query_cost=query_cost.get(dense_name, 0.0),
@@ -968,15 +981,100 @@ async def measure_row(
     label, session, provider, settings, questions, groups, pages, docs, meta,
     dense_indexes, dense_vectors, sparse_arms, *, arm, dense_name, sparse_name,
     weight, n_expand, rerank_model, mode, top_n, limit, rrf_k, show, query_cost, fuse,
-    floor=0.0,
+    floor=0.0, n_retry=0,
 ) -> None:
+    from app.chat.service import evidence_is_weak
     from app.core.tokens import count_tokens
+    from app.retrieval.evidence import chunk_to_evidence
 
     per_group = defaultdict(lambda: defaultdict(list))
     for entry in questions:
         query = entry["question"]
         started = time.perf_counter()
         cost = 0.0
+
+      # ONE RETRIEVAL PASS over a given list of queries. Extracted from the body
+      # it used to be so that the conditional-expansion row can run it twice:
+      # once on the question alone, and again on the question plus its rewrites
+      # if and only if the first pass came back weak. `--expand N` still runs it
+      # exactly once, on N+1 queries, which is the always-on shape.
+        async def one_pass(queries, *, _entry=entry, _query=query):
+            nonlocal cost
+            rankings: list[list[str]] = []
+            row_weights: list[float] = []
+            # Which ARM saw a chunk, over every variant - `hybrid_search` records the
+            # same two sets, and the weak-evidence detector reads them rather than the
+            # original query's rank pair. Tracked here too or the clarify column
+            # measures a field this harness never sets.
+            dense_seen: set[str] = set()
+            sparse_seen: set[str] = set()
+            for variant in queries:
+                if arm in ("dense", "hybrid") and dense_name != "none":
+                    vector = dense_vectors[dense_name].get(variant)
+                    if vector is None:
+                        vector = (await _embed_one(dense_name, variant, settings))
+                    rankings.append(dense_indexes[dense_name].search(vector, limit))
+                    dense_seen.update(rankings[-1])
+                    row_weights.append(1.0)
+                    cost += query_cost
+                if arm in ("sparse", "hybrid") and sparse_name != "none":
+                    rankings.append(await sparse_arms[sparse_name](session, variant, limit))
+                    sparse_seen.update(rankings[-1])
+                    row_weights.append(weight)
+
+            fused = fuse(rankings, k=rrf_k, weights=row_weights)[:limit] if rankings else []
+            selected = [cid for cid, _ in fused]
+            # THE RELEVANCE FLOOR, applied exactly where hybrid_search applies it:
+            # after fusion, before anything is loaded or reranked.
+            if floor > 0:
+                fused = [(cid, sc) for cid, sc in fused if sc >= floor]
+                selected = [cid for cid, _ in fused]
+            fused_scores = dict(fused)
+            # rankings[0]/[1] are the ORIGINAL query's dense and sparse lists by
+            # construction, which is what the product records in its trace too.
+            vector_rank = _ranks(rankings[0]) if arm != "sparse" and rankings else {}
+            keyword_rank = _ranks(rankings[1] if arm == "hybrid" else rankings[0]) if arm != "dense" and rankings else {}
+
+            if rerank_model:
+                from app.retrieval.reranker import LLMReranker
+                from app.retrieval.evidence import RetrievedChunk
+
+                candidates = [
+                    RetrievedChunk(chunk_id=c, document_id=str(meta[c].document_id), filename="",
+                                   content=meta[c].content, page=meta[c].page,
+                                   section=meta[c].section, chunk_index=meta[c].chunk_index)
+                    for c in selected if c in meta
+                ]
+                reranker = LLMReranker(provider, rerank_model, settings.rerank_timeout_seconds)
+                candidates = await reranker.rerank(query, candidates)
+                cost += getattr(reranker, "last_cost", 0.0)
+                selected = [c.chunk_id for c in candidates]
+
+            selected = selected[:top_n]
+            chunks = await expand_selection(session, selected, meta, mode=mode,
+                                            settings=settings, query=query)
+            # DID RETRIEVAL CORROBORATE ANYTHING, over the fused candidate set
+            # rather than over the top_n that survived the cut - the scope
+            # `hybrid_search` computes it at, and the reason this harness had to
+            # stop reading it off the delivered items: on the colloquial set the
+            # corroborated chunk lands at fused rank 8-9 and top_n=5 hides it.
+            any_corr = any(c in dense_seen and c in sparse_seen for c in fused_scores)
+            # Stamped HERE, not at the scoring site, because the retry decision
+            # below reads exactly the fields the clarify column reads.
+            for chunk, cid in zip(chunks, selected, strict=False):
+                chunk.rrf_score = fused_scores.get(cid, 0.0)
+                chunk.variants = len(queries)
+                chunk.corroborated = cid in dense_seen and cid in sparse_seen
+                chunk.candidates_corroborated = any_corr
+                chunk.vector_rank = vector_rank.get(cid)
+                chunk.keyword_rank = keyword_rank.get(cid)
+            return selected, chunks, fused_scores, any_corr
+
+        def weak(chunks) -> bool:
+            return evidence_is_weak(
+                [chunk_to_evidence(c) for c in chunks],
+                min_rrf_score=settings.weak_evidence_rrf_score,
+            )
 
         queries = [query]
         if n_expand:
@@ -989,59 +1087,25 @@ async def measure_row(
             )
             cost += expansion.last_cost_usd()
 
-        rankings: list[list[str]] = []
-        row_weights: list[float] = []
-        # Which ARM saw a chunk, over every variant - `hybrid_search` records the
-        # same two sets, and the weak-evidence detector reads them rather than the
-        # original query's rank pair. Tracked here too or the clarify column
-        # measures a field this harness never sets.
-        dense_seen: set[str] = set()
-        sparse_seen: set[str] = set()
-        for variant in queries:
-            if arm in ("dense", "hybrid") and dense_name != "none":
-                vector = dense_vectors[dense_name].get(variant)
-                if vector is None:
-                    vector = (await _embed_one(dense_name, variant, settings))
-                rankings.append(dense_indexes[dense_name].search(vector, limit))
-                dense_seen.update(rankings[-1])
-                row_weights.append(1.0)
-                cost += query_cost
-            if arm in ("sparse", "hybrid") and sparse_name != "none":
-                rankings.append(await sparse_arms[sparse_name](session, variant, limit))
-                sparse_seen.update(rankings[-1])
-                row_weights.append(weight)
+        selected, chunks, fused_scores, any_corr = await one_pass(queries)
+        # CONDITIONAL EXPANSION - `--retry N` - which is the shape the product
+        # runs (app/chat/service.py:retrieve). The first pass never expands; the
+        # rewrite is paid for only by a question whose first pass came back weak.
+        # `--expand N` above is the always-on shape, kept so the two can be
+        # compared on one run, and setting both is legal but measures nothing
+        # anybody ships.
+        retried = 0
+        if n_retry and weak(chunks):
+            from app.retrieval import expansion
 
-        fused = fuse(rankings, k=rrf_k, weights=row_weights)[:limit] if rankings else []
-        selected = [cid for cid, _ in fused]
-        # THE RELEVANCE FLOOR, applied exactly where hybrid_search applies it:
-        # after fusion, before anything is loaded or reranked.
-        if floor > 0:
-            fused = [(cid, sc) for cid, sc in fused if sc >= floor]
-            selected = [cid for cid, _ in fused]
-        fused_scores = dict(fused)
-        # rankings[0]/[1] are the ORIGINAL query's dense and sparse lists by
-        # construction, which is what the product records in its trace too.
-        vector_rank = _ranks(rankings[0]) if arm != "sparse" and rankings else {}
-        keyword_rank = _ranks(rankings[1] if arm == "hybrid" else rankings[0]) if arm != "dense" and rankings else {}
-
-        if rerank_model:
-            from app.retrieval.reranker import LLMReranker
-            from app.retrieval.evidence import RetrievedChunk
-
-            candidates = [
-                RetrievedChunk(chunk_id=c, document_id=str(meta[c].document_id), filename="",
-                               content=meta[c].content, page=meta[c].page,
-                               section=meta[c].section, chunk_index=meta[c].chunk_index)
-                for c in selected if c in meta
-            ]
-            reranker = LLMReranker(provider, rerank_model, settings.rerank_timeout_seconds)
-            candidates = await reranker.rerank(query, candidates)
-            cost += getattr(reranker, "last_cost", 0.0)
-            selected = [c.chunk_id for c in candidates]
-
-        selected = selected[:top_n]
-        chunks = await expand_selection(session, selected, meta, mode=mode,
-                                        settings=settings, query=query)
+            queries = queries + await expansion.expand_query(
+                provider, query, n_retry,
+                model=settings.query_expansion_model,
+                timeout=settings.query_expansion_timeout_seconds,
+            )
+            cost += expansion.last_cost_usd()
+            retried = 1
+            selected, chunks, fused_scores, any_corr = await one_pass(queries)
         elapsed = (time.perf_counter() - started) * 1000
 
         gold = entry["_gold"]
@@ -1062,32 +1126,24 @@ async def measure_row(
         # answered. That is the number that decides whether the branch ships, and
         # it is measured on the same run as the recall numbers rather than
         # argued about separately.
-        from app.chat.service import evidence_is_weak
-        from app.retrieval.evidence import chunk_to_evidence
-
-        for chunk, cid in zip(chunks, selected, strict=False):
-            chunk.rrf_score = fused_scores.get(cid, 0.0)
-            chunk.corroborated = cid in dense_seen and cid in sparse_seen
-            chunk.vector_rank = vector_rank.get(cid)
-            chunk.keyword_rank = keyword_rank.get(cid)
-        bucket["clarify"].append(
-            1
-            if evidence_is_weak(
-                [chunk_to_evidence(c) for c in chunks],
-                min_rrf_score=settings.weak_evidence_rrf_score,
-            )
-            else 0
-        )
+        bucket["clarify"].append(1 if weak(chunks) else 0)
+        # HOW MANY QUESTIONS PAID FOR A SECOND PASS. On the corpus-vocabulary
+        # fixture this is the number that says conditional expansion is free;
+        # on the colloquial one it is the number that says it fires at all.
+        bucket["retry"].append(retried)
         # THE TWO SIGNALS SEPARATELY, because `clarify` is their OR and cannot say
         # which one fired - and they want different fixes. `wk<` is the score arm
         # (best fused RRF under WEAK_EVIDENCE_RRF_SCORE), `wk!` is the agreement
         # arm (no delivered chunk found by both arms), and `bestRRF` is the mean of
         # the best score, which is the number a new threshold would be set from.
-        best = max((fused_scores.get(cid, 0.0) for cid in selected), default=0.0)
-        bucket["wk<"].append(1 if best < settings.weak_evidence_rrf_score else 0)
-        bucket["wk!"].append(
-            0 if any(c in dense_seen and c in sparse_seen for c in selected) else 1
+        # PER VARIANT, the same scale `evidence_is_weak` compares on: every
+        # variant adds two ranked lists, so an unnormalised best is four times
+        # larger at expansion 3 for evidence nothing corroborated.
+        best = max((fused_scores.get(cid, 0.0) for cid in selected), default=0.0) / max(
+            len(queries), 1
         )
+        bucket["wk<"].append(1 if best < settings.weak_evidence_rrf_score else 0)
+        bucket["wk!"].append(0 if any_corr else 1)
         bucket["bestRRF"].append(best)
         if show == entry["id"]:
             print(f"  [{label}] {entry['id']}")
@@ -1108,8 +1164,9 @@ async def measure_row(
         print(
             f"{label:<40} {group:<10} {n:>3} {mean('recall'):>7.3f} {mean('anchor'):>7.3f} "
             f"{mean('prec'):>6.3f} {mean('ms'):>8.1f} {mean('cost'):>10.6f} "
-            f"{sum(bucket['clarify']):>3}/{n:<4} {sum(bucket['wk<']):>4} {sum(bucket['wk!']):>4} "
-            f"{mean('bestRRF'):>8.4f} {mean('delivered'):>6.1f}"
+            f"{sum(bucket['clarify']):>3}/{n:<4} {sum(bucket['retry']):>6} "
+            f"{sum(bucket['wk<']):>4} {sum(bucket['wk!']):>4} "
+            f"{mean('bestRRF'):>8.4f} {mean('delivered'):>6.1f} {mean('tokens'):>7.0f}"
         )
 
 

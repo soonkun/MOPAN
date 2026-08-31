@@ -127,15 +127,23 @@ class Settings(BaseSettings):
     sparse_tokenizer: Literal["simple", "bigram"] = "bigram"
 
     # MULTI-QUERY EXPANSION: how many EXTRA retrieval queries an LLM writes from
-    # the question. 0 is off and off costs nothing - `hybrid_search` makes no
-    # completion call at 0. Every variant feeds BOTH arms, so N variants produce
-    # 2N ranked lists. See app/retrieval/expansion.py.
+    # the question. 0 is off and off costs nothing - not one comparison more.
+    # Every variant feeds BOTH arms, so N variants produce 2N ranked lists. See
+    # app/retrieval/expansion.py.
     #
-    # RUNTIME-SAFE: it is on the 고급 설정 screen, because this is the one stage
-    # that measurably bridges a user's word to the corpus's (어플 ->
-    # 애플리케이션 소프트웨어) and splits a question that asks three things, and
-    # whether ~4.5 s and $0.00015 per question is worth anchor 0.865 -> 0.885 is
-    # the operator's call, not a value to be picked here on their behalf.
+    # IT IS A RETRY, NOT A STAGE (app/chat/service.py:retrieve). The first pass
+    # never expands; the rewrite is paid for only when that pass comes back weak
+    # by the same signal that decides whether to ask the user to rephrase. That
+    # is what makes a non-zero value affordable at all - always-on cost the
+    # 52-question fixture anchor 0.846 -> 0.788 and 0.18 s -> 10.2 s per
+    # question, while conditional leaves both untouched because the signal fires
+    # on 0 of those 52.
+    #
+    # RUNTIME-SAFE, and DEPLOYED THROUGH `app_settings` (3), the same way
+    # RETRIEVAL_TOP_N=5 and RETRIEVAL_CANDIDATE_LIMIT=10 are. The default here
+    # stays 0 so that a caller which says nothing - every test fake included -
+    # gets the two ranked lists it always got, and so that a fresh install
+    # retrieves before it spends.
     query_expansion_count: int = 0
     # Env-only, not on the settings screen: it is a model name, not a number, and
     # it must stay a CHEAP model - expansion runs in front of every question and
