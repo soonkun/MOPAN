@@ -31,6 +31,16 @@ def configure_logging(environment: str) -> None:
     root = logging.getLogger()
     root.handlers = [handler]
     root.setLevel(logging.DEBUG if environment == "development" else logging.INFO)
+    # pdfminer logs one DEBUG record per token it lexes out of the PDF. On a
+    # development root logger that is not noise, it is the job: MEASURED on
+    # 유사상품 심사기준, 15 pages emitted 2,025,350 records and took 48.9s at
+    # DEBUG against 7.5s at WARNING - 6.5x, or 55 minutes against 8 for the
+    # 1011-page document, before the log driver's own cost. Pinned here rather
+    # than in the parser because the parser is not the only importer, and because
+    # a level set inside a library call would be undone by the next
+    # configure_logging.
+    for noisy in ("pdfminer", "pdfplumber"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def log_event(logger: logging.Logger, message: str, /, **fields: Any) -> None:

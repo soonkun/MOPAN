@@ -2,7 +2,7 @@ import pytest
 from docx import Document as DocxDocument
 
 from app.rag.parsers import get_parser
-from app.rag.parsers.pdf_parser import _is_heading
+from app.rag.parsers.pdf_parser import _columns, _is_heading
 
 
 def _write_pdf(path, pages_lines: list[list[str]]) -> None:
@@ -313,6 +313,77 @@ def test_pdf_parser_joins_korean_wrapped_words_without_a_space(tmp_path):
     assert "교통이 불편한 지역에" in block.text
     assert "제출한 경우에는" in block.text
     assert "experiment were" in block.text
+
+
+def test_pdf_parser_keeps_words_apart_across_a_narrow_space_glyph(tmp_path):
+    """유사상품 심사기준 sets its table cells with a space narrower than
+    WORD_X_TOLERANCE, so a gap-only rule glued every word in them together
+    ("불을끄거나예방하기위한기기나장치") - 941 of 1277 sampled joins. The blank
+    glyph between the two words is what says a space belongs there. The second
+    pair is the control: same sub-tolerance gap, no blank glyph, still glued -
+    that is the mixed-font "업(業)으로" case the tolerance was raised for."""
+    path = tmp_path / "narrow.pdf"
+    # size 4, so each glyph is 2pt wide and the space between "불을" and "끄거나"
+    # is a 2pt gap - under WORD_X_TOLERANCE.
+    _write_positioned_pdf(
+        path,
+        [
+            [
+                (72, 100, 4, "불을"),
+                (76, 100, 4, " "),
+                (78, 100, 4, "끄거나"),
+                (72, 130, 4, "업("),
+                (76, 130, 4, "業"),
+                (78, 130, 4, ")으로"),
+            ]
+        ],
+    )
+
+    blocks = get_parser("pdf").parse(str(path)).blocks
+    text = " ".join(block.text for block in blocks)
+
+    assert "불을 끄거나" in text
+    assert "업(業)으로" in text
+
+
+def _word(x0: float, x1: float, top: float, text: str) -> dict:
+    return {"x0": x0, "x1": x1, "top": top, "text": text, "size": 10.0, "fontname": "F"}
+
+
+def test_columns_split_at_a_gutter_no_glyph_crosses():
+    """The two-column half of 유사상품 심사기준's goods table, at its measured
+    geometry: a left column ending at x=305, a right column starting at x=321.
+    Bucketing by `top` alone read one row of each as a single line - a
+    cross-reference from the left column glued to an unrelated goods name from
+    the right."""
+    words = [
+        _word(67, 305, 100, "- 방화피복(제9류/G4507)"),
+        _word(321, 560, 100, "가스누출 경보기 gas leak alarms"),
+        _word(67, 280, 120, "- 소방차(제12류/G3705)"),
+        _word(321, 540, 120, "가스탐지기 gas detecting apparatus"),
+    ]
+
+    columns = _columns(words, 624.0)
+
+    assert [[w["text"] for w in column] for column in columns] == [
+        ["- 방화피복(제9류/G4507)", "- 소방차(제12류/G3705)"],
+        ["가스누출 경보기 gas leak alarms", "가스탐지기 gas detecting apparatus"],
+    ]
+
+
+def test_columns_leaves_a_single_column_page_alone():
+    """The control, and the reason the rule is "no glyph on the PAGE crosses it"
+    rather than "a wide gap on this line": prose leaves gaps at every ragged line
+    end and every indent, and splitting on those would reorder every ordinary
+    document. The one full-height band here is the right margin, which is not a
+    gutter between columns."""
+    words = [
+        _word(64, 475, 100, "이것은 한 줄로 이어지는 본문입니다"),
+        _word(64, 120, 120, "짧은 줄"),  # ragged: a 355pt gap to its right
+        _word(64, 460, 140, "다시 길게 이어지는 본문 한 줄입니다"),
+    ]
+
+    assert _columns(words, 539.0) == [words]
 
 
 def test_pdf_parser_detects_a_heading_by_font_size(tmp_path):

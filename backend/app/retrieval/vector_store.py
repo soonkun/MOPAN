@@ -9,6 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.chunk import Chunk, sparse_tsvector
 from app.models.document import Document
 
+# Postgres documents a 65535-parameter cap, but asyncpg encodes the bind-parameter
+# COUNT as an int16 and refuses at 32767 ("the number of query arguments cannot
+# exceed 32767") - which is the number that actually fires, and it fired: 유사상품
+# 심사기준 came back from the chunker with more rows than one 11-column statement
+# could bind, so the whole 1011-page ingest failed at the very last write, after
+# the parse, the chunking and the embedding bill had all been paid.
+BIND_PARAM_LIMIT = 32767
+
 
 @dataclass
 class VectorItem:
@@ -86,32 +94,6 @@ class PgVectorStore(VectorStore):
         keys = [(item.document_id, item.chunk_index) for item in items]
         if len(set(keys)) != len(keys):
             raise ValueError("upsert items must be unique by (document_id, chunk_index)")
-        # ponytail: one multi-VALUES statement, 10 bind params per item, against
-        # Postgres's 65535-parameter cap - so ~6,500 chunks per call. Batch the
-        # loop if a single document ever exceeds that.
-        # A real upsert, not an insert. `chunks` carries UNIQUE (document_id,
-        # chunk_index), so re-indexing a document without deleting it first would
-        # otherwise die on a unique violation - while a Qdrant backend, which
-        # overwrites by point id, would happily succeed. That difference is
-        # exactly what this interface exists to hide.
-        statement = insert(Chunk).values(
-            [
-                {
-                    "id": uuid.uuid4(),
-                    "document_id": item.document_id,
-                    "chunk_index": item.chunk_index,
-                    "content": item.content,
-                    "content_tsv": sparse_tsvector(item.content),
-                    "token_count": item.token_count,
-                    "char_count": item.char_count,
-                    "page": item.page,
-                    "section": item.section,
-                    "chunk_metadata": item.metadata,
-                    "embedding": item.embedding,
-                }
-                for item in items
-            ]
-        )
         # content_tsv STOPPED being a generated column in migration 0012 and is
         # now written here. Postgres has no Korean tokenizer, this deployment
         # cannot install one, and a GENERATED column may only call IMMUTABLE SQL -
@@ -119,26 +101,57 @@ class PgVectorStore(VectorStore):
         # in `set_` below as well: without that, re-ingesting a document whose
         # text changed would update `content` and leave the old tokens behind, and
         # the chunk would be findable only by what it used to say.
-        # Core INSERT, so it bypasses the session identity map: a Chunk already
-        # loaded in this session keeps its stale content until commit or expire.
-        await self.db.execute(
-            statement.on_conflict_do_update(
-                constraint="uq_chunks_document_id",
-                set_={
-                    name: statement.excluded[name]
-                    for name in (
-                        "content",
-                        "content_tsv",
-                        "token_count",
-                        "char_count",
-                        "page",
-                        "section",
-                        "chunk_metadata",
-                        "embedding",
-                    )
-                },
+        rows = [
+            {
+                "id": uuid.uuid4(),
+                "document_id": item.document_id,
+                "chunk_index": item.chunk_index,
+                "content": item.content,
+                "content_tsv": sparse_tsvector(item.content),
+                "token_count": item.token_count,
+                "char_count": item.char_count,
+                "page": item.page,
+                "section": item.section,
+                "chunk_metadata": item.metadata,
+                "embedding": item.embedding,
+            }
+            for item in items
+        ]
+        # Derived from the row rather than hand-tuned: adding a column silently
+        # lowers how many rows fit in one statement, and a literal batch size
+        # would only be wrong the next time someone does.
+        batch_size = max(1, BIND_PARAM_LIMIT // len(rows[0]))
+        for start in range(0, len(rows), batch_size):
+            # A real upsert, not an insert. `chunks` carries UNIQUE (document_id,
+            # chunk_index), so re-indexing a document without deleting it first
+            # would otherwise die on a unique violation - while a Qdrant backend,
+            # which overwrites by point id, would happily succeed. That difference
+            # is exactly what this interface exists to hide.
+            #
+            # The batches are NOT independent: the caller owns the transaction and
+            # `delete_by_document` ran in it, so a failure part way through rolls
+            # the whole document back rather than leaving half an index.
+            statement = insert(Chunk).values(rows[start : start + batch_size])
+            # Core INSERT, so it bypasses the session identity map: a Chunk already
+            # loaded in this session keeps its stale content until commit or expire.
+            await self.db.execute(
+                statement.on_conflict_do_update(
+                    constraint="uq_chunks_document_id",
+                    set_={
+                        name: statement.excluded[name]
+                        for name in (
+                            "content",
+                            "content_tsv",
+                            "token_count",
+                            "char_count",
+                            "page",
+                            "section",
+                            "chunk_metadata",
+                            "embedding",
+                        )
+                    },
+                )
             )
-        )
 
     async def search(
         self,

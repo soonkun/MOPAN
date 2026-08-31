@@ -236,3 +236,32 @@ async def test_upsert_rejects_a_duplicate_chunk_index(db, seeded):
     # Rejecting here keeps the interface's behaviour the same on both.
     with pytest.raises(ValueError, match="unique by"):
         await PgVectorStore(db).upsert([item, item])
+
+
+async def test_upsert_writes_a_document_larger_than_one_bind_batch(db, seeded):
+    """asyncpg encodes the bind-parameter COUNT as an int16, so ONE statement can
+    carry 32767 parameters - 2,978 rows at 11 columns each. 유사상품 심사기준
+    chunked past that and the entire 1011-page ingest died on the final write,
+    after the parse, the chunking and the embedding bill were already spent."""
+    count = 3200
+    items = [
+        VectorItem(
+            document_id=seeded["doc_a"].id,
+            chunk_index=index,
+            content=f"제9류 지정상품 {index}",
+            token_count=4,
+            char_count=12,
+            page=index // 4 + 1,
+            section=None,
+            metadata={},
+            embedding=vec(float(index % 7)),
+        )
+        for index in range(count)
+    ]
+
+    await PgVectorStore(db).upsert(items)
+    await db.commit()
+
+    stored = (await db.scalars(select(Chunk).order_by(Chunk.chunk_index))).all()
+    assert len(stored) == count
+    assert stored[-1].content == f"제9류 지정상품 {count - 1}"

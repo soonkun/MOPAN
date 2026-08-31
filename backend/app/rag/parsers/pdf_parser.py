@@ -1,3 +1,4 @@
+import bisect
 import re
 from collections import Counter, defaultdict, deque
 from itertools import zip_longest
@@ -39,7 +40,28 @@ LINE_Y_TOLERANCE = 2.5
 # size or font changes even at zero gap, which put spaces inside mixed-font runs
 # ("업(業)으로" -> "업( 業 )으로", 41 of 5308 sampled lines). Re-joining on the
 # measured gap instead of unconditionally on a space undoes exactly that.
+#
+# The gap is only the SECOND test, because it is producer-dependent and this
+# constant is not. 유사상품 심사기준 sets its table cells with a 2.5pt space
+# glyph - under this tolerance - so joining on the gap alone glued every word in
+# them together: "불을끄거나예방하기위한기기나장치", "가스누출감지기". MEASURED
+# over five sampled pages of that document, 941 of 1277 word joins lost a real
+# space; over five pages each of 특허·실용신안 심사기준 (893 joins) and
+# 상표심사기준 (1111 joins) the same measurement found ZERO, which is why the
+# tolerance stays 3 and a blank GLYPH between the two words is what overrides it.
+# A blank glyph is evidence, not a heuristic: the mixed-font runs above have no
+# space character between them, so they stay glued either way.
 WORD_X_TOLERANCE = 3
+# Half a point of slack on each side when asking whether a blank glyph falls
+# between two words: pdfminer reports glyph edges in float space and a space
+# advance can land a hair outside its neighbours' bounding boxes.
+BLANK_SPAN_SLACK = 0.5
+
+# Column detection. A gutter this wide that no glyph on the page crosses is a
+# column rule; anything narrower is inter-word space, and anything closer than
+# MIN_COLUMN_PT to either end of the text block is the margin.
+MIN_GUTTER_PT = 12
+MIN_COLUMN_PT = 40
 
 # Running headers and footers. MEASURED on the same document: a line sits in the
 # top band on 774 of 854 pages and in the bottom band on 666 - but an ordinary
@@ -166,32 +188,100 @@ def _flush(blocks: list[Block], paragraph: list[_Line], page: int, section: str 
         paragraph.clear()
 
 
+def _columns(words: list[dict], width: float) -> list[list[dict]]:
+    """The page's words split at every full-height vertical whitespace gutter.
+
+    A gutter is an x band that NO glyph on the page crosses - not a wide gap on
+    some lines, which is what an ordinary indent or a right-aligned page number
+    looks like. That is what makes it safe to apply to every document rather than
+    to a document this parser knows about: MEASURED over 40 sampled pages each,
+    유사상품 심사기준 has one on 34 of them (at x 303-321, the goods table's own
+    column rule, on every one of its classification pages) while 특허·실용신안
+    심사기준 has one on 1 and 상표심사기준 on 2 - a cover and an appendix, both of
+    which genuinely are two columns.
+
+    Returns [words] unchanged when there is no gutter, which is the single-column
+    case and every page of a prose document.
+    """
+    if not words:
+        return []
+    occupied = bytearray(int(width) + 2)
+    for word in words:
+        for x in range(max(0, int(word["x0"])), min(len(occupied) - 1, int(word["x1"]) + 1)):
+            occupied[x] = 1
+    left, right = int(min(w["x0"] for w in words)), int(max(w["x1"] for w in words))
+
+    edges: list[float] = []
+    run: int | None = None
+    for x in range(left, right + 2):
+        if x < len(occupied) and not occupied[x]:
+            run = x if run is None else run
+            continue
+        if (
+            run is not None
+            and x - run >= MIN_GUTTER_PT
+            # Inside the text block, not the margin either side of it: a page
+            # whose first column is 20pt wide is a misread, not a column.
+            and run > left + MIN_COLUMN_PT
+            and x < right - MIN_COLUMN_PT
+        ):
+            edges.append((run + x) / 2)
+        run = None
+    if not edges:
+        return [words]
+
+    columns: list[list[dict]] = [[] for _ in range(len(edges) + 1)]
+    for word in words:
+        columns[bisect.bisect_right(edges, word["x0"])].append(word)
+    return [column for column in columns if column]
+
+
 def _page_lines(page) -> list[_Line]:
     words = page.extract_words(extra_attrs=["size", "fontname"])
-    # Rightmost blank glyph per text row. extract_words drops blank chars, and
-    # this producer's trailing space is the only evidence of where a wrap fell.
-    blank_tail: dict[float, float] = {}
+    # Every blank glyph's span per text row. extract_words drops blank chars, so
+    # these spans are the only evidence of two things: where a wrap fell on a real
+    # word boundary (the rightmost one), and where a space narrower than
+    # WORD_X_TOLERANCE separates two words (any of them).
+    blanks: dict[float, list[tuple[float, float]]] = {}
     for char in page.chars:
         if char["text"].isspace():
-            key = round(char["top"], 1)
-            blank_tail[key] = max(blank_tail.get(key, 0.0), char["x1"])
+            blanks.setdefault(round(char["top"], 1), []).append((char["x0"], char["x1"]))
 
-    buckets: list[tuple[float, list[dict]]] = []
-    for word in sorted(words, key=lambda w: (round(w["top"], 1), w["x0"])):
-        for top, bucket in buckets:
-            if abs(top - word["top"]) <= LINE_Y_TOLERANCE:
-                bucket.append(word)
-                break
-        else:
-            buckets.append((word["top"], [word]))
+    buckets: list[tuple[int, float, list[dict]]] = []
+    # ONE bucket list across every column, and the column index is part of the
+    # sort key, so a bucket only ever holds words from one column. Bucketing on
+    # `top` alone is what glued the two columns of the goods table together:
+    # "- 방화피복(제9류/G4507) 가스누출 경보기 gas leak alarms" is a cross-reference
+    # from the left column and an unrelated goods name from the right, read as
+    # one line. Columns are emitted whole, in reading order, because that is the
+    # order the document is written in.
+    columns = _columns(words, float(page.width))
+    for index, column in enumerate(columns):
+        for word in sorted(column, key=lambda w: (round(w["top"], 1), w["x0"])):
+            for column_index, top, bucket in buckets:
+                if column_index == index and abs(top - word["top"]) <= LINE_Y_TOLERANCE:
+                    bucket.append(word)
+                    break
+            else:
+                buckets.append((index, word["top"], [word]))
 
     lines: list[_Line] = []
-    for top, bucket in buckets:
+    for _, top, bucket in buckets:
         ordered = sorted(bucket, key=lambda w: w["x0"])
+        spans = [
+            span
+            for row, row_spans in blanks.items()
+            if abs(row - top) <= LINE_Y_TOLERANCE
+            for span in row_spans
+        ]
         text = ordered[0]["text"]
         for previous, word in zip(ordered, ordered[1:], strict=False):
-            separator = " " if word["x0"] - previous["x1"] > WORD_X_TOLERANCE else ""
-            text = f"{text}{separator}{word['text']}"
+            spaced = word["x0"] - previous["x1"] > WORD_X_TOLERANCE or any(
+                x0 >= previous["x1"] - BLANK_SPAN_SLACK
+                and x1 <= word["x0"] + BLANK_SPAN_SLACK
+                for x0, x1 in spans
+            )
+            text = f"{text}{' ' if spaced else ''}{word['text']}"
         text = text.strip()
         if not text:
             continue
@@ -202,11 +292,7 @@ def _page_lines(page) -> list[_Line]:
                 text=text,
                 size=max(word["size"] for word in bucket),
                 bold=any("bold" in word["fontname"].lower() for word in bucket),
-                ends_blank=any(
-                    x1 > last_x1
-                    for row, x1 in blank_tail.items()
-                    if abs(row - top) <= LINE_Y_TOLERANCE
-                ),
+                ends_blank=any(x1 > last_x1 for _, x1 in spans),
             )
         )
     return lines
