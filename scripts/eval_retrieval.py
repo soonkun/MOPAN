@@ -50,6 +50,7 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import re
 import sys
 import tempfile
@@ -223,10 +224,20 @@ class PrefixBm25(Bm25):
 
 
 async def sparse_current(session, query, limit):
-    """The SHIPPED sparse arm: to_tsvector('simple') + ts_rank. The baseline."""
+    """The SHIPPED sparse arm, whatever it currently is.
+
+    Passes `settings.sparse_tokenizer` rather than defaulting, so this row always
+    measures the product rather than a historical version of it. The tokenizer
+    named here must match the one that WROTE content_tsv - run
+    scripts/backfill_tsv.py after changing it, or this row measures a query
+    tokenised one way against an index built the other and scores ~0.
+    """
+    from app.core.config import get_settings
     from app.retrieval.keyword_search import keyword_search
 
-    return await keyword_search(session, query, limit)
+    return await keyword_search(
+        session, query, limit, tokenizer=get_settings().sparse_tokenizer
+    )
 
 
 async def sparse_none(session, query, limit):
@@ -322,13 +333,37 @@ def _key(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def _write_cache(path: Path, cache: dict) -> None:
+    """Write, then rename. Two of these scripts running at once - which happens
+    the moment a sweep is backgrounded and a second one started - otherwise
+    interleave into one file and produce `JSONDecodeError: Extra data`, which
+    reads like a bug in the harness rather than what it is.
+
+    The loser of the race loses its own additions, not the file: the next run
+    re-embeds whatever is missing and pays for it once.
+    """
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(cache))
+    tmp.replace(path)
+
+
+def _load_cache(path: Path) -> dict:
+    """A cache that cannot be parsed is a cache that is not there. Re-embedding
+    costs money but it is bounded and correct; refusing to run is neither."""
+    try:
+        return json.loads(path.read_text()) if path.exists() else {}
+    except json.JSONDecodeError:
+        print(f"  (cache {path.name} unreadable - rebuilding)")
+        return {}
+
+
 async def embed_openai(model: str, texts: list[str], settings) -> tuple[dict[str, list[float]], int]:
     """Embed with caching. Returns (text -> vector, tokens actually billed)."""
     from app.core.tokens import count_tokens
     from app.llm.openai_provider import OpenAIProvider
 
     path = _cache(f"emb-{model}")
-    cache = json.loads(path.read_text()) if path.exists() else {}
+    cache = _load_cache(path)
     missing = [t for t in dict.fromkeys(texts) if _key(t) not in cache]
     billed = 0
     if missing:
@@ -345,7 +380,7 @@ async def embed_openai(model: str, texts: list[str], settings) -> tuple[dict[str
             batch = missing[start : start + 256]
             for t, v in zip(batch, await provider.embed(batch), strict=True):
                 cache[_key(t)] = v
-        path.write_text(json.dumps(cache))
+        _write_cache(path, cache)
     return {t: cache[_key(t)] for t in texts}, billed
 
 
@@ -357,7 +392,7 @@ def embed_local(model: str, texts: list[str]) -> dict[str, list[float]]:
     model server?" with a number instead of an argument.
     """
     path = _cache(f"emb-{model}")
-    cache = json.loads(path.read_text()) if path.exists() else {}
+    cache = _load_cache(path)
     missing = [t for t in dict.fromkeys(texts) if _key(t) not in cache]
     if missing:
         from sentence_transformers import SentenceTransformer
@@ -610,6 +645,10 @@ async def main() -> int:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--rrf-k", type=int, default=None)
     parser.add_argument("--weights", default=None, help="sparse weight(s) in RRF")
+    parser.add_argument(
+        "--floor", default="0", help="relevance floor(s): fused RRF score below which a "
+        "candidate is not delivered at all. 0 is off."
+    )
     parser.add_argument("--pgvector", action="store_true", help="sanity row: shipped HNSW arm")
     parser.add_argument("--verify", action="store_true", help="anchors only; no API calls")
     parser.add_argument("--setup-lex", default="", help="build eval_lex_<name> tables")
@@ -765,12 +804,13 @@ async def main() -> int:
 
         # --- stages -----------------------------------------------------
         expands = [int(x) for x in args.expand.split(",") if x != ""]
+        floors = [float(x) for x in args.floor.split(",") if x != ""]
         reranks = args.rerank.split(",")
         arms = [a for a in args.arm.split(",") if a]
 
         header = (
             f"{'row':<40} {'group':<10} {'n':>3} {'recall':>7} {'anchor':>7} "
-            f"{'prec':>6} {'ms/q':>8} {'$/q':>10} {'clarify':>8}"
+            f"{'prec':>6} {'ms/q':>8} {'$/q':>10} {'clarify':>8} {'deliv':>6}"
         )
 
         from app.llm.openai_provider import OpenAIProvider
@@ -790,12 +830,15 @@ async def main() -> int:
             for dense_name in (dense_keys or ["none"]) if arm != "sparse" else ["none"]:
                 for sparse_name in sparse_names if arm != "dense" else ["none"]:
                     for weight in weights:
-                        for n_expand in expands:
+                        for floor in floors:
+                          for n_expand in expands:
                             for rerank_model in reranks:
                                 for mode in modes:
                                     label = f"{arm}/{dense_name}/{sparse_name}"
                                     if weight != 1.0:
                                         label += f"/w{weight}"
+                                    if floor:
+                                        label += f"/f{floor}"
                                     if n_expand:
                                         label += f"/x{n_expand}"
                                     if rerank_model:
@@ -807,7 +850,7 @@ async def main() -> int:
                                         sparse_arms, arm=arm, dense_name=dense_name,
                                         sparse_name=sparse_name, weight=weight, n_expand=n_expand,
                                         rerank_model=rerank_model, mode=mode, top_n=top_n,
-                                        limit=limit, rrf_k=rrf_k, show=args.show,
+                                        limit=limit, rrf_k=rrf_k, show=args.show, floor=floor,
                                         query_cost=query_cost.get(dense_name, 0.0),
                                         fuse=reciprocal_rank_fusion,
                                     )
@@ -843,6 +886,7 @@ async def measure_row(
     label, session, provider, settings, questions, groups, pages, docs, meta,
     dense_indexes, dense_vectors, sparse_arms, *, arm, dense_name, sparse_name,
     weight, n_expand, rerank_model, mode, top_n, limit, rrf_k, show, query_cost, fuse,
+    floor=0.0,
 ) -> None:
     from app.core.tokens import count_tokens
 
@@ -879,6 +923,11 @@ async def measure_row(
 
         fused = fuse(rankings, k=rrf_k, weights=row_weights)[:limit] if rankings else []
         selected = [cid for cid, _ in fused]
+        # THE RELEVANCE FLOOR, applied exactly where hybrid_search applies it:
+        # after fusion, before anything is loaded or reranked.
+        if floor > 0:
+            fused = [(cid, sc) for cid, sc in fused if sc >= floor]
+            selected = [cid for cid, _ in fused]
         fused_scores = dict(fused)
         # rankings[0]/[1] are the ORIGINAL query's dense and sparse lists by
         # construction, which is what the product records in its trace too.
@@ -914,6 +963,9 @@ async def measure_row(
         bucket["ms"].append(elapsed)
         bucket["cost"].append(cost)
         bucket["tokens"].append(sum(count_tokens(c.content) for c in chunks))
+        # What was actually DELIVERED. With a floor on, this is below top_n, and
+        # that is the point - the alternative is padding the model's context.
+        bucket["delivered"].append(len(selected))
         # FALSE-TRIGGER RATE for the weak-evidence clarification branch. Every
         # question in this fixture is well-formed and answerable from the corpus,
         # so every trigger here is a user who would be interrogated instead of
@@ -954,12 +1006,18 @@ async def measure_row(
         print(
             f"{label:<40} {group:<10} {n:>3} {mean('recall'):>7.3f} {mean('anchor'):>7.3f} "
             f"{mean('prec'):>6.3f} {mean('ms'):>8.1f} {mean('cost'):>10.6f} "
-            f"{sum(bucket['clarify']):>3}/{n:<4}"
+            f"{sum(bucket['clarify']):>3}/{n:<4} {mean('delivered'):>6.1f}"
         )
 
 
 async def _embed_one(dense_name, text_, settings):
-    """An expansion variant is a query nobody embedded up front."""
+    """An expansion variant is a query nobody embedded up front.
+
+    `dense_name` is the composite "<model>:<unit>" key the row loop uses; only
+    the model half selects an embedder, since a query is a query whatever
+    granularity the CORPUS was indexed at.
+    """
+    dense_name = dense_name.split(":", 1)[0]
     model = DENSE_MODELS[dense_name]
     if dense_name in ("bgem3", "bgem3ko"):
         return embed_local(model, [text_])[text_]

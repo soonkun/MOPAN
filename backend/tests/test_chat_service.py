@@ -135,7 +135,15 @@ async def test_an_index_past_any_digit_bound_can_be_cited(settings):
     """A digit bound on CITATION_MARKER caps how many evidence items are reachable
     at all - at \\d{1,3} the 1000th was unciteable no matter what the model wrote -
     and buys nothing, because containment against `used` is the real bound."""
-    roomy = settings.model_copy(update={"answer_context_token_budget": 60000})
+    # Clarification pinned off for this one test, and it is not incidental: these
+    # 1000 items are hand-built with no rrf_score and no arm ranks, so
+    # `evidence_is_weak` reads them as weak (correctly - nothing corroborates
+    # anything) and the branch trims the list to three, leaving nothing at index
+    # 1000 to cite. What is under test here is the CITATION INDEX BOUND, not the
+    # weak-evidence branch; see test_clarify.py for that.
+    roomy = settings.model_copy(
+        update={"answer_context_token_budget": 60000, "clarify_on_weak_evidence": False}
+    )
     evidence = [_evidence(f"body {i}", i) for i in range(1, 1001)]
     llm = FakeLLM(content="See [1000].")
 

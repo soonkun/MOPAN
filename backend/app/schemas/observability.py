@@ -85,6 +85,27 @@ class TraceRetrieval(BaseModel):
     included_count: int = 0
 
 
+class TraceUtilization(BaseModel):
+    """Did the model use what it was sent? COMPUTED ON READ, from the two numbers
+    every answer has always stored - `retrieval.included_count` in the trace and
+    the `citations` column - so it is true of every answer ever written, including
+    the ones from before anybody was asking. No column, no migration.
+
+    `delivered` is what reached the model, not what retrieval found: the token
+    budget can cut items, and `included_count` is what build_prompt reported
+    fitting.
+    """
+
+    delivered: int = 0
+    cited: int = 0
+    # None when delivered is 0. Honestly different from 0.0: nothing was sent, so
+    # there is no ratio, and the screen must not render that as 0% utilization.
+    utilization: float | None = None
+    # The 14-delivered / 0-cited case, named so the 검색된 근거 panel can shout it
+    # instead of leaving a reader to compare two counters.
+    nothing_cited: bool = False
+
+
 class TracePlanStep(BaseModel):
     """One NODE of a workflow graph, as it actually ran.
 
@@ -176,6 +197,9 @@ class TraceResponse(BaseModel):
     # build_trace reserved this key and the column is JSONB, so Slice 3 needed no
     # migration to fill it.
     plan: TracePlan | None = None
+    # Computed on read from `retrieval.included_count` and the citations column -
+    # see TraceUtilization. Present on every trace, old ones included.
+    utilization: TraceUtilization = Field(default_factory=TraceUtilization)
 
 
 class SettingResponse(BaseModel):

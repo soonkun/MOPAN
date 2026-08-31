@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user, require_admin
+from app.chat.service import evidence_utilization
 from app.core.config import Settings, get_app_settings
 from app.core.db import get_db_session
 from app.core.logging import log_event
@@ -96,6 +97,18 @@ async def get_trace(
         # plan" are different facts and the screen says different things about
         # them. The direct path writes no key at all.
         plan=trace.get("plan"),
+        # COMPUTED ON READ, not stored. Both numbers were already on the row -
+        # `included_count` is what build_prompt reported putting in front of the
+        # model, `citations` is what the answer actually referenced - so this
+        # needed no column and it is true of answers written long before anyone
+        # thought to ask. `included_count`, NOT `evidence_count`: the denominator
+        # is what was sent, and an item the token budget cut is not one the model
+        # declined to use. Missing on a pre-0005 trace, which reads as delivered=0
+        # and so as no ratio at all rather than as a fabricated failure.
+        utilization=evidence_utilization(
+            (trace.get("retrieval") or {}).get("included_count") or 0,
+            len(message.citations or []),
+        ),
     )
 
 

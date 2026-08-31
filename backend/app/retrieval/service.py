@@ -63,6 +63,7 @@ async def hybrid_search(
     query_expansion_model: str = "",
     query_expansion_timeout: float = 8.0,
     sparse_tokenizer: str = "simple",
+    evidence_floor: float = 0.0,
 ) -> list[Evidence]:
     """Query -> (dense + sparse) -> RRF -> rerank -> top-N -> expand -> Evidence.
 
@@ -131,6 +132,24 @@ async def hybrid_search(
     # behaviour for a caller that says nothing; the application wiring in
     # chat/service.py is what opts into anything else.
     fused = reciprocal_rank_fusion(rankings, k=rrf_k, weights=weights)[:candidate_limit]
+    # THE RELEVANCE FLOOR: drop candidates nothing actually liked, and return
+    # FEWER than top_n rather than padding the answer's context to fill it.
+    #
+    # The failure it exists for was visible in a live trace: a trademark question
+    # against a patent-examination corpus delivered "14개 중 14개" - fourteen
+    # chunks about 외국어출원, 신규성 and 분할출원, every one irrelevant, every one
+    # sent to the model. That is not merely wasted tokens and the owner's money,
+    # it is an invitation to the model to manufacture a connection between the
+    # question and whatever it was handed.
+    #
+    # Applied HERE, before the chunk load and before the reranker, so junk costs
+    # neither a database round trip nor a rerank token. A candidate this far down
+    # was found by one arm at a poor rank; the reranker cannot rescue it, because
+    # there is nothing to rescue.
+    #
+    # 0.0 disables it, and the off path costs one comparison.
+    if evidence_floor > 0:
+        fused = [(chunk_id, score) for chunk_id, score in fused if score >= evidence_floor]
     # Ranks REPORTED IN THE TRACE are the original query's, not a rewrite's.
     # rankings[0] and rankings[1] are the unexpanded dense and sparse lists by
     # construction, and a trace that showed "sparse rank 3" for a query the user
@@ -199,6 +218,7 @@ async def hybrid_search(
         variants=len(variants),
         rankings=len(rankings),
         candidates=len(candidates),
+        floored=evidence_floor,
         reranked=reranker is not None,
         selected=len(selected),
         expanded=sum(1 for chunk in selected if chunk.neighbors),

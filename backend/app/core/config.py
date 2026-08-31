@@ -150,6 +150,27 @@ class Settings(BaseSettings):
     # treats the timeout as its degradation path rather than as an error.
     rerank_timeout_seconds: float = 20.0
 
+    # THE RELEVANCE FLOOR: the fused RRF score below which a candidate is not
+    # delivered at all. 0.0 is off, and off costs one comparison.
+    #
+    # It exists because there was no floor: a live trace read "14개 중 14개가
+    # 모델에게 전달되었습니다" for a trademark question against a patent corpus -
+    # fourteen chunks about 외국어출원, 신규성 and 분할출원, all irrelevant, all
+    # sent. Padding the context to fill RETRIEVAL_TOP_N does not merely waste
+    # tokens and the owner's money, it invites the model to manufacture a
+    # connection to whatever it was handed.
+    #
+    # A threshold is meaningful here because RRF scores are comparable across
+    # queries at a fixed rrf_k. At k=60, candidate_limit=20: an item BOTH arms
+    # rank first scores 2/61 = 0.0328; one arm at rank 1 scores 1/61 = 0.0164;
+    # one arm at rank 20 scores 1/80 = 0.0125.
+    #
+    # The value is set by measurement, not by that arithmetic - see the sweep in
+    # docs/superpowers/specs/2026-08-31-retrieval-redesign.md. The criterion is
+    # that ~0 questions lose an answer-bearing chunk to the floor; a floor that
+    # buys precision by dropping real answers is worse than the padding.
+    evidence_floor_rrf_score: float = 0.0
+
     # Answer the user something useful when retrieval comes back weak, instead of
     # the dead end "관련 문서가 없습니다". The clarification IS the answer: it goes
     # out as ordinary assistant text through the existing chat path, with 2-4
@@ -159,15 +180,24 @@ class Settings(BaseSettings):
     # Detected from the evidence, never from query length: a short well-formed
     # question is fine and a long vague one is not.
     #
-    # OFF BY DEFAULT FOR NOW, and that is a measurement statement rather than a
-    # design one. On the 52-question fixture - every question well-formed and
-    # answerable - the detector diverted 3 into clarification at
-    # dense=3-large/sparse=simple. Every one of those is a user interrogated
-    # instead of answered, which is worse than the dead end this replaces. The
-    # number has NOT been re-measured against the bigram sparse arm, where arm
-    # agreement (the detector's second signal) should rise sharply. It ships on
-    # when that number is measured and small, not before.
-    clarify_on_weak_evidence: bool = False
+    # ON, and the number that turned it on: the false-trigger count on the
+    # 52-question fixture - every question there well-formed and answerable, so
+    # every trigger is a user interrogated instead of answered.
+    #
+    #   dense 3-large + sparse 'simple'   3 of 52
+    #   DEPLOYED: dense + sparse bigram   0 of 52
+    #
+    # It went to zero because the detector's real signal is ARM AGREEMENT, and
+    # fixing the sparse arm is what made the arms agree. Before, 5 of 14 slots
+    # carried both ranks; now 10 of 14 do. This is why it shipped off in the
+    # first deploy and on in the second: the number moved because an upstream
+    # stage changed, which is exactly the pattern this project has been burned by
+    # twice when a constant was fitted before the bug under it was fixed.
+    #
+    # A single-arm pipeline makes this detector fire on everything (52 of 52,
+    # measured) - nothing can be corroborated when there is one ranking. So
+    # SPARSE_WEIGHT=0 and this setting must not both be set.
+    clarify_on_weak_evidence: bool = True
     # The RRF score below which the top hit counts as weak. RRF scores are
     # bounded and comparable across queries at a fixed rrf_k, which is what makes
     # a threshold meaningful at all: a chunk found by BOTH arms at rank 1 scores
@@ -180,6 +210,12 @@ class Settings(BaseSettings):
     # value was chosen; see the spec. A detector that interrogates users who
     # asked answerable questions is worse than the dead end it replaces.
     weak_evidence_rrf_score: float = 0.0170
+    # How many evidence items the clarification branch keeps. NOT for answering -
+    # it is what the suggested follow-up questions must be grounded in, so they
+    # name topics the corpus actually contains. Small on purpose: the branch only
+    # runs when retrieval already failed, and 14 chunks of failure is the trace
+    # the owner was looking at when they asked why nothing was used.
+    clarify_evidence_items: int = 3
     # The sparse ranking's weight in RRF. Textbook RRF is 1.0 - every retriever a
     # peer - and that is the value this was measured against, on the real 854-page
     # Korean examination manual with the 20-question set in

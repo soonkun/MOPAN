@@ -127,6 +127,11 @@ async def retrieve(
         # match the one the index was built with, and a call site that forgets it
         # silently degrades to `simple` against a bigram index.
         sparse_tokenizer=settings.sparse_tokenizer,
+        # 0.0 by default, i.e. off, and measured that way: see the note over
+        # Settings.evidence_floor_rrf_score. The knob exists because a corpus
+        # whose questions are NOT all answerable - unlike this fixture - may well
+        # want one, and leaving it unreachable would mean re-deriving it later.
+        evidence_floor=settings.evidence_floor_rrf_score,
     )
 
 
@@ -222,6 +227,39 @@ def _citations_from(answer_text: str, used: list[Evidence]) -> list[dict]:
             }
         )
     return citations
+
+
+def evidence_utilization(delivered: int, cited: int) -> dict:
+    """delivered=14 / cited=0 is retrieval failing, and until this function nobody
+    was doing the division.
+
+    `delivered` is what `build_prompt` REPORTED PUTTING IN FRONT OF THE MODEL -
+    its second return value - not what retrieval found. The token budget can drop
+    items, and the honest denominator is what was sent; charging the model for a
+    chunk it never saw would turn a budget cut into a retrieval failure.
+
+    `cited` is distinct evidence items referenced by the answer, which is exactly
+    `len(_citations_from(...))`: that function walks `used` once and appends at
+    most one entry per item, so a forged `[9]` naming nothing is already dropped
+    and citing `[2]` three times is already one.
+
+    None, not 0.0, when nothing was delivered. A division that never happened is
+    not a utilization of zero, and averaging 0.0 into a dashboard would report
+    the empty-corpus case as the worst retrieval there is.
+
+    This is NOT anchor@N. anchor@N asks whether the answer-bearing chunk reached
+    the model; this asks whether what reached it was worth sending, which is the
+    only thing that catches padding the context out to `top_n`.
+    """
+    return {
+        "delivered": delivered,
+        "cited": cited,
+        "utilization": cited / delivered if delivered else None,
+        # THE SCREENSHOT, as a field rather than a comparison a reader has to
+        # make. delivered=0 is not this case: nothing was sent, so nothing was
+        # wasted.
+        "nothing_cited": delivered > 0 and cited == 0,
+    }
 
 
 TRACE_VERSION = 1
@@ -351,6 +389,26 @@ async def answer(
         evidence, min_rrf_score=settings.weak_evidence_rrf_score
     )
     template = await get_prompt(CLARIFY_PROMPT_NAME if clarifying else prompt_name)
+    # THE RELEVANCE FLOOR, applied where it costs nothing. A live trace read
+    # "14개 중 14개가 모델에게 전달되었습니다" for a trademark question against a
+    # patent corpus: fourteen irrelevant chunks, all sent, and the model
+    # (correctly) cited none of them. Padding the context to fill RETRIEVAL_TOP_N
+    # is not just wasted tokens and money, it invites the model to manufacture a
+    # connection to whatever it was handed.
+    #
+    # A GLOBAL score floor was implemented and measured first, and it is not what
+    # ships: on the 52-question fixture every floor that removed anything also
+    # removed real answers (0.0160 cost 3 questions their answer-bearing chunk,
+    # 0.0170 cost 7), because every question in that fixture is answerable and so
+    # the floor's benefit is invisible there while its cost is not. See the spec.
+    #
+    # Narrowing it to the weak branch makes the cost exactly zero on the same
+    # fixture, because the weak detector fires on 0 of those 52. The few items
+    # kept are not for answering - they are what the clarification is required to
+    # ground its suggested questions in, so that it offers topics the corpus
+    # actually contains instead of inventing them.
+    if clarifying:
+        evidence = evidence[: settings.clarify_evidence_items]
     messages, used_evidence = build_prompt(
         question,
         history,
@@ -376,12 +434,19 @@ async def answer(
     latency_ms = int((time.perf_counter() - started) * 1000)
 
     citations = _citations_from(result.content, used_evidence)
+    # `evidence_used` and `citations` below have always been delivered and cited.
+    # Both numbers were already here; nobody was dividing them, so a request that
+    # sent 14 chunks and used none of them logged the same shape as one that used
+    # all 14. These two keys are that division, and the flag on it.
+    utilization = evidence_utilization(len(used_evidence), len(citations))
     log_event(
         logger,
         "answer_generated",
         model=result.model,
         evidence_used=len(used_evidence),
         citations=len(citations),
+        evidence_utilization=utilization["utilization"],
+        nothing_cited=utilization["nothing_cited"],
         latency_ms=latency_ms,
         prompt_name=template.name,
         prompt_version=template.version,
