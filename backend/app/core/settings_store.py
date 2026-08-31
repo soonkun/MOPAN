@@ -99,8 +99,10 @@ RUNTIME_SAFE_SETTINGS: dict[str, SettingSpec] = {
             group=RETRIEVAL,
             label="후보 검색 개수",
             help=(
-                "벡터 검색과 키워드 검색이 각각 가져오는 후보 수입니다. "
-                "재순위 모델이 점수를 매기는 대상이기도 합니다."
+                "벡터 검색과 키워드 검색이 각각 가져오는 후보 수입니다. 두 결과를 RRF로 합친 뒤 "
+                "그중 상위 '답변에 사용할 근거 수'만 답변에 쓰이므로, 이 값은 그 순위 경쟁에 "
+                "참여하는 후보의 범위입니다. 환경변수 RERANK_MODEL을 설정한 경우에만 재순위 "
+                "모델이 이 후보 전체를 다시 정렬하며, 기본값은 재순위 없음입니다."
             ),
         ),
         SettingSpec(
@@ -228,6 +230,25 @@ ENV_ONLY_SETTINGS: list[EnvOnlySetting] = [
         reason=(
             "chunks.embedding 컬럼의 실제 차원과 같아야 합니다. 바꾸려면 마이그레이션과 전체 재색인이 "
             "필요하고, 불일치하면 서버가 준비 상태 점검에서 기동을 거부합니다. 환경변수로만 바꿉니다."
+        ),
+    ),
+    EnvOnlySetting(
+        key="SPARSE_TOKENIZER",
+        label="키워드 검색 토크나이저",
+        reason=(
+            "simple / bigram 중 하나를 고르는 값이라 이 화면의 숫자 입력 칸으로는 다룰 수 없습니다. "
+            "저장된 색인은 청크를 쓸 때 설정되어 있던 토크나이저로 만들어져 있어서, 이 값을 바꾸면 "
+            "scripts/backfill_tsv.py 로 전체를 다시 색인해야 합니다. 다시 색인하지 않으면 질문과 "
+            "색인이 서로 다른 방식으로 쪼개져 키워드 검색이 아무것도 찾지 못합니다."
+        ),
+    ),
+    EnvOnlySetting(
+        key="RERANK_MODEL",
+        label="재순위 모델",
+        reason=(
+            "모델 이름이라 이 화면의 숫자 입력 칸으로는 다룰 수 없습니다. 비워 두면 재순위 단계 자체가 "
+            "실행 경로에 없으며, 그것이 현재 기본값입니다. 켜면 질문 하나마다 completion 호출이 "
+            "추가되므로 scripts/eval_retrieval.py 로 측정한 뒤 환경변수로 바꿉니다."
         ),
     ),
 ]

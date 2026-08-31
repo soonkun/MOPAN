@@ -169,7 +169,10 @@ class WorkflowRun:
         settings: Settings,
         llm_provider: LLMProvider,
         sessionmaker: async_sessionmaker[AsyncSession],
-        reranker: Reranker,
+        # `Reranker | None`, and None means the rerank stage is not in the call
+        # path at all - there is no do-nothing implementation to pass instead,
+        # and there must not be one again. See app/retrieval/reranker.py.
+        reranker: Reranker | None,
         approved: frozenset[str] = frozenset(),
         denied: frozenset[str] = frozenset(),
         results: dict[str, list[Evidence]] | None = None,

@@ -40,15 +40,33 @@ async def test_vector_extension_is_installed(test_engine):
     assert installed == 1
 
 
-async def test_content_tsv_is_a_stored_generated_column(test_engine):
+async def test_content_tsv_is_a_plain_application_written_column(test_engine):
+    """It was GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED until
+    0012. It cannot be any more: the sparse arm tokenizes Korean with character
+    bigrams in Python, a generated column may only call IMMUTABLE SQL, and this
+    deployment has no Korean tokenizer to call. So the application writes it.
+
+    NOT NULL and the GIN index both have to survive that change - NOT NULL is
+    what stops a writer forgetting the column and leaving a chunk invisible to
+    the sparse arm, and the index is the sparse arm."""
     async with test_engine.connect() as conn:
-        generated = await conn.scalar(
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT is_generated, is_nullable, data_type "
+                    "FROM information_schema.columns "
+                    "WHERE table_name = 'chunks' AND column_name = 'content_tsv'"
+                )
+            )
+        ).one()
+        index = await conn.scalar(
             text(
-                "SELECT is_generated FROM information_schema.columns "
-                "WHERE table_name = 'chunks' AND column_name = 'content_tsv'"
+                "SELECT indexdef FROM pg_indexes "
+                "WHERE tablename = 'chunks' AND indexname = 'ix_chunks_content_tsv'"
             )
         )
-    assert generated == "ALWAYS"
+    assert row == ("NEVER", "NO", "tsvector")
+    assert index is not None and "USING gin" in index
 
 
 async def test_retrieval_indexes_exist_with_expected_access_methods(test_engine):

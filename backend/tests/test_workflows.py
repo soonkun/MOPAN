@@ -58,7 +58,6 @@ from app.models.message import Message
 from app.models.prompt import Prompt
 from app.models.user import User
 from app.models.workflow import Workflow
-from app.retrieval.reranker import NoneReranker
 from app.retrieval.vector_store import PgVectorStore
 from app.workflow.catalogue import (
     DEFAULT_WORKFLOW,
@@ -417,7 +416,7 @@ async def test_retrieve_restricted_to_one_collection_cannot_reach_another(db, fa
         db,
         PgVectorStore(db),
         fake_llm,
-        NoneReranker(),
+        None,
         "다이아지논 살포 기준",
         settings=settings,
         workflow=DEFAULT_WORKFLOW,
@@ -430,7 +429,7 @@ async def test_retrieve_restricted_to_one_collection_cannot_reach_another(db, fa
         db,
         PgVectorStore(db),
         fake_llm,
-        NoneReranker(),
+        None,
         "다이아지논 살포 기준",
         settings=settings,
         workflow=restricted,

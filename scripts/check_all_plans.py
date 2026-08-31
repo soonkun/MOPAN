@@ -37,6 +37,16 @@ PLANS = [
     # and rule 3 reads a later plan's block for a path as replacing an earlier
     # one's. It says nothing about `frontend/`, which is another agent's.
     "docs/superpowers/plans/2026-08-31-workflow-engine.md",
+    # Slice 6's front end. It supersedes the frontend halves of the slice-4 and
+    # agent-builder plans - `components/agents/` and `app/(app)/agents/` no
+    # longer exist - and says nothing about `backend/`, which the plan above
+    # owns.
+    "docs/superpowers/plans/2026-08-31-workflow-frontend.md",
+    # The retrieval redesign. It supersedes the retrieval halves of the
+    # neighbour-expansion and prompt-budget plans - `NoneReranker` is deleted and
+    # `content_tsv` stops being a generated column - and says nothing about
+    # `frontend/`.
+    "docs/superpowers/plans/2026-08-31-retrieval-redesign.md",
 ]
 
 missing = [p for p in PLANS if not (REPO / p).exists()]

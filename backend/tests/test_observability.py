@@ -428,6 +428,13 @@ async def test_the_api_key_can_be_neither_read_nor_written(owner, db, app):
         # off/targeted/blanket - a choice, not a number, so it has no editable
         # spec and appears here instead. See app/core/settings_store.py.
         "NEIGHBOR_EXPANSION",
+        # simple/bigram - also a choice, and changing it additionally invalidates
+        # every stored tsvector until scripts/backfill_tsv.py has run.
+        "SPARSE_TOKENIZER",
+        # A model name, and "" means the rerank stage is absent from the call
+        # path. It is listed so the screen SAYS the stage exists and is off,
+        # rather than leaving the user to infer it from silence.
+        "RERANK_MODEL",
     }
     assert all(item["reason"] for item in body["env_only"])
 

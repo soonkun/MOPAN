@@ -6,7 +6,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.chunk import Chunk
+from app.models.chunk import Chunk, sparse_tsvector
 from app.models.document import Document
 
 
@@ -101,6 +101,7 @@ class PgVectorStore(VectorStore):
                     "document_id": item.document_id,
                     "chunk_index": item.chunk_index,
                     "content": item.content,
+                    "content_tsv": sparse_tsvector(item.content),
                     "token_count": item.token_count,
                     "char_count": item.char_count,
                     "page": item.page,
@@ -111,8 +112,13 @@ class PgVectorStore(VectorStore):
                 for item in items
             ]
         )
-        # content_tsv is a generated column - Postgres maintains it, and naming it
-        # here would be an error.
+        # content_tsv STOPPED being a generated column in migration 0012 and is
+        # now written here. Postgres has no Korean tokenizer, this deployment
+        # cannot install one, and a GENERATED column may only call IMMUTABLE SQL -
+        # so the tokenizer runs in Python and the value has to be supplied. It is
+        # in `set_` below as well: without that, re-ingesting a document whose
+        # text changed would update `content` and leave the old tokens behind, and
+        # the chunk would be findable only by what it used to say.
         # Core INSERT, so it bypasses the session identity map: a Chunk already
         # loaded in this session keeps its stale content until commit or expire.
         await self.db.execute(
@@ -122,6 +128,7 @@ class PgVectorStore(VectorStore):
                     name: statement.excluded[name]
                     for name in (
                         "content",
+                        "content_tsv",
                         "token_count",
                         "char_count",
                         "page",

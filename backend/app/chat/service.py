@@ -118,6 +118,69 @@ async def retrieve(
         # someone turns it on.
         query_expansion=settings.query_expansion_count,
         query_expansion_model=settings.query_expansion_model,
+        # A timeout, not a retry: expansion is an optimisation, so the arriving
+        # answer must never wait on it longer than the search it was meant to
+        # improve. hybrid_search falls back to the question as asked.
+        query_expansion_timeout=settings.query_expansion_timeout_seconds,
+        # Query-side only, and passed here for the third time for the same
+        # reason: the tokenizer the sparse arm scores the QUESTION with has to
+        # match the one the index was built with, and a call site that forgets it
+        # silently degrades to `simple` against a bigram index.
+        sparse_tokenizer=settings.sparse_tokenizer,
+    )
+
+
+# The name of the prompt the weak-evidence branch answers with. A stored prompt
+# like any other (app/chat/prompt.py:CLARIFY_SYSTEM_PROMPT is its fallback text),
+# so the branch shows up in the trace and on the message row as
+# prompt_name="clarify_agent" - which is the only record that says a question was
+# answered with a question.
+CLARIFY_PROMPT_NAME = "clarify_agent"
+
+
+def evidence_is_weak(items: list[Evidence], *, min_rrf_score: float) -> bool:
+    """Did retrieval come back too weak to answer from? Read off the EVIDENCE.
+
+    Never off the question. Query length says nothing - a short well-formed
+    question is fine, a long vague one is not - so the only input is what the two
+    arms actually returned.
+
+    Two signals, and deliberately only two. Every extra branch is another way to
+    divert a question that had a perfectly good answer, and a detector that
+    interrogates users who asked answerable questions is worse than the dead end
+    it replaces.
+
+    1. THE BEST RRF SCORE is below `min_rrf_score`. RRF scores are comparable
+       across queries at a fixed rrf_k, which is what makes a threshold mean
+       anything: at k=60 a chunk found by BOTH arms at rank 1 scores 2/61, one
+       found by a single arm at rank 1 scores 1/61 = 0.0164, below the 0.0170
+       default. The best score, not `items[0]`'s: the reranker is allowed to
+       reorder this list, and taking the maximum is the reading that triggers
+       least often.
+    2. NOTHING IS CORROBORATED - no item was found by the dense arm AND the
+       keyword arm. With sparse_weight=1.0 and no query expansion this is
+       implied by (1) and adds no new trigger; it stops being implied when N
+       rewrites feed both arms, and one arm agreeing with itself N times is not
+       agreement.
+
+    SCATTER - top hits landing in unrelated sections - was considered and
+    rejected. The questions whose evidence legitimately scatters are the
+    cross-reference ones (준용/crossref), which are the hardest questions the
+    corpus can still answer; a scatter test diverts exactly those.
+    """
+    if not items:
+        return True
+    # Anything that did not come from the corpus search has no RRF score to judge
+    # by, and its presence is not retrieval failing: a user's own attachment and
+    # an MCP tool result ARE evidence. Asking someone to clarify a question they
+    # attached the answer to is the worst false trigger available here.
+    if any(item.source_type != "rag" for item in items):
+        return False
+    if max(item.metadata.get("rrf_score") or 0.0 for item in items) < min_rrf_score:
+        return True
+    return not any(
+        item.metadata.get("vector_rank") is not None and item.metadata.get("keyword_rank") is not None
+        for item in items
     )
 
 
@@ -277,7 +340,17 @@ async def answer(
     tests/test_chat_service.py pins - no session, no retrieval collaborator -
     is unchanged. The default is the name every caller used before workflows
     existed, which is why naming no workflow is not a second code path."""
-    template = await get_prompt(prompt_name)
+    # THE WEAK-EVIDENCE BRANCH (spec S8). The clarification IS the answer: same
+    # path, same fence, same budget, a different system prompt. It overrides the
+    # workflow's `prompt_name` on purpose - a workflow picks how to answer, and
+    # this is the case where there is nothing to answer from.
+    #
+    # Short-circuit, so CLARIFY_ON_WEAK_EVIDENCE=false costs exactly nothing: the
+    # detector is not called and the clarify prompt is never loaded.
+    clarifying = settings.clarify_on_weak_evidence and evidence_is_weak(
+        evidence, min_rrf_score=settings.weak_evidence_rrf_score
+    )
+    template = await get_prompt(CLARIFY_PROMPT_NAME if clarifying else prompt_name)
     messages, used_evidence = build_prompt(
         question,
         history,
@@ -312,6 +385,9 @@ async def answer(
         latency_ms=latency_ms,
         prompt_name=template.name,
         prompt_version=template.version,
+        # The false-trigger rate is the number this feature lives or dies on, and
+        # this is the field it is counted from.
+        clarified=clarifying,
         **{k: v for k, v in result.usage.items() if isinstance(v, int)},
     )
     return ChatAnswer(

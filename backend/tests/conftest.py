@@ -173,6 +173,20 @@ async def app(test_engine, test_sessionmaker, fake_redis, tmp_path_factory):
             # that cares overrides it locally (tests/test_chat.py).
             "answer_model": "gpt-4o",
             "answer_models": [],
+            # Pinned OFF for the same reason as the two above, and this one is
+            # worth spelling out. Most tests here run /api/chat against an empty
+            # or tiny corpus, so retrieval legitimately comes back weak and the
+            # clarification branch legitimately fires - which would make five
+            # tests that are about something else entirely (usage capture, prompt
+            # versioning, workflow prompt selection) start asserting against
+            # "clarify_agent". Those tests are not wrong; they are simply not
+            # about this branch.
+            #
+            # The branch itself is covered by tests/test_clarify.py, which
+            # switches it back on deliberately. The cost of this line is that the
+            # SHIPPED default (True) is not exercised end to end, which is why
+            # the live check in the plan's Task 146 is not optional.
+            "clarify_on_weak_evidence": False,
         }
     )
     application.state.settings = settings

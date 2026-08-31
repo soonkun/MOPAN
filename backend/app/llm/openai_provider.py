@@ -118,8 +118,28 @@ class OpenAIProvider(LLMProvider):
         started = time.perf_counter()
         vectors: list[list[float]] = []
         try:
+            # `dimensions` is what lets EMBEDDING_MODEL move to a wider model
+            # WITHOUT a migration. text-embedding-3-* are Matryoshka models: the
+            # parameter truncates to the first N dimensions and renormalises, and
+            # on this corpus text-embedding-3-large at 1536 measured IDENTICALLY
+            # to the full 3072 (anchor@14 0.904, recall 1.000) - so the existing
+            # vector(1536) column is not a constraint on model choice.
+            #
+            # Only sent for models that accept it. text-embedding-ada-002 rejects
+            # the parameter outright, and a provider that silently dropped it
+            # would return 1536-wide vectors that happen to match EMBEDDING_DIM
+            # while being a different model's - which the width check below
+            # cannot catch.
+            extra = (
+                {"dimensions": self.embedding_dim}
+                if self.embedding_dim is not None
+                and self.embedding_model.startswith("text-embedding-3-")
+                else {}
+            )
             for batch in self._batches(texts):
-                response = await self.client.embeddings.create(model=self.embedding_model, input=batch)
+                response = await self.client.embeddings.create(
+                    model=self.embedding_model, input=batch, **extra
+                )
                 vectors.extend(self._vectors_in_input_order(response, len(batch)))
         except OpenAIError as exc:
             # str(exc) on every SDK error class is "Error code: N - {server body}"

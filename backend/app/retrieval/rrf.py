@@ -1,4 +1,3 @@
-import math
 from collections import defaultdict
 
 
@@ -22,25 +21,16 @@ def reciprocal_rank_fusion(
     without changing the call site's shape; negatives are rejected because a
     ranking that subtracts is not a ranking.
 
-    Ties are broken by first appearance, which the stable sort gives for free:
-    the earlier ranking wins, and the order never depends on hash order.
-
-    THAT PROPERTY USED TO HAVE A CEILING OF TWO RANKINGS, and multi-query
-    expansion (app/retrieval/expansion.py) passes more. The old note here was
-    right: with `+=` the same addends arrive in a different order per id - id A
-    scores 1/61 + 1/70, id B scores 1/70 + 1/61 - and float addition is not
-    associative, so two nominally equal scores land 1 ulp apart and stop
-    comparing equal. Still deterministic, but no longer a tie, and the
-    first-appearance rule silently stops applying to exactly the ids it was
-    written for.
-
-    The fix is `math.fsum`, which is exactly rounded and therefore
-    ORDER-INDEPENDENT: the same multiset of addends gives bit-identical results
-    whatever order they arrive in, so nominally equal scores compare equal again
-    and the stable sort resumes breaking the tie by first appearance. Hence the
-    per-id list of contributions below rather than a running total - it is the
-    cheapest thing that restores the documented invariant at any number of
-    rankings, and it is what makes it safe to pass more than two.
+    Ties are broken by FIRST APPEARANCE, recorded explicitly rather than left to
+    the stable sort. The stable sort used to be the whole mechanism, and its
+    guarantee held only while a fused score was a sum of at most two terms:
+    with three or more rankings the same addends arrive in a different order per
+    id and land 1 ulp apart, so nominally equal scores stop comparing equal.
+    Query expansion makes that the normal case - N rewrites feed both arms, so
+    2N rankings arrive here - and a docstring promising a property the code no
+    longer had is worse than no promise. `first_seen` restores it for any number
+    of rankings: two ids whose float scores compare equal are ordered by which
+    retriever saw one first, and the result never depends on dict or hash order.
     """
     if k < 0:
         raise ValueError(f"rrf k must be >= 0, got {k}")
@@ -51,9 +41,8 @@ def reciprocal_rank_fusion(
     elif any(weight < 0 for weight in weights):
         raise ValueError(f"rrf weights must be >= 0, got {weights}")
 
-    # Insertion order is first-appearance order across every ranking, which is
-    # what the stable sort at the bottom turns into the tie-break.
-    contributions: dict[str, list[float]] = defaultdict(list)
+    scores: dict[str, float] = defaultdict(float)
+    first_seen: dict[str, int] = {}
     for ranking, weight in zip(rankings, weights, strict=True):
         # dict.fromkeys de-duplicates while keeping order. An id repeated within
         # one ranking is malformed input - a list of ranks has each id once - and
@@ -61,7 +50,12 @@ def reciprocal_rank_fusion(
         # candidate above every honest one. Per ranking, so an id in two lists
         # still scores twice.
         for position, item_id in enumerate(dict.fromkeys(ranking), start=1):
-            contributions[item_id].append(weight / (k + position))
+            scores[item_id] += weight / (k + position)
+            # setdefault, not assignment: the FIRST ranking to offer an id owns
+            # its tie-break position, exactly as the stable sort used to give.
+            first_seen.setdefault(item_id, len(first_seen))
 
-    scores = [(item_id, math.fsum(terms)) for item_id, terms in contributions.items()]
-    return sorted(scores, key=lambda pair: pair[1], reverse=True)
+    # Descending score, ascending first-appearance. Two sort keys rather than
+    # `reverse=True` because the two directions differ: reversing the whole
+    # comparison would make a later-seen id win a tie.
+    return sorted(scores.items(), key=lambda pair: (-pair[1], first_seen[pair[0]]))

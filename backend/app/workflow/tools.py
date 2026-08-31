@@ -60,7 +60,9 @@ class ToolContext:
     settings: Settings
     llm_provider: LLMProvider
     sessionmaker: async_sessionmaker[AsyncSession]
-    reranker: Reranker
+    # None means the rerank stage is absent, not stubbed. See
+    # app/retrieval/reranker.py for why a null object is banned here.
+    reranker: Reranker | None
     depth: int = 0
     # A one-element list rather than an int, because an int would be copied into
     # the nested context and the budget would silently reset. See above.

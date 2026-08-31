@@ -24,7 +24,6 @@ from app.rag.blocks import Block
 from app.rag.chunking.structure import build_size_bounded_candidates
 from app.retrieval.evidence import RetrievedChunk
 from app.retrieval.neighbors import expand, opens_with, strip_overlap
-from app.retrieval.reranker import NoneReranker
 from app.retrieval.service import hybrid_search
 from app.retrieval.vector_store import ScoredId, VectorStore
 
@@ -352,7 +351,7 @@ async def _hybrid(db, corpus, **kwargs):
         db,
         FixedVectorStore(ordered),
         FakeLLMProvider(),
-        NoneReranker(),
+        None,
         "복대리인 책임",
         top_n=kwargs.pop("top_n", 4),
         rrf_k=60,

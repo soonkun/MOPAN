@@ -14,7 +14,6 @@ from app.models.conversation import Conversation
 from app.models.message import Message
 from app.models.user import User
 from app.retrieval.evidence import Evidence
-from app.retrieval.reranker import NoneReranker
 from app.retrieval.vector_store import VectorStore
 
 
@@ -227,7 +226,13 @@ async def test_answer_captures_the_model_usage_and_latency(settings):
     assert result.model == "gpt-4o-mini"
     assert result.usage == {"prompt_tokens": 11, "completion_tokens": 3}
     assert result.latency_ms >= 0
-    assert result.prompt_name == "answer_agent"
+    # "clarify_agent", not "answer_agent": this call passes NO evidence, and
+    # empty evidence is the weakest evidence there is. The clarification branch
+    # is the answer path for that case now - it asks the reader what they are
+    # after instead of returning the dead end "관련 문서가 없습니다". What this
+    # test is actually about (usage, latency, that SOME prompt was recorded) is
+    # unchanged; see test_clarify.py for the branch itself.
+    assert result.prompt_name == "clarify_agent"
     assert result.prompt_version
 
 
@@ -265,7 +270,7 @@ async def test_retrieve_holds_no_transaction_across_the_embedding_call(
                 )
             return await super().embed(texts)
 
-    await retrieve(db, EmptyVectorStore(), SpyLLM(), NoneReranker(), "q", settings=settings)
+    await retrieve(db, EmptyVectorStore(), SpyLLM(), None, "q", settings=settings)
 
     assert observed["session_in_transaction"] is False
     # None means the connection was handed back to the pool and closed outright.
@@ -274,7 +279,7 @@ async def test_retrieve_holds_no_transaction_across_the_embedding_call(
 
 async def test_retrieve_still_works_after_releasing_the_session(db, settings):
     """Releasing the transaction must not cost the caller the query itself."""
-    evidence = await retrieve(db, EmptyVectorStore(), FakeLLM(), NoneReranker(), "q", settings=settings)
+    evidence = await retrieve(db, EmptyVectorStore(), FakeLLM(), None, "q", settings=settings)
     assert evidence == []
 
 

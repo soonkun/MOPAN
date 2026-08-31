@@ -6,7 +6,9 @@
     "every re-ingestion, page numbers do not. `anchor` is a verbatim substring of the gold",
     "passage - if the extractor changes and a page shifts, grep the anchor to re-locate it.",
     "`group` splits the set. Absent or \"base\" is the original 21 questions. \"neighbor\" is the 8 written FROM measured proviso splits: the rule is in one chunk and the 다만/그러나 that qualifies it is in the NEXT one, so retrieving only the rule chunk yields a confidently wrong answer. Their `anchor` is the proviso sentence, which is what makes them able to detect NEIGHBOR_EXPANSION at all - the base questions cannot, because none of them was chosen for spanning a chunk boundary.",
-    "\"josa\" is the 2 written FROM the measured josa-mismatch bug, one in each direction: q30 asks a bare noun the corpus only ever writes with a josa glued on (query shorter than the document token), q31 asks with a josa the corpus writes bare (query longer). A fix that only strips or only extends in one direction moves one of these two and not the other, which is the point of having both.",
+    "\"tokenizer\" is 8 questions that probe the known content_tsv bug: content_tsv is to_tsvector('simple', content), which does not segment Korean, so a josa stays glued to the noun and the document token 상표등록출원이나 never matches the query token 상표등록출원. Each was verified with plainto_tsquery('simple', ...) against the live corpus: the form in `query_form` matches ZERO chunks as a lexeme while the form in `doc_form` is what the corpus actually stores. `probe` says which way the mismatch runs - \"bare->inflected\" (question bare, document josa-glued) or \"inflected->bare\" (question josa-glued, document bare). query_form/doc_form are documentation, not scored. These questions can only be won by the dense side or by a tokenizer that segments Korean; a pure sparse run should fail them.",
+    "\"proviso\" is 10 questions where retrieving the main rule WITHOUT its 단서/다만 clause produces a confidently WRONG answer. Each is phrased so the main rule alone answers backwards - the exception case is asked about directly, or the yes/no flips on the proviso - and the `anchor` is the PROVISO sentence, never the main rule, which is what lets the metric see the failure. Includes double-negative (p04, p07) and condition-stacking (p05, p06, p09) phrasings. `why` records what the wrong answer would be on the main rule alone; documentation, not scored.",
+    "\"crossref\" is 5 questions whose answer needs a 준용/참조 hop BETWEEN sections of this manual. gold_pages lists both hops, pointer page first, and the `anchor` sits on the SECOND hop, so a retriever that only wins the page the query lexically matches scores zero. References OUT to 특허법/시행령/시행규칙 were excluded on purpose: those statutes are not in the corpus, so they are not graph-traversable. 5 is close to the honest ceiling - internal manual-to-manual pointers are rare next to the ~hundreds of statute citations.",
     "Run with: python scripts/eval_retrieval.py"
   ],
   "document_filename": "특허·실용신안 심사기준.pdf",
@@ -289,22 +291,251 @@
       "anchor": "신청인이 책임질 수 없는 사유가 발생하거나 국내단계에 진입하는 국제특허출원 등 지정기간의 추가 연장이 필요하다고 인정되는 경우에는 추가 연장이 가능하다"
     },
     {
-      "id": "q30-상표등록출원-조약우선권기초",
-      "group": "josa",
-      "question": "상표등록출원",
+      "id": "t01-상표등록출원",
+      "group": "tokenizer",
+      "probe": "bare→inflected",
+      "query_form": "상표등록출원",
+      "doc_form": "상표등록출원이나",
+      "question": "조약우선권주장의 기초가 되는 제1국출원으로 상표등록출원도 인정되나요?",
       "gold_pages": [
         573
       ],
       "anchor": "상표등록출원이나 서비스마크는 성격상 특허의 우선권주장의 기초 출원으로 인정할 수 없다"
     },
     {
-      "id": "q31-특허고객번호-출원서기재사항",
-      "group": "josa",
-      "question": "특허고객번호는 어디에 기재하나요?",
+      "id": "t02-등록지연-존속기간연장",
+      "group": "tokenizer",
+      "probe": "bare→inflected",
+      "query_form": "등록지연",
+      "doc_form": "등록지연에",
+      "question": "등록지연 때문에 특허권 존속기간을 연장받으려면 어떤 조건을 충족해야 하나요?",
       "gold_pages": [
-        148
+        641
       ],
-      "anchor": "그 외에도 특허고객번호, 우선권주장여부"
+      "anchor": "특허출원일부터 4년과 출원심사 청구일부터 3년 중 늦은 날보다 지연되어"
+    },
+    {
+      "id": "t03-파라미터발명-신규성",
+      "group": "tokenizer",
+      "probe": "bare→inflected",
+      "query_form": "파라미터발명",
+      "doc_form": "파라미터발명은",
+      "question": "파라미터발명 신규성은 어떻게 판단해?",
+      "gold_pages": [
+        284
+      ],
+      "anchor": "파라미터발명은 파라미터 자체를 청구항의 일부로 하여 신규성을 판단하되"
+    },
+    {
+      "id": "t04-거절결정등본-재심사청구",
+      "group": "tokenizer",
+      "probe": "bare→inflected",
+      "query_form": "거절결정등본",
+      "doc_form": "특허거절결정등본을",
+      "question": "거절결정등본 받고 나서 재심사 청구는 언제까지 할 수 있나요?",
+      "gold_pages": [
+        513
+      ],
+      "anchor": "재심사를 청구할 수 있는 기간은 특허거절결정등본을 송달받은 날부터 3개월"
+    },
+    {
+      "id": "t05-보정각하-청구항삭제",
+      "group": "tokenizer",
+      "probe": "inflected→bare",
+      "query_form": "보정각하가",
+      "doc_form": "보정각하",
+      "question": "청구항을 삭제하는 보정 때문에 새로운 거절이유가 생긴 경우에도 보정각하가 되나요?",
+      "gold_pages": [
+        384
+      ],
+      "anchor": "청구항을 삭제하는 보정에 의해 새로운 거절이유가 발생된 경우는 제외된다"
+    },
+    {
+      "id": "t06-심사보류-재연장",
+      "group": "tokenizer",
+      "probe": "inflected→bare",
+      "query_form": "심사보류를",
+      "doc_form": "심사보류",
+      "question": "심사보류를 한 번 했는데 그 사유가 안 없어지면 또 연장할 수 있나요?",
+      "gold_pages": [
+        495
+      ],
+      "anchor": "2개월 이내에서 심사보류 또는 처리기간의 연장을 다시 할 수 있다"
+    },
+    {
+      "id": "t07-녹색기술-우선심사",
+      "group": "tokenizer",
+      "probe": "inflected→bare",
+      "query_form": "녹색기술은",
+      "doc_form": "녹색기술",
+      "question": "녹색기술은 우선심사 대상이 되려면 어떤 요건을 갖춰야 하나요?",
+      "gold_pages": [
+        691
+      ],
+      "anchor": "우선심사 대상 탄소중립 녹색기술 특허분류가 부여된 특허출원"
+    },
+    {
+      "id": "t08-실시준비-자기실시",
+      "group": "tokenizer",
+      "probe": "inflected→bare",
+      "query_form": "실시준비를",
+      "doc_form": "실시준비",
+      "question": "출원인 말고 실시권자가 실시준비를 하고 있어도 자기실시를 이유로 우선심사 신청이 돼?",
+      "gold_pages": [
+        734
+      ],
+      "anchor": "출원인과 실시자가 다른 경우에는 실시자와 출원인 간에 실시 계약이 있는 경우에 한하여"
+    },
+    {
+      "id": "p01-의료행위-제어방법-예외",
+      "group": "proviso",
+      "question": "심장박동 조절 방법은 의료행위라서 산업상 이용가능성이 없다는데, 그 단계를 심장박동 조절장치의 제어부가 수행하는 제어방법으로 청구해도 마찬가지인가요?",
+      "gold_pages": [
+        252
+      ],
+      "anchor": "심장박동 조절장치의 제어부가 수행하는 제어 방법인 경우에는 산업상 이용 가능성이 인정",
+      "why": "본칙만 검색되면 '의료행위를 단계로 포함하므로 산업상 이용가능성 부정 → 거절'이라고 잘못 답한다."
+    },
+    {
+      "id": "p02-수술방법-미용목적-예외",
+      "group": "proviso",
+      "question": "미용 목적 및 용도로 한정하면 산업상 이용가능성이 인정된다고 하던데, 수술방법도 미용 목적으로 한정하면 인정받을 수 있나요?",
+      "gold_pages": [
+        255
+      ],
+      "anchor": "미용 목적 및 용도로 한정하더라도 산업상 이용 가능한 것으로 인정하지",
+      "why": "본칙(미용 목적으로 한정하면 인정)만 검색되면 '수술방법도 인정된다'고 잘못 답한다."
+    },
+    {
+      "id": "p03-수탁증사본-사후첨부",
+      "group": "proviso",
+      "question": "미생물 출원을 하면서 수탁증 사본을 안 붙였으면 그 출원은 무조건 부적법하게 되는 건가요?",
+      "gold_pages": [
+        232
+      ],
+      "anchor": "심사관의 거절이유통지를 받고 사본을 첨부하는 경우에는 적법한 것으로 보고 수리하여",
+      "why": "본칙만 검색되면 '수탁증 사본 미첨부 = 부적법'이라고 잘못 답한다."
+    },
+    {
+      "id": "p04-실시예결합-인용발명",
+      "group": "proviso",
+      "question": "하나의 간행물에 실린 서로 다른 실시예 둘을 묶어서 하나의 인용발명으로 삼을 수는 없다고 알고 있는데, 그러면 어떤 경우에도 결합하지 못하는 건가요?",
+      "gold_pages": [
+        286
+      ],
+      "anchor": "2 이상의 실시예로부터 하나의 인용발명이 자명하게 도출되는 경우에는 그러하지 아니하다",
+      "why": "본칙만 검색되면 '실시예를 결합해 하나의 인용발명으로 삼는 것은 불가'라고 잘못 답한다."
+    },
+    {
+      "id": "p05-합금-개방형청구항-성분량",
+      "group": "proviso",
+      "question": "조성비를 %로 적었는데 하나의 최소성분량과 나머지 최대성분량의 합이 100%에 미달합니다. \"~를 포함하는\" 개방형으로 쓰면 명확한 기재로 봐주나요? 합금 발명이에요.",
+      "gold_pages": [
+        197,
+        198
+      ],
+      "anchor": "최대성분량의 합이 100%에 미달하는 것을 허용하지 않으므로 발명이 불명확하다",
+      "why": "예외(개방형 청구항이면 미달해도 명확)까지만 검색되면 '명확한 기재로 인정된다'고 잘못 답한다. 합금은 그 예외의 예외다."
+    },
+    {
+      "id": "p06-선원지위-거절확정-협의불성립",
+      "group": "proviso",
+      "question": "거절결정이 확정된 출원은 선출원의 지위를 갖지 않는다고 하는데, 같은 날 출원이라 협의불성립을 이유로 거절이 확정된 경우에도 지위가 없나요?",
+      "gold_pages": [
+        346
+      ],
+      "anchor": "그 이유로 거절결정이나 거절한다는 취지의 심결이 확정된 경우에는 선원의 지위를 갖는다",
+      "why": "본칙만 검색되면 '거절결정이 확정되었으므로 선원의 지위 없음'이라고 잘못 답한다."
+    },
+    {
+      "id": "p07-새로운효과추가-신규사항",
+      "group": "proviso",
+      "question": "최초 명세서에 없던 새로운 효과를 보정으로 추가하면 무조건 신규사항 추가가 되는 거 아닌가요?",
+      "gold_pages": [
+        375
+      ],
+      "anchor": "잘 알려진 사실인 경우에는 신규사항 추가에 해당되지 않는다",
+      "why": "본칙(새로운 효과 추가는 신규사항 추가)만 검색되면 '무조건 신규사항 추가 → 거절'이라고 잘못 답한다."
+    },
+    {
+      "id": "p08-보정각하-직권보정-예외",
+      "group": "proviso",
+      "question": "최후거절이유통지에 대한 보정에서 새로운 거절이유가 발생하면 심사관은 반드시 보정각하를 해야 하나요?",
+      "gold_pages": [
+        383
+      ],
+      "anchor": "새로운 거절이유가 직권보정이 가능한 사항이라면, 심사관은 보정을 승인하고",
+      "why": "본칙만 검색되면 '새로운 거절이유가 발생했으므로 반드시 각하'라고 잘못 답한다."
+    },
+    {
+      "id": "p09-후출원-심사착수보류-예외",
+      "group": "proviso",
+      "question": "동일한 발명에 대한 선출원이 아직 공개도 등록공고도 안 됐는데, 후출원 심사에 바로 착수할 수 있는 경우가 있나요?",
+      "gold_pages": [
+        496
+      ],
+      "anchor": "동일한 이유에 의하여 후출원을 거절할 수 있는 경우에는 심사에 착수할 수 있다",
+      "why": "본칙만 검색되면 '선출원이 처리·공개·공고될 때까지 심사착수를 보류해야 한다'고 잘못 답한다."
+    },
+    {
+      "id": "p10-외국인-외국실시-우선심사",
+      "group": "proviso",
+      "question": "외국인 출원인이 본국에서 그 발명을 실시하고 있는데, 자기실시를 이유로 우선심사를 신청할 수 있나요?",
+      "gold_pages": [
+        700
+      ],
+      "anchor": "출원인이 외국인인 경우의 실시는 우리나라 내에서의 실시를 의미하므로",
+      "why": "본칙(외국인 출원도 내국인과 동일 기준, 자기실시 신청 인정)만 검색되면 '신청할 수 있다'고 잘못 답한다."
+    },
+    {
+      "id": "x01-보정각하-직권보정가능사항",
+      "group": "crossref",
+      "question": "최후거절이유통지에 대한 보정 때문에 도면부호 불일치 같은 새 거절이유가 생겼는데, 이것도 보정각하 대상인가요?",
+      "gold_pages": [
+        384,
+        793
+      ],
+      "anchor": "국어표준 용어 또는 맞춤법상의 단순한 오자, 탈자 또는 도면부호의 불일치"
+    },
+    {
+      "id": "x02-취소환송-심사보류-확인주기",
+      "group": "crossref",
+      "question": "취소환송된 출원의 심사를 보류한 경우 보류 사유가 해소됐는지 얼마나 자주 확인해야 하나요?",
+      "gold_pages": [
+        422,
+        494
+      ],
+      "anchor": "월 1회 이상 심사를 보류한 사유 또는 처리기간을 연장한 사유가 해소되었는지"
+    },
+    {
+      "id": "x03-우선심사-분류정정",
+      "group": "crossref",
+      "question": "우선심사 신청된 출원인데 특허분류가 부적합하고 제가 담당하는 분류도 아니면 어떻게 처리하나요?",
+      "gold_pages": [
+        708,
+        401
+      ],
+      "anchor": "다른 심사관의 담당분류에 속하는 경우에는 심사관 간에 협의하여 해당 출원을 이송하고"
+    },
+    {
+      "id": "x04-신설청구항-거절이유통지종류",
+      "group": "crossref",
+      "question": "삭제됐던 청구항에 정정 형식으로 발명을 새로 적어 넣어 신설로 취급되는 경우, 거절이유는 최초로 통지하나요 최후로 통지하나요?",
+      "gold_pages": [
+        462,
+        472
+      ],
+      "anchor": "발견된 거절이유 모두가 최후거절이유통지 대상인 경우에만 최후거절이유통지로 하고"
+    },
+    {
+      "id": "x05-등록지연연장-심사착수기한",
+      "group": "crossref",
+      "question": "등록지연에 따른 특허권 존속기간 연장등록출원은 심사관에게 이관된 날부터 언제까지 심사에 착수해야 하나요?",
+      "gold_pages": [
+        663,
+        628
+      ],
+      "anchor": "출원서류가 이관된 날로부터 4월 이내에 심사에 착수한다"
     }
   ]
 }

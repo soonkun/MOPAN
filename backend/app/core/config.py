@@ -96,51 +96,90 @@ class Settings(BaseSettings):
     retrieval_top_n: int = 6
     retrieval_candidate_limit: int = 20
 
+    # HOW THE SPARSE ARM TOKENISES, at ingest AND at query time - the two must
+    # agree or the index answers a question nobody asked. See
+    # app/retrieval/tokenize.py for the functions and
+    # docs/superpowers/specs/2026-08-31-retrieval-redesign.md for the numbers.
+    #
+    # Measured on the live 2578-chunk manual with the 52-question fixture,
+    # top_n=14, candidate_limit=20, sparse arm ALONE / fused with the dense arm:
+    #
+    #                       sparse-only  fused   tokenizer-group  ms/q  new dep
+    #   simple (whitespace)       0.673  0.846             0.750    24        -
+    #   bigram                    0.904  0.962             1.000    71     none
+    #   morphemes (kiwipiepy)     0.923  0.942             1.000    31   30 MB
+    #
+    # BIGRAM, because it scores highest, needs NO new dependency, and its
+    # tokenizer is six lines. Morphological analysis is the standard answer for
+    # Korean search (Elasticsearch's nori) but "standard" is not "necessary
+    # here", and it loses on this corpus while costing a C++ extension.
+    #
+    # 'simple' is kept as a switch, not as a fallback: it is what the query side
+    # must use to read an index that has not been backfilled yet. Changing this
+    # value REQUIRES re-running scripts/backfill_tsv.py - the stored tsvector is
+    # built by whichever tokenizer was configured when the chunk was written.
+    #
+    # ponytail: bigram tsvectors run ~380 lexemes per chunk, so the sparse arm
+    # costs 71 ms at 2578 chunks against 24 ms for 'simple'. That is noise beside
+    # the answer completion today and a problem at 10x the corpus. The upgrade
+    # path is the morpheme row above - already measured, 0.942 fused at 31 ms -
+    # and it needs only this value plus a backfill.
+    sparse_tokenizer: Literal["simple", "bigram"] = "bigram"
+
     # MULTI-QUERY EXPANSION: how many EXTRA retrieval queries an LLM writes from
     # the question. 0 is off and off costs nothing - `hybrid_search` makes no
-    # completion call at 0. See app/retrieval/expansion.py for the mechanism.
-    #
-    # OFF BY DEFAULT BECAUSE IT DID NOT EARN ITS COST. Measured on the real
-    # 2578-chunk manual with the 31-question fixture, top_n=14:
-    #
-    #                                   recall@14  anchor@14  +latency  +cost/q
-    #   baseline                            0.935      0.871         -        -
-    #   expansion(3)                        0.935      0.871    ~0.9 s  ~$0.00005
-    #
-    # Identical on every group, including the two "josa" questions it was written
-    # for. The reason is structural and worth keeping: the dense half of the
-    # hybrid already embeds the question, and an embedding does not care which
-    # josa is attached - so the surface forms expansion generates were already
-    # being found by the vector side, and the sparse side they were meant to
-    # rescue contributes at EXPANSION_WEIGHT, below what the dense list already
-    # scored. A per-question completion for zero measured movement is exactly the
-    # stage that should ship off. Reproduce with
-    # `python scripts/eval_retrieval.py --variants current --expand-queries 0,3`.
+    # completion call at 0. Every variant feeds BOTH arms, so N variants produce
+    # 2N ranked lists. See app/retrieval/expansion.py.
     query_expansion_count: int = 0
     # Env-only, not on the settings screen: it is a model name, not a number, and
     # it must stay a CHEAP model - expansion runs in front of every question and
     # is worth a fraction of a cent, not a frontier completion.
     query_expansion_model: str = "gpt-4o-mini"
+    # A rewrite that has not answered by then is worth less than the original
+    # question, which is what `expand_query` degrades to. Well under
+    # LLM_TIMEOUT_SECONDS on purpose.
+    query_expansion_timeout_seconds: float = 8.0
 
-    # RERANK: the model name, and "" means no reranker. `make_reranker` reads
-    # exactly this; see app/retrieval/reranker.py for why the implementation is
-    # an LLM listwise rerank and not a local cross-encoder.
-    #
-    # OFF BY DEFAULT, and this one is a closer call than expansion. Same fixture,
-    # same corpus, top_n=14, candidate_limit=40:
-    #
-    #                                   recall@14  anchor@14  +latency  +cost/q
-    #   baseline (limit 20)                 0.935      0.871         -        -
-    #   rerank, gpt-4o-mini (limit 40)      0.935      0.839    ~3.4 s  ~$0.0021
-    #
-    # It costs ~$0.002 and three seconds per question to move anchor@14 DOWN. The
-    # candidate pool it is given is the thing to fix first (see
-    # RETRIEVAL_CANDIDATE_LIMIT), not the switch.
+    # RERANK: the model name, and "" means NO RERANKER AT ALL - `make_reranker`
+    # returns None and the stage is not in the call path. It is not a null object
+    # that occupies the slot; there is no such class here any more, and there
+    # must not be one again. See app/retrieval/reranker.py.
     rerank_model: str = ""
     # Well under LLM_TIMEOUT_SECONDS on purpose: a rerank that has not answered by
     # then is worth less than the RRF order it would replace, and `LLMReranker`
     # treats the timeout as its degradation path rather than as an error.
     rerank_timeout_seconds: float = 20.0
+
+    # Answer the user something useful when retrieval comes back weak, instead of
+    # the dead end "관련 문서가 없습니다". The clarification IS the answer: it goes
+    # out as ordinary assistant text through the existing chat path, with 2-4
+    # concrete follow-up questions GROUNDED IN THE RETRIEVED MATERIAL. See
+    # app/chat/prompt.py.
+    #
+    # Detected from the evidence, never from query length: a short well-formed
+    # question is fine and a long vague one is not.
+    #
+    # OFF BY DEFAULT FOR NOW, and that is a measurement statement rather than a
+    # design one. On the 52-question fixture - every question well-formed and
+    # answerable - the detector diverted 3 into clarification at
+    # dense=3-large/sparse=simple. Every one of those is a user interrogated
+    # instead of answered, which is worse than the dead end this replaces. The
+    # number has NOT been re-measured against the bigram sparse arm, where arm
+    # agreement (the detector's second signal) should rise sharply. It ships on
+    # when that number is measured and small, not before.
+    clarify_on_weak_evidence: bool = False
+    # The RRF score below which the top hit counts as weak. RRF scores are
+    # bounded and comparable across queries at a fixed rrf_k, which is what makes
+    # a threshold meaningful at all: a chunk found by BOTH arms at rank 1 scores
+    # 2/61 = 0.0328, one found by a single arm at rank 1 scores 1/61 = 0.0164,
+    # and one found by a single arm at rank 10 scores 1/70 = 0.0143.
+    #
+    # 0.0170 sits just above "one arm, rank 1" and below "one arm, rank 2"
+    # (1/62 = 0.0161)... which is deliberately NOT where it is set. At 0.0170 the
+    # false-trigger rate on the 52-question fixture was measured before this
+    # value was chosen; see the spec. A detector that interrogates users who
+    # asked answerable questions is worse than the dead end it replaces.
+    weak_evidence_rrf_score: float = 0.0170
     # The sparse ranking's weight in RRF. Textbook RRF is 1.0 - every retriever a
     # peer - and that is the value this was measured against, on the real 854-page
     # Korean examination manual with the 20-question set in
@@ -460,7 +499,7 @@ class Settings(BaseSettings):
             raise ValueError("RETRIEVAL_TOP_N must be >= 1")
         if self.retrieval_candidate_limit < 1:
             raise ValueError("RETRIEVAL_CANDIDATE_LIMIT must be >= 1")
-        # `expand_queries` clamps to MAX_EXTRA_QUERIES anyway, so this is not what
+        # `expand_query` clamps to MAX_EXTRA_QUERIES anyway, so this is not what
         # protects the cost - it is what stops the clamp from being SILENT. An
         # operator who sets 20 and gets 5 has a bill and a latency they did not
         # ask for and no message saying why. Negative is off, which 0 already
@@ -469,6 +508,18 @@ class Settings(BaseSettings):
             raise ValueError(f"QUERY_EXPANSION_COUNT must satisfy 0 <= value <= {MAX_EXTRA_QUERIES}")
         if self.rerank_timeout_seconds <= 0:
             raise ValueError("RERANK_TIMEOUT_SECONDS must be > 0")
+        if self.query_expansion_timeout_seconds <= 0:
+            raise ValueError("QUERY_EXPANSION_TIMEOUT_SECONDS must be > 0")
+        # A negative threshold makes every answer weak-evidence and turns the
+        # product into a machine that only ever asks questions back; one above
+        # the maximum reachable RRF score does the same. At rrf_k=60 the ceiling
+        # is 2/(k+1) for an item both arms rank first, so anything at or above it
+        # is not a threshold, it is an always-on switch with no name.
+        if not 0 <= self.weak_evidence_rrf_score < 2 / (self.rrf_k + 1):
+            raise ValueError(
+                f"WEAK_EVIDENCE_RRF_SCORE must satisfy 0 <= value < {2 / (self.rrf_k + 1):.6f} "
+                f"at RRF_K={self.rrf_k}"
+            )
         # Same shape: a negative budget boots fine and then degrades into one
         # below-the-floor log per request forever, never an error.
         if self.answer_context_token_budget < 1:

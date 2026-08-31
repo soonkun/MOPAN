@@ -72,6 +72,15 @@ async def process_document(
         # that: a remote store (Qdrant) has no transaction and would degrade to
         # "old chunks gone, new chunks missing", which is why it stays a bonus
         # and not a contract.
+        # Where content_tsv comes from, since this is the file people look in:
+        # NOT here. `chunks.content_tsv` stopped being a generated column in
+        # migration 0012 and is now application-written, but the write lives on
+        # the column itself - `Chunk.content_tsv`'s default in app/models/chunk.py
+        # tokenizes that row's own `content` with `settings.sparse_tokenizer`.
+        # It has to be there rather than at this call site: this pipeline builds
+        # VectorItems, and it is PgVectorStore.upsert that turns them into chunk
+        # rows, so a write here would only cover the Postgres backend and only
+        # this one caller.
         await vector_store.delete_by_document(document.id)
         await vector_store.upsert(
             [

@@ -11,8 +11,9 @@ from app.models.document import Document
 from app.models.user import User
 from app.retrieval.evidence import RetrievedChunk, chunk_to_evidence
 from app.retrieval.keyword_search import keyword_search
-from app.retrieval.reranker import NoneReranker, Reranker
+from app.retrieval.reranker import Reranker
 from app.retrieval.service import hybrid_search
+from app.retrieval.tokenize import TOKENIZERS, tokenize
 from app.retrieval.vector_store import PgVectorStore, ScoredId, VectorStore
 
 
@@ -189,9 +190,78 @@ async def corpus(db):
             embedding=None,
         ),
     ]
+    # content_tsv is application-written since 0012, and the tokenizer that wrote
+    # a row is the only one that can query it. Pin this fixture to 'simple'
+    # rather than to settings.sparse_tokenizer ('bigram'), because every test
+    # built on it calls keyword_search / hybrid_search at their 'simple'
+    # defaults; leaving it to settings would make the whole file retrieve
+    # nothing. Rows written by the other tokenizer live in `bigram_corpus`.
+    for chunk in chunks:
+        chunk.content_tsv = " ".join(tokenize(chunk.content, "simple"))
     db.add_all(chunks)
     await db.commit()
     return {"a": collection_a, "b": collection_b, "chunks": chunks}
+
+
+# A noun a Korean document glues a josa onto ('상표등록출원' + '이나'), which is
+# what motivated the bigram tokenizer: to a whitespace tokenizer the surface form
+# and the bare noun are two unrelated tokens.
+JOSA_TEXT = "상표등록출원이나 지정상품의 추가등록출원은 그 취지를 적은 서류를 제출하여야 합니다"
+# Asked as a sentence, never as the bare noun. A bare keyword is a shape no user
+# produces, and this project has twice shipped a constant fitted to one.
+JOSA_QUESTION = "상표등록출원 절차는 어떻게 되나요?"
+
+
+@pytest_asyncio.fixture
+async def bigram_corpus(db):
+    """Rows whose content_tsv is written by tokenize(), keyed by (name, tokenizer).
+
+    The `corpus` fixture above cannot serve these: it is pinned to 'simple'
+    because everything built on it queries at the 'simple' default, and a lexical
+    index only answers the tokenizer that wrote it. The two noise chunks are
+    duplicated here in bigram form so the abstain tests have something a broken
+    stopword filter could actually retrieve.
+    """
+    user = User(email="bigram@example.com", password_hash="x", role="admin")
+    db.add(user)
+    await db.flush()
+    collection = Collection(name="J", created_by=user.id)
+    db.add(collection)
+    await db.flush()
+    document = Document(
+        collection_id=collection.id,
+        filename="상표법.pdf",
+        file_type="txt",
+        size_bytes=1,
+        storage_path="x",
+        status="indexed",
+        uploaded_by=user.id,
+    )
+    db.add(document)
+    await db.flush()
+
+    contents = {
+        "josa": JOSA_TEXT,
+        "ko_noise": "이 것은 그 것이고 그 것은 이 것입니다. 어떻게 이 것을 하는 방법은.",
+        "en_noise": "How does this work? How does that work? How does it spread?",
+    }
+    chunks = {}
+    for index, ((name, content), tokenizer) in enumerate(
+        [(item, tok) for item in contents.items() for tok in ("simple", "bigram")]
+    ):
+        chunks[name, tokenizer] = Chunk(
+            document_id=document.id,
+            chunk_index=index,
+            content=content,
+            token_count=len(content.split()),
+            char_count=len(content),
+            chunk_metadata={},
+            embedding=None,
+            content_tsv=" ".join(tokenize(content, tokenizer)),
+        )
+    db.add_all(list(chunks.values()))
+    await db.commit()
+    return chunks
 
 
 async def _search(db, corpus, **kwargs):
@@ -199,7 +269,7 @@ async def _search(db, corpus, **kwargs):
         db,
         kwargs.pop("vector_store", None) or PgVectorStore(db),
         FakeLLMProvider(vec(1.0, 0.0, 0.0)),
-        kwargs.pop("reranker", NoneReranker()),
+        kwargs.pop("reranker", None),
         kwargs.pop("query", "tomato blight"),
         top_n=kwargs.pop("top_n", 5),
         rrf_k=60,
@@ -229,7 +299,7 @@ async def test_per_stage_scores_are_kept_separate(db, corpus):
     assert metadata["vector_rank"] == 1
     assert metadata["keyword_rank"] is not None
     assert metadata["rrf_score"] > 0
-    assert metadata["rerank_score"] is None  # NoneReranker does not score
+    assert metadata["rerank_score"] is None  # no reranker ran, so nothing scored
 
 
 async def test_collection_filter_excludes_other_collections(db, corpus):
@@ -298,7 +368,7 @@ async def test_empty_corpus_returns_no_evidence(db):
         db,
         PgVectorStore(db),
         FakeLLMProvider(vec(1.0)),
-        NoneReranker(),
+        None,
         "anything",
         top_n=5,
         rrf_k=60,
@@ -503,3 +573,114 @@ async def test_sparse_weight_scales_the_keyword_half_of_the_fused_score(db, corp
     durian = next(e for e in evidence if e.content.startswith("durian"))
     assert durian.metadata["keyword_rank"] == 1
     assert durian.metadata["rrf_score"] == 0.5 / 61
+
+
+# --- tokenize: the contract the ingest side and the query side share ----------
+
+
+def test_simple_lowercases_and_keeps_word_tokens_whole():
+    """The reference implementation is the token stream to_tsvector('simple', ...)
+    produces - that is what content_tsv held before 0012 and what an
+    un-backfilled column still holds."""
+    assert tokenize("Tomato BLIGHT, spread?", "simple") == ["tomato", "blight", "spread"]
+    assert tokenize("역병은 어떻게 퍼집니까?", "simple") == ["역병은", "어떻게", "퍼집니까"]
+    assert tokenize("!!! ??? ---", "simple") == []
+
+
+def test_bigram_slides_a_two_character_window_over_each_word():
+    assert tokenize("역병은", "bigram") == ["역병", "병은"]
+    assert tokenize("blight", "bigram") == ["bl", "li", "ig", "gh", "ht"]
+    # Both edge cases, because that is where an off-by-one hides: a 2-character
+    # token has exactly one window and a 1-character token has none, so both are
+    # emitted whole rather than dropped. Dropping them would make '이' - louse -
+    # unsearchable, which is a failure a stopword entry already caused once.
+    assert tokenize("이 방제 a", "bigram") == ["이", "방제", "a"]
+    assert tokenize("!!! ??? ---", "bigram") == []
+
+
+def test_bigram_makes_a_josa_glued_noun_share_tokens_with_the_bare_noun():
+    """The whole reason for the tokenizer change, at the level of the function.
+    Under 'simple' these two strings have no token in common at all."""
+    glued = set(tokenize("상표등록출원이나", "bigram"))
+    bare = set(tokenize("상표등록출원", "bigram"))
+    assert bare <= glued
+    assert len(bare) == 5
+    assert not set(tokenize("상표등록출원이나", "simple")) & set(tokenize("상표등록출원", "simple"))
+
+
+@pytest.mark.parametrize("name", list(TOKENIZERS))
+def test_every_tokenizer_emits_tokens_a_tsvector_can_round_trip(name):
+    """Ingest joins these with a space and hands them to to_tsvector, and the
+    query side quote_literal's them into a tsquery. A token carrying whitespace
+    or tsquery syntax would silently split or reparse on the way in."""
+    tokens = tokenize("Tomato 역병은 1999 don't; a", name)
+    assert tokens
+    assert all(token and token == token.lower() and token.isalnum() for token in tokens)
+
+
+def test_tokenize_refuses_an_unknown_name():
+    """Not a fallback to 'simple': that would build an index nothing queries."""
+    with pytest.raises(KeyError):
+        tokenize("anything", "morphemes")
+
+
+# --- the sparse arm, per tokenizer -------------------------------------------
+
+
+async def test_bigram_finds_a_noun_the_document_glued_a_josa_onto(db, bigram_corpus):
+    """The measurement this redesign turns on (spec S3: sparse-only 0.673 ->
+    0.904). The document writes '상표등록출원이나'; the question asks about
+    '상표등록출원'. Phrased as a sentence, not as a bare keyword - a bare keyword
+    is a shape no user produces."""
+    found = await keyword_search(db, JOSA_QUESTION, 20, tokenizer="bigram")
+    assert str(bigram_corpus["josa", "bigram"].id) in found
+
+
+async def test_simple_misses_the_same_noun(db, bigram_corpus):
+    """The other half of the pair, and what makes the first one bite: under
+    'simple' the surface form and the bare noun are two unrelated tokens, so the
+    row is unreachable however the question is phrased."""
+    found = await keyword_search(db, JOSA_QUESTION, 20, tokenizer="simple")
+    assert str(bigram_corpus["josa", "simple"].id) not in found
+
+
+@pytest.mark.parametrize("tokenizer", list(TOKENIZERS))
+@pytest.mark.parametrize("query", STOPWORD_ONLY)
+async def test_a_query_of_only_stopwords_abstains_under_every_tokenizer(db, bigram_corpus, query, tokenizer):
+    """The abstain property survives the tokenizer change only because both
+    stopword oracles are applied to the WORD, before it is bigrammed. Applied
+    after, they would be a silent no-op - 'ho'|'ow' is not the word 'how' and
+    '어떻'|'떻게' is not '어떻게', so nothing would be dropped and every stopword
+    would sail straight back into the OR.
+
+    bigram_corpus carries both function-word chunks in bigram form precisely so
+    that failure has somewhere to land: with the filter defeated this retrieves
+    them, and at rrf_k=60 a sparse rank 1 (1/61) outscores every dense hit from
+    rank 6 down (1/66), displacing a real answer with pure noise."""
+    assert await keyword_search(db, query, 20, tokenizer=tokenizer) == []
+
+
+@pytest.mark.parametrize("tokenizer", list(TOKENIZERS))
+@pytest.mark.parametrize("query", NO_LEXEMES)
+async def test_a_query_with_no_lexemes_abstains_under_every_tokenizer(db, bigram_corpus, query, tokenizer):
+    """Nothing survives the word regex, so both bound arrays are empty, string_agg
+    over zero rows is NULL, to_tsquery(NULL) is NULL and `content_tsv @@ NULL` is
+    NULL - no rows, no error. The tsquery-syntax entries matter twice under
+    bigram, where a pasted operator would otherwise become a two-character
+    operator fragment."""
+    assert await keyword_search(db, query, 20, tokenizer=tokenizer) == []
+
+
+async def test_bigram_still_keeps_tsquery_syntax_out_of_the_parser(db, bigram_corpus):
+    """quote_literal and the bound arrays, re-checked on the path that now builds
+    the tokens in Python. Each of these is the question plus pasted operators: it
+    matches, it does not raise, and the table is still there."""
+    for query in (
+        JOSA_QUESTION + " '; DROP TABLE chunks; --",
+        JOSA_QUESTION + " :* & !x",
+        JOSA_QUESTION + " \\ ( ) | ' ",
+    ):
+        assert str(bigram_corpus["josa", "bigram"].id) in await keyword_search(
+            db, query, 20, tokenizer="bigram"
+        )
+    assert await db.scalar(select(func.count()).select_from(Chunk)) == len(bigram_corpus)
