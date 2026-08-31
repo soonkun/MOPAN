@@ -75,7 +75,9 @@ proviso .900 / crossref .800), prec 0.195, 24.0 ms/q, $0.0000010/q.
       `RERANK_MODEL=""`에서 `None`을 돌려준다.
 - [ ] **Step 143b: Modify `backend/app/retrieval/service.py` — `Reranker | None`.**
       `None`이면 그 단계가 호출 경로에 없다.
-- [ ] **Step 143c: Modify `backend/app/chat/router.py` — 네 호출 지점.**
+- [x] **Step 143c: Modify `backend/app/chat/router.py` — 네 호출 지점.**
+- [x] **Step 143e: Modify `backend/app/workflow/executor.py` and `backend/app/workflow/tools.py` — `Reranker`를 들고 있는 나머지 두 자리를 `Reranker | None`으로 넓힌다.**
+- [x] **Step 143f: Modify `backend/tests/test_neighbors.py` and `backend/tests/test_workflows.py` — `NoneReranker()`를 `None`으로 바꾼다. 이 테스트들이 늘 뜻하던 것이 "재순위 단계 없음"이었다.**
       `make_reranker`가 `None`을 돌려줄 수 있으므로 호출부의 타입이 바뀐다.
 - [ ] **Step 143d: Measure rerank × candidate_limit (20/40/60). 값을 못 하면 OFF.**
 
