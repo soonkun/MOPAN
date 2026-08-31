@@ -1,12 +1,33 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { apiFetch, downloadDocument, errorMessage } from "@/lib/api";
+import { ApiError, apiFetch, downloadDocument, errorMessage } from "@/lib/api";
 import DocumentTable, { STATUS_LABEL, TERMINAL } from "@/components/documents/DocumentTable";
 import UploadDropzone from "@/components/documents/UploadDropzone";
 import PageShell from "@/components/layout/PageShell";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { Collection, DocumentItem, User } from "@/lib/types";
+
+/** What the confirmation says before an unrecoverable delete. It names the file
+ * AND its chunk count on purpose: 정말 삭제할까요? next to eight identical rows
+ * confirms nothing, whereas 유사상품 심사기준 · 청크 8,342개 is visibly the wrong
+ * document when the click was. The chunks and their embeddings cost real money
+ * and minutes to rebuild, so the price of getting them back is spelled out too.
+ *
+ * The 처리 중 clause is not decoration: DELETE does not cancel the arq job that
+ * is mid-flight (see the report - the worker finishes, then fails to write to a
+ * row that is gone), so deleting now throws that work away. */
+function deleteMessage(doc: DocumentItem): string {
+  const chunks =
+    doc.chunk_count > 0
+      ? `청크 ${doc.chunk_count.toLocaleString()}개와 그 임베딩이 함께 지워집니다.`
+      : "청크는 아직 하나도 없습니다.";
+  const inFlight = TERMINAL.has(doc.status)
+    ? ""
+    : ` 지금 ${STATUS_LABEL[doc.status] ?? doc.status} 상태이므로 진행 중인 처리도 함께 버려집니다.`;
+  return `'${doc.filename}' 문서를 삭제합니다. ${chunks}${inFlight} 되돌릴 수 없고, 다시 쓰려면 파일을 올려 처음부터 다시 처리해야 합니다.`;
+}
 
 export default function DocumentsPage() {
   const [user, setUser] = useState<User | null>(null);
@@ -23,7 +44,13 @@ export default function DocumentsPage() {
   // instead and 문서가 없습니다. never appears.
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // The document the 삭제 confirmation is open for. Holding the row, not just
+  // the id, is what lets the dialog name the file and its chunk count.
+  const [deleteTarget, setDeleteTarget] = useState<DocumentItem | null>(null);
   const documentsRef = useRef<DocumentItem[]>([]);
+  // Where the keyboard lands when the 삭제 button that opened the dialog no
+  // longer exists - see the dialog's onClose.
+  const searchRef = useRef<HTMLInputElement>(null);
 
   // The collection filter goes to the server - GET /api/documents takes
   // collection_id - so a filtered view does not download the other collections'
@@ -142,6 +169,7 @@ export default function DocumentsPage() {
 
       <div className="flex flex-wrap items-center gap-2">
         <input
+          ref={searchRef}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="문서명 / 분류 / 등록자 검색"
@@ -184,7 +212,53 @@ export default function DocumentsPage() {
       {loading ? (
         <p className="py-8 text-center text-body text-on-surface-variant">불러오는 중...</p>
       ) : (
-        <DocumentTable documents={visible} onDownload={download} />
+        <DocumentTable
+          documents={visible}
+          onDownload={download}
+          onDelete={user?.role === "admin" ? setDeleteTarget : undefined}
+        />
+      )}
+
+      {/* One document at a time, never a bulk action: this destroys chunks and
+          embeddings that cost money and minutes to rebuild. ConfirmDialog runs
+          the request itself and keeps a failure inside the dialog, which is what
+          the 404 path needs - see onConfirm. */}
+      {deleteTarget && (
+        <ConfirmDialog
+          title="문서 삭제"
+          message={deleteMessage(deleteTarget)}
+          confirmLabel="삭제"
+          onClose={() => {
+            // Cancel and Escape: the 삭제 button is still in the table and
+            // <dialog> hands focus back to it by itself. After a successful
+            // delete that button no longer exists, so the native restore has
+            // nowhere to land and drops focus on <body> - Tab would then start
+            // over from the top of the page. Send it to the search box above
+            // the table instead, which is the nearest thing that survives.
+            const rowSurvived = documentsRef.current.some((d) => d.id === deleteTarget.id);
+            setDeleteTarget(null);
+            if (!rowSurvived) searchRef.current?.focus();
+          }}
+          onConfirm={async () => {
+            try {
+              await apiFetch(`/api/documents/${deleteTarget.id}`, { method: "DELETE" });
+            } catch (err) {
+              // 404 means another session already deleted it, so this list is
+              // stale whichever way the request went - refetch either way, and
+              // say why rather than repeating 문서를 찾을 수 없습니다., which
+              // reads like the delete failed.
+              await loadDocuments();
+              if (err instanceof ApiError && err.status === 404) {
+                throw new ApiError(404, "이미 삭제된 문서입니다. 목록을 새로 고쳤습니다.");
+              }
+              throw err;
+            }
+            // Refetch rather than splicing the row out: the row is only gone if
+            // the server says so, and the poll's 3s window is long enough to
+            // paint a list that disagrees with the database.
+            await loadDocuments();
+          }}
+        />
       )}
     </PageShell>
   );
