@@ -19,7 +19,7 @@ const FOCUSABLE =
  *
  * Inline SVG on `currentColor`, exactly the way ThemeToggle.tsx already does
  * it, and deliberately NOT an icon package: a dozen paths do not justify a
- * dependency, a bundle, or a second source of truth for what "에이전트" looks
+ * dependency, a bundle, or a second source of truth for what "워크플로우" looks
  * like. The agent shield is the same path the composer's agent control draws,
  * because they mean the same thing and a user should not have to learn two.
  *
@@ -65,8 +65,8 @@ const NAV_ICON: Record<string, React.ReactNode> = {
       <path d="M8.5 10.5h7M8.5 14h4" />
     </>
   ),
-  // 에이전트 생성 - the shield-check the composer's agent control uses.
-  "/agents": (
+  // 워크플로우 - the shield-check the composer's workflow control uses.
+  "/workflows": (
     <>
       <path d="M12 3 4 7v5c0 4.4 3.2 8.2 8 9 4.8-.8 8-4.6 8-9V7l-8-4Z" />
       <path d="m9 12 2 2 4-4" />
@@ -302,7 +302,7 @@ export default function Sidebar() {
     // After MCP on purpose: an agent is assembled out of the collections,
     // prompts and MCP tools above it, so the order follows the order the work
     // is actually done in.
-    { href: "/agents", label: "에이전트 생성" },
+    { href: "/workflows", label: "워크플로우" },
     { href: "/settings", label: "고급 설정" },
   ];
 

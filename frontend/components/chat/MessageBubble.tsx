@@ -217,14 +217,18 @@ export default function MessageBubble({
             </svg>
             추적
           </button>
-          {/* Before the model, because it is the coarser fact: an agent decides
-              the prompt, the corpus scope and the tool list, and the model is
-              one of the things it decides. Absent for the default agent, which
-              is the app answering as it always did and needs no label. */}
-          {message.agent_name && (
+          {/* Before the model, because it is the coarser fact: a workflow
+              decides the procedure, the prompt, the corpus scope and the tool
+              list, and the model is one of the things it decides. Absent when
+              none was named, which is the app answering as it always did and
+              needs no label. The VERSION rides along, because a workflow is
+              edited and a two-week-old answer came from the graph as it was
+              then - the name alone would quietly claim it came from today's. */}
+          {message.workflow_name && (
             <span className="min-w-0 truncate text-caption text-on-surface-variant">
-              <span className="sr-only">답변 에이전트 </span>
-              {message.agent_name}
+              <span className="sr-only">답변 워크플로우 </span>
+              {message.workflow_name}
+              {message.workflow_version ? ` v${message.workflow_version}` : ""}
             </span>
           )}
           {message.model && (

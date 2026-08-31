@@ -48,10 +48,17 @@ export default function ToolPicker({
   onSelect,
   open,
   onClose,
+  initialToolId,
 }: {
   tools: McpToolOption[];
   onSelect: (call: PendingToolCall) => void;
   open: boolean;
+  /** Which tool to open ON. Set when `@` picked one by name: the row the user
+   * chose is already the answer to "which tool", and re-asking it in the dialog
+   * would make the `@` gesture a slower route to the same list. Null - the +
+   * menu's 도구 사용 row - leaves the previous selection alone, which is what
+   * lets somebody adjust the arguments of the tool they just used. */
+  initialToolId?: string | null;
   /** A dismissal, a 취소 or a committed 추가. Focus return belongs to the
    * composer's `closeSheet`, which is the one owner of it - see PopoverSheet. */
   onClose: () => void;
@@ -87,9 +94,9 @@ export default function ToolPicker({
       return;
     }
     if (dialog.open) return;
-    setSelectedId((current) => current || tools[0].id);
+    setSelectedId((current) => initialToolId || current || tools[0].id);
     dialog.showModal();
-  }, [open, tools]);
+  }, [open, tools, initialToolId]);
 
   // Nothing to pick from: an admin has registered no server, or every tool is
   // disabled. The + menu drops its 도구 사용 row for the same reason.

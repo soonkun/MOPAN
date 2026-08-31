@@ -3,32 +3,27 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { AnswerModel, Collection, McpToolOption, PromptSummary } from "@/lib/types";
 
-/** The agent builder canvas.
+/** The BOUNDARY canvas: what this workflow may reach.
  *
- * WHAT THIS CANVAS IS NOT: a node graph whose edges decide execution. MOPAN
- * does not run a user-drawn graph. With 슈퍼 에이전트 on, a planner decides the
- * steps per question and `PlanStep.depends_on` is written by that planner, not
- * by an admin; with it off, retrieval is a fixed pipeline. So an edge an admin
- * could drag would drive nothing, and the first time they reordered two boxes
- * and the answer did not change, every other thing on this screen would stop
- * being believable too. There is therefore no edge tool, no port, and no
- * free x/y position - the `agents` schema has nowhere to store one anyway, so a
- * dragged position would silently vanish on save.
+ * IT IS NO LONGER THE WHOLE SCREEN. Until this slice it was, and it said so at
+ * length: there was no edge tool, no port and no free position, because nothing
+ * ran a user-drawn graph and an edge that drove nothing would have made every
+ * other claim on the screen suspect. GraphEditor.tsx now IS that graph, edges
+ * and coordinates and all, so that paragraph has been deleted rather than
+ * softened - it became false the moment the executor started reading the edges.
  *
- * WHAT IT IS: three fixed stages that mirror what the engine actually does -
- * the question arrives, the agent reaches for evidence within a boundary, a
- * model answers with a prompt - and a set of modules that are placed into the
- * middle two. Every module on this canvas is one field or one join row of the
- * SAME `agents` object the old form edited:
+ * WHAT IS LEFT HERE is the half that is still not a sequence: the collections
+ * and tools this workflow may touch, the prompt it answers with and the model
+ * that writes the answer. Those have no order and never did. Every module on
+ * this canvas is one field or one join row of the SAME `workflows` row:
  *
- *   문서 분류 module   -> one row of agent_collections -> ResolvedAgent.collection_ids
- *   MCP 도구 module    -> one row of agent_tools       -> ResolvedAgent.tool_ids
- *   답변 지침 module   -> agents.prompt_name
- *   답변 모델 module   -> agents.answer_model
- *   슈퍼 에이전트 module -> agents.orchestrator
+ *   문서 분류 module   -> one row of workflow_collections -> ResolvedWorkflow.collection_ids
+ *   MCP 도구 module    -> one row of workflow_tools       -> ResolvedWorkflow.tool_ids
+ *   답변 지침 module   -> workflows.prompt_name
+ *   답변 모델 module   -> workflows.answer_model
  *
  * THE EMPTY LANE IS THE DANGEROUS ONE. An empty collection list means
- * UNRESTRICTED, not "no access" - see app/agents/service.py. On a canvas an
+ * UNRESTRICTED, not "no access" - see app/workflow/catalogue.py. On a canvas an
  * empty lane reads as "nothing granted", which is the exact opposite, so an
  * empty group does not render as empty: it renders a full-width card that says
  * 전체 허용 out loud. That card is the whole reason this screen can claim to
@@ -50,7 +45,6 @@ export type Draft = {
   description: string;
   prompt_name: string;
   answer_model: string;
-  orchestrator: boolean;
   enabled: boolean;
   collection_ids: string[];
   tool_ids: string[];
@@ -69,7 +63,7 @@ const RISK_LABEL: Record<string, string> = {
   destructive: "파괴적",
 };
 
-type Kind = "orchestrator" | "collection" | "tool" | "prompt" | "model";
+type Kind = "collection" | "tool" | "prompt" | "model";
 
 /** One placeable thing. `key` is what a drag carries and what focus is restored
  * to, and it is derived from the id so it survives a refetch. */
@@ -85,10 +79,9 @@ type Module = {
   fixed?: boolean;
 };
 
-type GroupId = "mode" | "collections" | "tools" | "answer";
+type GroupId = "collections" | "tools" | "answer";
 
 const MODULE_TYPE_LABEL: Record<Kind, string> = {
-  orchestrator: "실행 방식",
   collection: "문서 분류",
   tool: "MCP 도구",
   prompt: "답변 지침",
@@ -114,14 +107,6 @@ function toolModule(t: McpToolOption): Module {
     subtitle: `위험도 ${RISK_LABEL[t.risk_level] ?? t.risk_level}`,
   };
 }
-
-const ORCHESTRATOR_MODULE: Module = {
-  key: "orchestrator",
-  kind: "orchestrator",
-  group: "mode",
-  title: "슈퍼 에이전트",
-  subtitle: "질문마다 계획을 세워 검색과 도구를 나눠 실행합니다.",
-};
 
 function promptModule(draft: Draft): Module {
   return {
@@ -150,7 +135,6 @@ function modelModule(draft: Draft, catalog: Catalog): Module {
  * disagree with what will be saved. */
 function placedModules(draft: Draft, catalog: Catalog): Module[] {
   const out: Module[] = [];
-  if (draft.orchestrator) out.push(ORCHESTRATOR_MODULE);
   for (const c of catalog.collections) {
     if (draft.collection_ids.includes(c.id)) out.push(collectionModule(c));
   }
@@ -167,7 +151,6 @@ function placedModules(draft: Draft, catalog: Catalog): Module[] {
  * added, because a position on this canvas must never look like a sequence. */
 function drawerModules(draft: Draft, catalog: Catalog): Module[] {
   const out: Module[] = [];
-  if (!draft.orchestrator) out.push(ORCHESTRATOR_MODULE);
   for (const c of catalog.collections) {
     if (!draft.collection_ids.includes(c.id)) out.push(collectionModule(c));
   }
@@ -181,7 +164,6 @@ function drawerModules(draft: Draft, catalog: Catalog): Module[] {
 /** Placing a module = granting the capability. Every branch writes one field of
  * the same draft the old form wrote, which is what keeps the API unchanged. */
 function place(draft: Draft, key: string, catalog: Catalog): Draft {
-  if (key === "orchestrator") return { ...draft, orchestrator: true };
   if (key === "model") {
     // A model module with no model chosen yet defaults to the deployment
     // default, so placing it is never a save that means nothing.
@@ -204,7 +186,6 @@ function place(draft: Draft, key: string, catalog: Catalog): Draft {
 /** Removing a module = removing the capability. 답변 지침 has no branch here on
  * purpose; it is `fixed` and its card renders no 제거. */
 function remove(draft: Draft, key: string): Draft {
-  if (key === "orchestrator") return { ...draft, orchestrator: false };
   if (key === "model") return { ...draft, answer_model: "" };
   if (key.startsWith("collection:")) {
     const id = key.slice("collection:".length);
@@ -255,13 +236,13 @@ function QuestionStage() {
       className="rounded-md bg-surface-container-low p-4"
     >
       <h3 id="stage-question" className="text-label font-medium text-on-surface-variant">
-        1. 질문
+        질문이 들어오는 곳
       </h3>
       <div className="mt-2 rounded-md bg-surface-container px-4 py-3">
         <p className="text-body font-medium text-on-surface">사용자의 질문</p>
         <p className="mt-1 text-caption text-on-surface-variant">
-          채팅에서 이 에이전트를 고르고 질문하면 여기서 시작합니다. 이 자리는 설정할 것이 없어서
-          모듈이 아닙니다.
+          채팅에서 @로 이 워크플로우를 고르고 질문하면 그래프의 질문 노드로 들어갑니다. 이
+          자리는 설정할 것이 없어서 모듈이 아닙니다.
         </p>
       </div>
     </section>
@@ -392,7 +373,7 @@ function Group({
   );
 }
 
-export default function AgentCanvas({
+export default function WorkflowCanvas({
   draft,
   onChange,
   catalog,
@@ -483,9 +464,6 @@ export default function AgentCanvas({
         <span className="rounded-full bg-surface-container-lowest px-3 py-1 text-caption text-on-surface">
           {toolRestriction}
         </span>
-        <span className="rounded-full bg-surface-container-lowest px-3 py-1 text-caption text-on-surface">
-          {draft.orchestrator ? "슈퍼 에이전트 켬" : "슈퍼 에이전트 끔"}
-        </span>
       </div>
 
       {/* The drawer. Also the drop target that means "remove". */}
@@ -538,9 +516,9 @@ export default function AgentCanvas({
         </p>
       </section>
 
-      {/* Three stages, top to bottom, each the full width of the builder. The
-          ORDER of the bands is the pipeline; nothing else on this canvas
-          carries a position that means anything. */}
+      {/* Two bands, top to bottom. Neither is a step: the first is what this
+          workflow may reach and the second is how it answers. The graph above
+          is where anything with an order lives. */}
       <div className="space-y-2">
         <QuestionStage />
         <Flow />
@@ -550,28 +528,13 @@ export default function AgentCanvas({
           className="rounded-md bg-surface-container-low p-4"
         >
           <h3 id={`${uid}-reach`} className="text-label font-medium text-on-surface-variant">
-            2. 이 에이전트가 닿을 수 있는 것
+            이 워크플로우가 닿을 수 있는 것
           </h3>
           <div className="mt-2 space-y-2">
             <Group
-              id="mode"
-              label="실행 방식"
-              help={
-                draft.orchestrator
-                  ? "질문마다 플래너가 계획을 세워 아래 분류와 도구를 골라 씁니다."
-                  : "계획 없이 문서 검색을 한 번 합니다. 도구는 사용자가 채팅에서 직접 고를 때만 호출됩니다."
-              }
-              emptyMeans="슈퍼 에이전트를 놓지 않았습니다. 계획 없이 문서 검색만 합니다."
-              modules={byGroup("mode")}
-              onDropKey={onDropKey}
-            >
-              {cards("mode")}
-            </Group>
-
-            <Group
               id="collections"
               label="문서 분류"
-              help="여기 놓인 분류에서만 근거를 찾습니다. 계획을 세울 때도 여기 없는 분류는 이름조차 보이지 않습니다."
+              help="여기 놓인 분류에서만 근거를 찾습니다. 그래프의 검색 노드도 여기 없는 분류는 이름조차 쓸 수 없습니다."
               emptyMeans="분류를 하나도 놓지 않았습니다. 제한이 아니라 전체 분류 허용입니다."
               modules={byGroup("collections")}
               onDropKey={onDropKey}
@@ -599,7 +562,7 @@ export default function AgentCanvas({
             <Group
               id="tools"
               label="MCP 도구"
-              help="여기 놓인 도구만 부를 수 있습니다. 목록 밖의 도구를 지정한 실행 계획은 일부만 걸러내는 것이 아니라 통째로 거부됩니다."
+              help="여기 놓인 도구만 부를 수 있습니다. 목록 밖의 도구를 지정한 그래프는 일부만 걸러내는 것이 아니라 저장 시점에 통째로 거부됩니다."
               emptyMeans="도구를 하나도 놓지 않았습니다. 제한이 아니라 전체 도구 허용입니다."
               modules={byGroup("tools")}
               onDropKey={onDropKey}
@@ -636,7 +599,7 @@ export default function AgentCanvas({
           className="rounded-md bg-surface-container-low p-4"
         >
           <h3 id={`${uid}-answer`} className="text-label font-medium text-on-surface-variant">
-            3. 답변
+            답변을 만드는 방법
           </h3>
           <div className="mt-2">
             <Group
@@ -653,11 +616,11 @@ export default function AgentCanvas({
         </section>
       </div>
 
-      {/* Said out loud, because its absence is the honest part of this screen. */}
+      {/* Where the order lives now, said once, because this canvas used to
+          claim there was nowhere to draw one. */}
       <p className="rounded-md bg-surface-container px-4 py-3 text-caption text-on-surface-variant">
-        모듈 사이에 선을 잇는 자리는 일부러 두지 않았습니다. 실행 순서는 질문마다 정해지므로 —
-        슈퍼 에이전트를 켜면 플래너가, 끄면 고정된 검색 한 번이 정합니다 — 여기서 순서를 그려도
-        그림만 바뀌고 동작은 그대로입니다. 모듈이 놓인 자리와 순서에는 아무 뜻이 없습니다.
+        실행 순서는 위의 그래프가 정합니다. 여기 놓인 모듈에는 순서가 없습니다 — 이 워크플로우가
+        무엇에 닿을 수 있는지, 어떤 지침과 모델로 답하는지만 정합니다.
       </p>
 
       {openKey && (
@@ -682,7 +645,7 @@ export default function AgentCanvas({
 }
 
 /** The pre-canvas way of choosing, kept alive under a native <details>.
- * A canvas must not be the only route to a working agent, and this is the
+ * A canvas must not be the only route to a working workflow, and this is the
  * cheapest honest way to keep the other one: the same two functions the cards
  * call, so there is no second source of truth to drift. */
 function PlainChoices({
@@ -759,26 +722,7 @@ function ModuleDialog({
   let body: React.ReactNode = null;
   let removable = true;
 
-  if (moduleKey === "orchestrator") {
-    title = "슈퍼 에이전트";
-    body = (
-      <div className="space-y-3 text-body text-on-surface-variant">
-        <p className="text-on-surface">
-          질문마다 플래너가 실행 계획을 세웁니다. 계획의 각 단계는 문서 검색이거나 도구 호출이고,
-          서로 의존하지 않는 단계는 동시에 실행됩니다.
-        </p>
-        <p>
-          계획이 이 에이전트에 없는 도구를 지정하면 그 단계만 빠지는 것이 아니라 계획이 통째로
-          거부되고, 평범한 문서 검색으로 답합니다.
-        </p>
-        <p>
-          <strong className="text-on-surface">단계 순서는 여기서 정하지 않습니다.</strong> 질문을
-          받은 뒤 플래너가 정하므로 이 화면에는 순서를 그리는 자리가 없습니다.
-        </p>
-        <p>이 모듈을 빼면 계획 없이 문서 검색을 한 번 하고 답합니다.</p>
-      </div>
-    );
-  } else if (moduleKey === "prompt") {
+  if (moduleKey === "prompt") {
     removable = false;
     title = "답변 지침";
     const active = catalog.prompts.find((p) => p.name === draft.prompt_name);
@@ -803,7 +747,7 @@ function ModuleDialog({
           ))}
         </select>
         <p className="text-caption text-on-surface-variant">
-          프롬프트 관리에서 만든 이름입니다. 내용을 고치면 이 에이전트의 답변도 바로 바뀝니다.
+          프롬프트 관리에서 만든 이름입니다. 내용을 고치면 이 워크플로우의 답변도 바로 바뀝니다.
           그래서 이 모듈은 뺄 수 없습니다 — 답변에는 언제나 지침이 하나 있습니다.
         </p>
         {active && (
@@ -821,7 +765,7 @@ function ModuleDialog({
     body = (
       <div className="space-y-3">
         <label htmlFor="module-model" className="block text-label font-medium text-on-surface-variant">
-          이 에이전트가 쓸 모델
+          이 워크플로우가 쓸 모델
         </label>
         <select
           id="module-model"
@@ -847,8 +791,8 @@ function ModuleDialog({
       <div className="space-y-3 text-body text-on-surface-variant">
         <p className="text-on-surface">{collection.description?.trim() || "설명 없는 분류입니다."}</p>
         <p>
-          이 모듈이 놓여 있으면 이 에이전트의 검색은 여기 놓인 분류 안에서만 이루어집니다. 사용자가
-          채팅에서 다른 분류를 지정해도 허용되지 않습니다.
+          이 모듈이 놓여 있으면 이 워크플로우의 검색은 여기 놓인 분류 안에서만 이루어집니다.
+          사용자가 채팅에서 다른 분류를 지정해도 허용되지 않습니다.
         </p>
         <p className="text-primary">
           분류 모듈을 하나도 놓지 않으면 제한이 걸리지 않고 전체 분류를 허용합니다.
@@ -872,8 +816,8 @@ function ModuleDialog({
           <dd className="text-on-surface">{properties.join(", ") || "없음"}</dd>
         </dl>
         <p>
-          호출 인자는 여기서 정하지 않습니다. 슈퍼 에이전트를 켜면 플래너가, 끄면 사용자가 채팅에서
-          직접 채웁니다. 이 모듈이 정하는 것은 &ldquo;부를 수 있는가&rdquo; 하나입니다.
+          호출 인자는 그래프의 도구 노드에서 정합니다. 이 모듈이 정하는 것은
+          &ldquo;부를 수 있는가&rdquo; 하나입니다.
         </p>
         <p className="text-primary">
           도구 모듈을 하나도 놓지 않으면 제한이 걸리지 않고 전체 도구를 허용합니다.

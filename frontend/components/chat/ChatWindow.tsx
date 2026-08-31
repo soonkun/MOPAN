@@ -11,7 +11,8 @@ import Composer, {
 import MessageBubble from "@/components/chat/MessageBubble";
 import PlanProgress from "@/components/chat/PlanProgress";
 import type {
-  AgentOption,
+  CallableTool,
+  WorkflowOption,
   AnswerModel,
   ApprovalRequest,
   Attachment,
@@ -50,12 +51,12 @@ const MODEL_STORAGE_KEY = "mopan.answer-model";
 // the safe direction.
 const ORCHESTRATOR_STORAGE_KEY = "mopan.orchestrator";
 
-// Which agent answers, remembered the same way and validated against the list
-// the same way the model is: an admin can disable or delete an agent, and a
+// Which workflow answers, remembered the same way and validated against the
+// list the same way the model is: an admin can disable or delete one, and a
 // stale id would then be a 404 or a 409 on every send that the user cannot act
 // on. The absence of a stored value is the DEFAULT AGENT, which is this app
 // exactly as it behaved before agents existed - the safe direction.
-const AGENT_STORAGE_KEY = "mopan.agent";
+const WORKFLOW_STORAGE_KEY = "mopan.workflow";
 
 function rejection(file: File): string | null {
   // Same rule as validation.py's extension_of: no dot means no extension, not
@@ -94,6 +95,14 @@ export default function ChatWindow({
   // Every enabled tool on every enabled server. Empty for a deployment with no
   // MCP server registered, and the picker then renders nothing at all.
   const [tools, setTools] = useState<McpToolOption[]>([]);
+  // GET /api/tools - ONE list of everything callable, which is what `@` opens.
+  // It overlaps the two lists above rather than replacing them: this one is the
+  // MENU, in one namespace, and those two carry the ids POST /api/chat takes.
+  const [callables, setCallables] = useState<CallableTool[]>([]);
+  // The collection this question is scoped to, chosen from the `@` menu. Null is
+  // the whole corpus, which is what every question sent before this existed
+  // asked for.
+  const [collectionId, setCollectionId] = useState<string | null>(null);
   // ONE pending call. Slice 2 is manual invocation - the user picks the tool -
   // so there is nothing here to plan with; the request body already takes a
   // list because Slice 3's orchestrator will send several.
@@ -105,12 +114,12 @@ export default function ChatWindow({
   // Slice 3, opt-in per question. False on the server too, so a client that
   // never sends the flag gets the Slice 1 path unchanged.
   const [orchestrator, setOrchestrator] = useState(false);
-  // Every ENABLED agent. Empty for a deployment with none configured, and the
-  // picker then renders nothing at all.
-  const [agents, setAgents] = useState<AgentOption[]>([]);
-  // null is the default agent, and a send then carries no `agent_id` - exactly
-  // the body this app sent before agents existed.
-  const [agentId, setAgentId] = useState<string | null>(null);
+  // Every ENABLED workflow that has a graph. Empty for a deployment with none
+  // configured, and the picker then renders nothing at all.
+  const [workflows, setWorkflows] = useState<WorkflowOption[]>([]);
+  // null is NO workflow, and a send then carries no `workflow_id` - exactly the
+  // body this app sent before workflows existed.
+  const [workflowId, setWorkflowId] = useState<string | null>(null);
   // The plan, as it runs. Keyed by step id and updated in place, because each
   // step arrives twice - `running`, then its final state.
   const [steps, setSteps] = useState<PlanStep[]>([]);
@@ -194,24 +203,29 @@ export default function ChatWindow({
     apiFetch<McpToolOption[]>("/api/mcp/tools")
       .then(setTools)
       .catch(() => setTools([]));
-    // Same rule again, and it matters most here: a deployment with no agents
-    // answers with [], the picker disappears, and every send carries no
-    // `agent_id` - which is the app as it was. A failure to load agents must
+    // Same rule: a failure here costs the user the `@` menu, never the question.
+    apiFetch<CallableTool[]>("/api/tools")
+      .then(setCallables)
+      .catch(() => setCallables([]));
+    // Same rule again, and it matters most here: a deployment with no
+    // workflows answers with [], the picker disappears, and every send carries
+    // no `workflow_id` - which is the app as it was. A failure to load them must
     // never stop a question being asked.
-    apiFetch<AgentOption[]>("/api/agents/selectable")
+    apiFetch<WorkflowOption[]>("/api/workflows/selectable")
       .then((list) => {
-        setAgents(list);
+        setWorkflows(list);
         let stored: string | null = null;
         try {
-          stored = localStorage.getItem(AGENT_STORAGE_KEY);
+          stored = localStorage.getItem(WORKFLOW_STORAGE_KEY);
         } catch {
           // Private mode, or site data blocked. Fall through to the default.
         }
-        // Validated against the list, never trusted: an agent an admin disabled
-        // is absent from it, and a stale id would be a 409 on every send.
-        setAgentId(list.some((a) => a.id === stored) ? stored : null);
+        // Validated against the list, never trusted: a workflow an admin
+        // disabled is absent from it, and a stale id would be a 409 on every
+        // send.
+        setWorkflowId(list.some((w) => w.id === stored) ? stored : null);
       })
-      .catch(() => setAgents([]));
+      .catch(() => setWorkflows([]));
     // Read HERE and not in a useState initialiser, for the same two reasons the
     // model is: this component is server-rendered, where `window` does not
     // exist, and reading during render would hydrate a different value than the
@@ -412,7 +426,8 @@ export default function ChatWindow({
                 // From the frame for the same reason the model is: the picker
                 // may have moved while this answer was streaming, and the label
                 // has to name what actually produced it.
-                agent_name: event.agent_name,
+                workflow_name: event.workflow_name,
+                workflow_version: event.workflow_version ?? null,
                 created_at: new Date().toISOString(),
               },
             ]);
@@ -507,7 +522,7 @@ export default function ChatWindow({
         citations: [],
         attachments: sent,
         model: null,
-        agent_name: null,
+        workflow_name: null,
         feedback: null,
         created_at: new Date().toISOString(),
       },
@@ -519,6 +534,10 @@ export default function ChatWindow({
           conversation_id: conversationId,
           message: question,
           attachment_ids: sent.map((a) => a.id),
+          // Omitted when the question is not scoped, so the body stays the one
+          // this app has always sent. A collection a workflow cannot reach is a
+          // Korean 400 from the server before the conversation is created.
+          ...(collectionId ? { collection_ids: [collectionId] } : {}),
           ...(calls.length
             ? { tool_calls: calls.map((c) => ({ tool_id: c.tool.id, arguments: c.arguments })) }
             : {}),
@@ -529,9 +548,10 @@ export default function ChatWindow({
           // Omitted when off, so a turn that does not want a plan sends exactly
           // the body Slice 1 sent.
           ...(orchestrator ? { orchestrator: true } : {}),
-          // Omitted for the default agent, for the same reason: the request is
-          // then byte-identical to the one this app sent before agents existed.
-          ...(agentId ? { agent_id: agentId } : {}),
+          // Omitted when no workflow is chosen, for the same reason: the
+          // request is then byte-identical to the one this app sent before
+          // workflows existed.
+          ...(workflowId ? { workflow_id: workflowId } : {}),
         },
         onEvent,
         signal,
@@ -567,27 +587,41 @@ export default function ChatWindow({
     }
   }
 
-  /** Picking an agent also moves the MODEL picker to the agent's model.
+  /** Picking a workflow also moves the MODEL picker to the workflow's model.
    *
-   * The server treats the agent's model as a default an explicit `model` still
-   * overrides, so leaving the picker where it was would send the old model and
-   * silently ignore the agent's - the user would have configured a model on the
-   * agent and never seen it used. Moving the visible control is what makes the
+   * The server treats the workflow's model as a default an explicit `model`
+   * still overrides, so leaving the picker where it was would send the old model
+   * and silently ignore the workflow's - the user would have configured a model
+   * on it and never seen it used. Moving the visible control is what makes the
    * two agree, and the user can still change it afterwards. */
-  function chooseAgent(id: string | null) {
-    setAgentId(id);
-    const agent = agents.find((a) => a.id === id) ?? null;
-    setNotice(`${agent?.name ?? "기본"} 에이전트로 답변합니다.`);
-    if (agent?.answer_model && models.some((m) => m.id === agent.answer_model)) {
-      setModel(agent.answer_model);
+  function chooseWorkflow(id: string | null) {
+    setWorkflowId(id);
+    const workflow = workflows.find((w) => w.id === id) ?? null;
+    setNotice(
+      workflow ? `${workflow.name} 워크플로우로 답변합니다.` : "워크플로우 없이 답변합니다.",
+    );
+    if (workflow?.answer_model && models.some((m) => m.id === workflow.answer_model)) {
+      setModel(workflow.answer_model);
     }
     try {
-      if (id) localStorage.setItem(AGENT_STORAGE_KEY, id);
-      else localStorage.removeItem(AGENT_STORAGE_KEY);
+      if (id) localStorage.setItem(WORKFLOW_STORAGE_KEY, id);
+      else localStorage.removeItem(WORKFLOW_STORAGE_KEY);
     } catch {
       // The choice still applies to this session; it just will not survive a
       // reload. Nothing to tell the user about.
     }
+  }
+
+  /** The 문서 검색 rows of the `@` menu. Announced like every other choice made
+   * in the composer, because the chip is small and the consequence is not:
+   * scoping to one collection is the difference between "the corpus does not
+   * say" and "this part of it does not". */
+  function chooseCollection(id: string | null) {
+    setCollectionId(id);
+    const name = callables
+      .find((c) => c.kind === "rag")
+      ?.collections.find((c) => c.id === id)?.name;
+    setNotice(name ? `${name} 분류에서만 찾습니다.` : "분류 제한을 풀었습니다.");
   }
 
   function chooseModel(id: string) {
@@ -716,7 +750,7 @@ export default function ChatWindow({
                   시스템입니다. alone on a second line. It is one line on a
                   desktop column now and two on a phone, where it has to be. */}
               <p className="mt-2 max-w-[32rem] break-keep text-body text-on-surface-variant">
-                RAG · MCP · LLM · 에이전트를 직접 등록하고 조합하는 베이스 시스템입니다.
+                RAG · MCP · LLM · 워크플로우를 직접 등록하고 조합하는 베이스 시스템입니다.
               </p>
             </div>
           )}
@@ -789,6 +823,9 @@ export default function ChatWindow({
           model={model}
           onModelChange={chooseModel}
           tools={tools}
+          callables={callables}
+          collectionId={collectionId}
+          onCollectionChange={chooseCollection}
           toolCall={toolCall}
           onToolSelect={(call) => {
             setToolCall(call);
@@ -797,9 +834,9 @@ export default function ChatWindow({
           onToolRemove={() => setToolCall(null)}
           orchestrator={orchestrator}
           onOrchestratorChange={chooseOrchestrator}
-          agents={agents}
-          agentId={agentId}
-          onAgentChange={chooseAgent}
+          workflows={workflows}
+          workflowId={workflowId}
+          onWorkflowChange={chooseWorkflow}
         />
       </div>
     </div>

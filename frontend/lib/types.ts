@@ -177,38 +177,129 @@ export interface Attachment {
   created_at: string;
 }
 
-/** GET /api/agents - the admin screen's row. Admin only, because the two lists
- * ARE the boundary and enumerating a boundary tells somebody what to try. */
-export interface Agent {
+/** One node of a workflow graph, exactly as `backend/app/workflow/graph.py`
+ * writes it back out (`WorkflowGraph.to_raw`).
+ *
+ * `x`/`y` ride ALONG on the node rather than in a parallel layout blob, because
+ * the backend stores them and a person arranged them: reopening the canvas has
+ * to show the same picture. They are the one part the executor reads nothing
+ * from, which is exactly why they belong here and cannot drift out of step.
+ *
+ * `tool` is the flat namespace `GET /api/tools` publishes: `rag`,
+ * `mcp:서버/도구`, `workflow:이름`. `collections` is RAG only, and EMPTY MEANS
+ * THE WHOLE ALLOWED CATALOGUE - which the canvas says out loud rather than
+ * drawing as an empty list. */
+export interface GraphNode {
+  id: string;
+  kind: "input" | "tool" | "branch" | "answer";
+  label?: string;
+  x: number;
+  y: number;
+  tool?: string;
+  collections?: string[];
+  arguments?: Record<string, unknown>;
+  condition?: GraphCondition | null;
+}
+
+/** A branch condition. JSON, not a string grammar - see
+ * `backend/app/workflow/expr.py`, which parses the reference by hand and has no
+ * `eval` in it. `llm` is in the schema and is REFUSED at save. */
+export interface GraphCondition {
+  kind: "compare" | "exists" | "empty" | "and" | "or" | "not" | "llm";
+  left?: unknown;
+  op?: "==" | "!=" | ">" | ">=" | "<" | "<=";
+  right?: unknown;
+  of?: unknown;
+}
+
+/** An edge ORDERS execution and carries data - the thing `PlanStep.depends_on`
+ * deliberately did not do. `when` is set only on an edge leaving a `branch`, and
+ * the backend refuses a branch edge that has none. */
+export interface GraphEdge {
+  from: string;
+  to: string;
+  when?: "true" | "false";
+}
+
+export interface WorkflowGraph {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+/** GET /api/workflows - the admin screen's row. Admin only, because the two
+ * lists ARE the boundary and enumerating a boundary tells somebody what to try.
+ *
+ * `graph` is the ACTIVE version's, carried on the row so opening the canvas is
+ * one request: splitting it into a second endpoint would guarantee a screen
+ * showing one workflow's boxes over another's name at least once. */
+export interface Workflow {
   id: string;
   name: string;
   description: string | null;
   /** A name from the prompt store, never the text: the store owns versioning
-   * and attribution, and an agent carrying its own copy would fork it out. */
+   * and attribution, and a workflow carrying its own copy would fork it out. */
   prompt_name: string;
   /** Null means the deployment's own ANSWER_MODEL. */
   answer_model: string | null;
-  orchestrator: boolean;
   enabled: boolean;
   /** EMPTY MEANS UNRESTRICTED, for both lists. The screen prints 전체 허용
    * rather than 없음 beside an empty selection - that is the one place this
    * rule could mislead an admin, so it is the one place it is spelled out. */
   collections: { id: string; name: string }[];
   tools: { id: string; server_name: string; name: string; risk_level: McpRiskLevel }[];
+  /** Null when no version is active, which makes a workflow uncallable rather
+   * than broken. */
+  active_version: number | null;
+  graph: WorkflowGraph | null;
   created_by_email: string | null;
   created_at: string;
   updated_at: string;
 }
 
-/** GET /api/agents/selectable - what the composer's picker lists. ENABLED
- * agents only, readable by any authenticated user, and deliberately carrying
- * neither list: the boundary is not an inventory to publish. */
-export interface AgentOption {
+/** GET /api/workflows/{id}/versions, newest first - the 되돌리기 list. Every
+ * save is a version, and rolling back ACTIVATES an existing one rather than
+ * copying it forward, so the history stays a history rather than growing a
+ * duplicate every rollback. */
+export interface WorkflowVersion {
+  id: string;
+  version: number;
+  is_active: boolean;
+  graph: WorkflowGraph;
+  note: string | null;
+  created_by_email: string | null;
+  created_at: string;
+}
+
+/** GET /api/tools - ONE list, because RAG, MCP and workflows are one Tool
+ * interface. It is what `@` opens in the composer and what the canvas offers on
+ * a node.
+ *
+ * `ref` is what a graph node writes in its `tool` field and what a chip carries,
+ * verbatim. `collections` is populated for the `rag` entry only: they are this
+ * deployment's collections, so the composer can offer one search per collection
+ * and the canvas can scope a search node. */
+export interface CallableTool {
+  kind: "rag" | "mcp" | "workflow";
+  ref: string;
+  name: string;
+  description: string | null;
+  risk_level: McpRiskLevel;
+  collections: { id: string; name: string }[];
+}
+
+/** GET /api/workflows/selectable - what the composer's `@` menu and its picker
+ * list. ENABLED workflows that have a graph, readable by any authenticated user,
+ * and deliberately carrying neither boundary list: the boundary is not an
+ * inventory to publish. */
+export interface WorkflowOption {
   id: string;
   name: string;
   description: string | null;
   answer_model: string | null;
-  orchestrator: boolean;
+  /** How many nodes are in the graph it would run - the one number that says
+   * this is a procedure rather than a prompt swap, without naming what it
+   * reaches. */
+  node_count: number;
 }
 
 /** GET /api/models - the admin's ANSWER_MODELS allowlist, which POST /api/chat
@@ -280,15 +371,21 @@ export interface TraceEvidence {
   included: boolean;
 }
 
-/** One step of a Super Agent plan, in GET /api/messages/{id}/trace and in the
- * `step` SSE frames the chat streams while the plan runs.
+/** One NODE of a workflow graph as it actually ran, in
+ * GET /api/messages/{id}/trace and in the `step` SSE frames the chat streams.
+ * ONE SHAPE whoever authored the graph - a person on the canvas or 슈퍼 에이전트
+ * per question - because two trace shapes would make "which am I looking at"
+ * unanswerable on screen.
  *
- * `state` is the field worth reading: `done`, `failed` (recorded, and the plan
- * carried on), `skipped` (the human declined it), `timeout` (the plan's wall
- * clock ran out first), or `running` while it is in flight. */
+ * `state` is the field worth reading: `done`, `failed` (recorded, and the run
+ * carried on), `skipped` (the human declined it, or a branch did not select
+ * it), `timeout` (the run's wall clock ran out first), or `running` while it is
+ * in flight. */
 export interface PlanStep {
   id: string;
-  kind: "rag" | "tool";
+  /** The four node kinds. `rag` appears on traces written before Slice 6, where
+   * a search step was its own kind rather than a `tool` node naming `rag`. */
+  kind: "input" | "tool" | "branch" | "answer" | "rag";
   label: string;
   state: "running" | "done" | "failed" | "skipped" | "timeout";
   query?: string | null;
@@ -297,6 +394,10 @@ export interface PlanStep {
   risk_level?: string | null;
   arguments?: Record<string, unknown> | null;
   depends_on?: string[];
+  /** How deep this node ran. 0 is the graph the request named; 1 and above are
+   * nodes inside a workflow another workflow called - the one thing a flat step
+   * list could not otherwise show. */
+  depth?: number;
   evidence_count: number;
   ms: number;
   /** The Korean sentence that goes with a non-`done` state. It is `detail` on
@@ -313,6 +414,14 @@ export interface PlanStep {
  * exceeded. The answer then came from the direct path, and this is the sentence
  * that says why. */
 export interface TracePlan {
+  /** 사람 or 슈퍼 에이전트 - who authored this graph. The ONLY field that differs
+   * between the two, which is why they share one trace rather than two. Null on
+   * every trace written before Slice 6. */
+  author: string | null;
+  /** Which workflow ran, and which version of it. Both null when 슈퍼 에이전트
+   * ran without one selected. */
+  workflow_name: string | null;
+  workflow_version: number | null;
   steps: PlanStep[];
   step_count: number;
   tool_step_count: number;
@@ -322,7 +431,9 @@ export interface TracePlan {
   refused: string | null;
   budget_seconds: number | null;
   max_steps: number | null;
+  max_nodes: number | null;
   max_tool_calls: number | null;
+  max_depth: number | null;
   approval_risk_level: string | null;
 }
 
@@ -374,7 +485,8 @@ export interface MessageTrace {
   conversation_id: string;
   created_at: string;
   model: string | null;
-  agent_name: string | null;
+  workflow_name: string | null;
+  workflow_version: number | null;
   prompt_name: string | null;
   prompt_version: string | null;
   latency_ms: number | null;
@@ -427,10 +539,12 @@ export interface Message {
   // ("gpt-4o-2024-08-06"). Null on every user turn, and on assistant turns
   // written before the model became a per-question choice.
   model: string | null;
-  // WHICH AGENT ANSWERED. Null on every user turn, on every answer written
-  // before agents existed, and on every answer the default agent gave - all
-  // three render the same way, because they are the same fact.
-  agent_name: string | null;
+  // WHICH WORKFLOW ANSWERED, and which version of it. Null on every user turn,
+  // on every answer written before workflows existed, and on every answer given
+  // without one - all three render the same way, because they are the same
+  // fact: the app answering as it always did.
+  workflow_name: string | null;
+  workflow_version?: number | null;
   // The caller's own 👍/👎, null until they rate this answer. It rides the
   // transcript so a reload does not lose it, and so opening a conversation is
   // one request rather than one per assistant message.
@@ -466,7 +580,8 @@ export type ChatEvent =
       citations: Citation[];
       model: string | null;
       // So the answer on screen can say what produced it without a reload,
-      // exactly as `model` does. Null for the default agent.
-      agent_name: string | null;
+      // exactly as `model` does. Null when no workflow was named.
+      workflow_name: string | null;
+      workflow_version?: number | null;
     }
   | { type: "error"; detail: string };

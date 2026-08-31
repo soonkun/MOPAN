@@ -1,17 +1,25 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import AgentPicker, { DEFAULT_AGENT_LABEL } from "@/components/chat/AgentPicker";
+import WorkflowPicker, { DEFAULT_WORKFLOW_LABEL } from "@/components/chat/WorkflowPicker";
 import AttachmentChip from "@/components/chat/AttachmentChip";
+import MentionMenu from "@/components/chat/MentionMenu";
 import ModelPicker from "@/components/chat/ModelPicker";
 import PopoverSheet from "@/components/chat/PopoverSheet";
 import ToolPicker from "@/components/chat/ToolPicker";
+import {
+  filterEntries,
+  mentionAt,
+  mentionEntries,
+  type MentionEntry,
+} from "@/lib/mention";
 import type {
-  AgentOption,
   AnswerModel,
   Attachment,
+  CallableTool,
   McpToolOption,
   PendingToolCall,
+  WorkflowOption,
 } from "@/lib/types";
 
 /** One file the user has chosen. It exists on screen from the moment it is
@@ -57,7 +65,7 @@ const MAX_HEIGHT = 8 * 26 + 16;
  * Two states would let the + menu and a picker be open together, which is the
  * bug the hand-off was written to avoid: two stacked sheets over a composer,
  * two Escapes to get out, and a scrim over a scrim. */
-type Sheet = null | "menu" | "model" | "agent" | "tool";
+type Sheet = null | "menu" | "model" | "workflow" | "tool";
 
 // The four-point spark. Plain currentColor, NOT the brand gradient: §2 reserves
 // that for the wordmark, the assistant sparkle and the streaming indicator.
@@ -211,14 +219,17 @@ export default function Composer({
   model,
   onModelChange,
   tools,
+  callables,
+  collectionId,
+  onCollectionChange,
   toolCall,
   onToolSelect,
   onToolRemove,
   orchestrator,
   onOrchestratorChange,
-  agents,
-  agentId,
-  onAgentChange,
+  workflows,
+  workflowId,
+  onWorkflowChange,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -236,38 +247,75 @@ export default function Composer({
    * which is what drops the 도구 사용 row from the menu rather than opening
    * nothing. */
   tools: McpToolOption[];
+  /** GET /api/tools - everything callable, in one list, as `@` shows it. Empty
+   * while it is still loading and for a request that failed, which costs the
+   * user the menu and never the question. */
+  callables: CallableTool[];
+  /** The collection this question is scoped to, or null for the whole corpus.
+   * Set by picking a 문서 검색 row in the `@` menu; there is no other control for
+   * it, because scoping a search is a per-question thought rather than a
+   * setting. */
+  collectionId: string | null;
+  onCollectionChange: (id: string | null) => void;
   /** ONE pending call. Slice 2 is manual invocation; a plan that runs several
    * steps is Slice 3, and the backend already accepts a list. */
   toolCall: PendingToolCall | null;
   onToolSelect: (call: PendingToolCall) => void;
   onToolRemove: () => void;
-  /** Slice 3's Super Agent, chosen per question the way the model is. A toggle
-   * rather than a third picker: there are two modes, and the direct RAG path is
-   * the default until the orchestrator measures better on the eval set. */
+  /** 슈퍼 에이전트, chosen per question the way the model is. A toggle rather
+   * than a third picker: there are two modes, and the direct RAG path is the
+   * default until the planner measures better on the eval set.
+   *
+   * IT IS ONLY HERE NOW. `workflows.orchestrator` used to force it on for a
+   * whole saved configuration - a stored PROCEDURE switching on autonomous
+   * PLANNING - and that column is gone. So this toggle is never overridden, and
+   * the disabled-but-on chip that used to say so is gone with it. */
   orchestrator: boolean;
   onOrchestratorChange: (value: boolean) => void;
-  /** GET /api/agents/selectable. Empty for a deployment with no agent
+  /** GET /api/workflows/selectable. Empty for a deployment with no workflow
    * configured, which drops the row rather than offering a single 기본 row that
    * is not a choice. */
-  agents: AgentOption[];
-  /** null is the DEFAULT AGENT - this app exactly as it behaved before agents
+  workflows: WorkflowOption[];
+  /** null is NO WORKFLOW - this app exactly as it behaved before workflows
    * existed. It is a real selection, not "nothing chosen yet". */
-  agentId: string | null;
-  onAgentChange: (id: string | null) => void;
+  workflowId: string | null;
+  onWorkflowChange: (id: string | null) => void;
 }) {
-  // The agent's own setting, which the server ORs with the per-question toggle.
-  const forcedOrchestrator = agents.some((a) => a.id === agentId && a.orchestrator);
   const currentModel = models.find((m) => m.id === model) ?? models[0];
-  const currentAgent = agents.find((a) => a.id === agentId) ?? null;
-  const superOn = orchestrator || forcedOrchestrator;
+  const currentWorkflow = workflows.find((w) => w.id === workflowId) ?? null;
 
   const fileRef = useRef<HTMLInputElement>(null);
   const plusRef = useRef<HTMLButtonElement>(null);
   const [sheet, setSheet] = useState<Sheet>(null);
+  // The `@…` being typed: where its `@` is, and what has been typed after it.
+  // Null is "the menu is closed", and it is the ONLY thing that opens it.
+  const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
+  const [activeIndex, setActiveIndex] = useState(0);
+  // Which tool the ToolPicker should open on, when `@` named one. Cleared by the
+  // picker's own close, so the + menu's 도구 사용 row still opens where it was.
+  const [toolSeed, setToolSeed] = useState<string | null>(null);
+  const mentionId = "composer-mention-list";
   // Chrome fires keydown(Enter) with isComposing=true while a Hangul syllable
   // is still being composed, but not every engine does; this ref is the second
   // half of the same guard, set from the composition events themselves.
   const composingRef = useRef(false);
+
+  /** THE ONE IME SIGNAL, used by Enter and by `@` alike.
+   *
+   * There is deliberately no second mechanism for the menu. `isComposing` is the
+   * standard, `keyCode === 229` is what the engines that predate it report, and
+   * the ref covers an engine that fires compositionend late; a fourth check
+   * invented for the menu would be a fourth thing to get wrong, and the two
+   * behaviours would drift apart on exactly one browser.
+   *
+   * An InputEvent carries `isComposing` and no `keyCode`; a KeyboardEvent
+   * carries both; a CompositionEvent carries neither, which is why
+   * compositionend can re-evaluate the token and open the menu on the syllable
+   * it just committed. */
+  function composingNow(native: Event): boolean {
+    const event = native as InputEvent & KeyboardEvent;
+    return composingRef.current || event.isComposing === true || event.keyCode === 229;
+  }
 
   // Auto-grow, 1 to 8 rows. height:auto first, or scrollHeight only ever
   // reports the height it already has and the box can never shrink again after
@@ -311,6 +359,55 @@ export default function Composer({
     onFiles(Array.from(list));
   }
 
+  /** Re-read the token under the caret after anything that could have changed it.
+   *
+   * **The menu never OPENS mid-composition.** While a Hangul syllable is still
+   * being composed the `@` in front of it is not committed, and a list that
+   * opened there would take the next arrow or Enter for itself - the keystroke
+   * the IME needed. An ALREADY-open menu keeps following the composing text,
+   * because that is only the filter narrowing and steals nothing: Enter is still
+   * refused by the same guard. compositionend calls this again, so `@농약` opens
+   * on the syllable it commits rather than never. */
+  function updateMention(value: string, caret: number | null, native: Event) {
+    const next = mentionAt(value, caret);
+    if (next === null) {
+      setMention(null);
+      return;
+    }
+    if (mention === null && composingNow(native)) return;
+    setMention(next);
+    if (next.query !== mention?.query) setActiveIndex(0);
+  }
+
+  /** A row was chosen. The `@…` text goes; the CHIP is what carries the choice
+   * from here, and leaving the token behind would send it to the model as part
+   * of the question. */
+  function pick(entry: MentionEntry) {
+    if (!mention) return;
+    const at = mention;
+    onChange(value.slice(0, at.start) + value.slice(at.start + 1 + at.query.length));
+    setMention(null);
+    if (entry.kind === "workflow" && entry.workflowId) {
+      onWorkflowChange(entry.workflowId);
+    } else if (entry.kind === "rag") {
+      onCollectionChange(entry.collectionId ?? null);
+    } else if (entry.kind === "mcp" && entry.toolId) {
+      // The arguments still have to be filled in, and the tool's own
+      // input_schema is the only thing that knows what they are - so this hands
+      // off to the picker that renders it, opened on the row just chosen.
+      setToolSeed(entry.toolId);
+      setSheet("tool");
+    }
+    // The caret back where the token was, in a frame that runs after React has
+    // written the shortened value - setSelectionRange against the old text would
+    // land in the wrong place.
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      el?.focus();
+      el?.setSelectionRange(at.start, at.start);
+    });
+  }
+
   /** The ONE owner of focus return, for every sheet in this component.
    *
    * The + button is where focus lands, not the menu row that was pressed: by
@@ -321,8 +418,16 @@ export default function Composer({
    * the same tick keeps the focus its showModal() just took. */
   function closeSheet() {
     setSheet(null);
+    setToolSeed(null);
     plusRef.current?.focus();
   }
+
+  const entries = mentionEntries(callables, workflows, tools);
+  const visible = mention ? filterEntries(entries, mention.query) : [];
+  const active = visible[Math.min(activeIndex, visible.length - 1)];
+  const currentCollection = callables
+    .find((c) => c.kind === "rag")
+    ?.collections.find((c) => c.id === collectionId);
 
   return (
     // §8: one surface-container block at --radius-xl, no border at rest, a 2px
@@ -335,32 +440,61 @@ export default function Composer({
       }}
       className="rounded-xl bg-surface-container p-2 outline-primary transition-colors duration-150 focus-within:outline focus-within:outline-2"
     >
-      {toolCall && (
+      {(toolCall || collectionId) && (
         <div className="flex flex-wrap gap-2 p-1 pb-2">
+          {collectionId && (
+            <span className="inline-flex max-w-full items-center gap-2 rounded-md bg-surface-container-high px-3 py-1.5 text-label">
+              {/* The NAME, and 분류 beside it. A bare name would read as a file
+                  the message carries, which is what the chip next to it is. */}
+              <span className="truncate">분류 · {currentCollection?.name ?? "삭제된 분류"}</span>
+              <button
+                type="button"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => onCollectionChange(null)}
+                aria-label="분류 제한 해제"
+                className="shrink-0 text-on-surface-variant"
+              >
+                ✕
+              </button>
+            </span>
+          )}
           {/* Same row and same shape as an attachment chip: both are "something
               extra this message carries", and the user removes either the same
               way. Its own component would be 30 lines to render two spans. */}
-          <span className="inline-flex max-w-full items-center gap-2 rounded-md bg-surface-container-high px-3 py-1.5 text-label">
-            <span className="truncate">
-              {toolCall.tool.server_name} · {toolCall.tool.name}
-            </span>
-            {Object.keys(toolCall.arguments).length > 0 && (
-              <span className="truncate text-caption text-on-surface-variant">
-                {Object.entries(toolCall.arguments)
-                  .map(([k, v]) => `${k}=${v}`)
-                  .join(", ")}
+          {toolCall && (
+            <span className="inline-flex max-w-full items-center gap-2 rounded-md bg-surface-container-high px-3 py-1.5 text-label">
+              <span className="truncate">
+                {toolCall.tool.server_name} · {toolCall.tool.name}
               </span>
-            )}
-            <button
-              type="button"
-              onClick={onToolRemove}
-              aria-label={`${toolCall.tool.name} 도구 제거`}
-              className="shrink-0 text-on-surface-variant"
-            >
-              ✕
-            </button>
-          </span>
+              {Object.keys(toolCall.arguments).length > 0 && (
+                <span className="truncate text-caption text-on-surface-variant">
+                  {Object.entries(toolCall.arguments)
+                    .map(([k, v]) => `${k}=${v}`)
+                    .join(", ")}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={onToolRemove}
+                aria-label={`${toolCall.tool.name} 도구 제거`}
+                className="shrink-0 text-on-surface-variant"
+              >
+                ✕
+              </button>
+            </span>
+          )}
         </div>
+      )}
+
+      {mention && (
+        <MentionMenu
+          id={mentionId}
+          entries={visible}
+          activeIndex={Math.min(activeIndex, Math.max(visible.length - 1, 0))}
+          query={mention.query}
+          onPick={pick}
+          onHover={setActiveIndex}
+        />
       )}
 
       {attachments.length > 0 && (
@@ -390,7 +524,7 @@ export default function Composer({
           row is full-width and squeezes nothing.
           The model chip appears only when there is more than one model - with
           one, "which model" is not a question anyone is asking. */}
-      {(models.length > 1 || currentAgent || superOn) && (
+      {(models.length > 1 || currentWorkflow || orchestrator) && (
         <div className="flex flex-wrap gap-2 p-1 pb-2">
           {models.length > 1 && currentModel && (
             <StateChip
@@ -400,33 +534,24 @@ export default function Composer({
               ariaLabel={`답변 모델: ${currentModel.label}`}
             />
           )}
-          {currentAgent && (
+          {currentWorkflow && (
             <StateChip
               icon={SHIELD}
-              label={currentAgent.name}
+              label={currentWorkflow.name}
               active
-              onClick={() => setSheet("agent")}
-              ariaLabel={`에이전트: ${currentAgent.name}`}
+              onClick={() => setSheet("workflow")}
+              ariaLabel={`워크플로우: ${currentWorkflow.name}`}
+              title="누르면 바꿉니다. 이 질문은 이 워크플로우의 절차로 답합니다."
             />
           )}
-          {superOn && (
+          {orchestrator && (
             <StateChip
               icon={SPARK}
               label="슈퍼 에이전트"
               active
-              // An agent that carries the orchestrator turns it on server-side,
-              // and there is deliberately no way to turn it off for one - that
-              // is the agent's configuration, not a per-question default. So
-              // the chip is shown ON and DISABLED rather than left clickable: a
-              // control that silently ignores a click is a bug report.
-              disabled={forcedOrchestrator}
               onClick={() => onOrchestratorChange(false)}
               ariaLabel="슈퍼 에이전트 켜짐"
-              title={
-                forcedOrchestrator
-                  ? "선택한 에이전트가 항상 슈퍼 에이전트로 답변합니다."
-                  : "누르면 끕니다."
-              }
+              title="누르면 끕니다."
             />
           )}
         </div>
@@ -481,21 +606,60 @@ export default function Composer({
           ref={textareaRef}
           rows={1}
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(e) => {
+            onChange(e.target.value);
+            updateMention(e.target.value, e.target.selectionStart, e.nativeEvent);
+          }}
+          // Every way the caret can move without the text changing: an arrow, a
+          // click, a Home. Without it the menu stays open over a caret that has
+          // walked away from the `@` it belongs to.
+          onSelect={(e) => {
+            const el = e.currentTarget;
+            if (mention) updateMention(el.value, el.selectionStart, e.nativeEvent);
+          }}
           onCompositionStart={() => {
             composingRef.current = true;
           }}
-          onCompositionEnd={() => {
+          onCompositionEnd={(e) => {
             composingRef.current = false;
+            // Re-read the token NOW. This is the event that makes `@농약` work:
+            // the menu refused to open while 농 was being composed, and this is
+            // the moment the syllable becomes real text.
+            updateMention(e.currentTarget.value, e.currentTarget.selectionStart, e.nativeEvent);
           }}
           onKeyDown={(e) => {
-            if (e.key !== "Enter" || e.shiftKey) return;
             // A Korean user pressing Enter to CONFIRM a Hangul candidate must
-            // not send the message - that Enter belongs to the IME. Three
-            // checks because no single one is portable: `isComposing` is the
-            // standard, keyCode 229 is what the engines that predate it report,
-            // and the ref covers an engine that fires compositionend late.
-            if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229 || composingRef.current) {
+            // not send the message, and must not pick a row out of the `@` menu
+            // either - that Enter belongs to the IME. Three checks because no
+            // single one is portable: `isComposing` is the standard, keyCode 229
+            // is what the engines that predate it report, and the ref covers an
+            // engine that fires compositionend late.
+            const composing = composingNow(e.nativeEvent);
+            // The menu owns the arrows, Enter, Tab and Escape while it is open -
+            // and only while it is open, so nothing about typing changes when it
+            // is not. This is what makes `@` a keyboard gesture end to end: no
+            // pointer touches the list at any point.
+            if (mention && !composing) {
+              if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                e.preventDefault();
+                if (visible.length === 0) return;
+                const step = e.key === "ArrowDown" ? 1 : visible.length - 1;
+                setActiveIndex((index) => (Math.min(index, visible.length - 1) + step) % visible.length);
+                return;
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setMention(null);
+                return;
+              }
+              if ((e.key === "Enter" || e.key === "Tab") && active) {
+                e.preventDefault();
+                pick(active);
+                return;
+              }
+            }
+            if (e.key !== "Enter" || e.shiftKey) return;
+            if (composing) {
               return;
             }
             // Shift+Enter is handled by the early return above: it falls
@@ -511,10 +675,20 @@ export default function Composer({
             e.preventDefault();
             take(e.clipboardData.files);
           }}
-          placeholder="질문을 입력하세요"
+          placeholder="질문을 입력하세요. @로 도구와 워크플로우를 부를 수 있습니다."
           // A placeholder is not an accessible name: it is dropped the moment
           // the field has text, and some screen readers never announce it.
           aria-label="질문"
+          // The combobox pattern, and the reason the menu is not a dialog: the
+          // textarea keeps focus and OWNS the popup, so a screen reader announces
+          // the highlighted row without the caret ever leaving the question.
+          role="combobox"
+          aria-expanded={mention !== null}
+          aria-controls={mention ? mentionId : undefined}
+          aria-activedescendant={
+            mention && active ? `${mentionId}-${visible.indexOf(active)}` : undefined
+          }
+          aria-autocomplete="list"
           style={{ maxHeight: MAX_HEIGHT }}
           className="min-w-0 flex-1 resize-none bg-transparent px-2 py-2 text-body-lg text-on-surface placeholder:text-on-surface-variant focus:outline-none"
         />
@@ -613,29 +787,24 @@ export default function Composer({
                 onClick={() => setSheet("model")}
               />
             )}
-            {agents.length > 0 && (
+            {workflows.length > 0 && (
               <MenuRow
                 icon={SHIELD}
-                label="에이전트"
-                value={currentAgent?.name ?? DEFAULT_AGENT_LABEL}
-                onClick={() => setSheet("agent")}
+                label="워크플로우"
+                value={currentWorkflow?.name ?? DEFAULT_WORKFLOW_LABEL}
+                onClick={() => setSheet("workflow")}
               />
             )}
             <MenuRow
               icon={SPARK}
               label="슈퍼 에이전트"
-              value={superOn ? "켬" : "끔"}
-              pressed={superOn}
+              value={orchestrator ? "켬" : "끔"}
+              pressed={orchestrator}
               // Stays open: the row IS the state readout, so the user has to be
               // able to see it flip. Closing on toggle would hide the only
               // feedback the action has.
               onClick={() => onOrchestratorChange(!orchestrator)}
-              disabled={forcedOrchestrator}
-              title={
-                forcedOrchestrator
-                  ? "선택한 에이전트가 항상 슈퍼 에이전트로 답변합니다."
-                  : "질문에 맞춰 여러 단계의 검색과 도구 호출을 계획해서 실행합니다."
-              }
+              title="질문에 맞춰 모델이 그 자리에서 워크플로우를 짜서 실행합니다."
             />
           </div>
         </div>
@@ -650,16 +819,22 @@ export default function Composer({
         anchorRef={plusRef}
       />
 
-      <AgentPicker
-        agents={agents}
-        value={agentId}
-        onChange={onAgentChange}
-        open={sheet === "agent"}
+      <WorkflowPicker
+        workflows={workflows}
+        value={workflowId}
+        onChange={onWorkflowChange}
+        open={sheet === "workflow"}
         onClose={closeSheet}
         anchorRef={plusRef}
       />
 
-      <ToolPicker tools={tools} onSelect={onToolSelect} open={sheet === "tool"} onClose={closeSheet} />
+      <ToolPicker
+        tools={tools}
+        onSelect={onToolSelect}
+        open={sheet === "tool"}
+        onClose={closeSheet}
+        initialToolId={toolSeed}
+      />
     </form>
   );
 }

@@ -80,6 +80,14 @@ function EvidenceRow({ item }: { item: TraceEvidence }) {
   );
 }
 
+/** The node kinds, for the line under a step. `rag` is not here: it is the
+ * pre-Slice-6 kind for a search step, and it is rendered as one. */
+const NODE_KIND_LABEL: Record<string, string> = {
+  input: "질문이 들어온 자리",
+  branch: "분기",
+  answer: "모인 근거로 답변",
+};
+
 const PLAN_STATE_LABEL: Record<PlanStep["state"], string> = {
   running: "진행 중",
   done: "완료",
@@ -88,10 +96,15 @@ const PLAN_STATE_LABEL: Record<PlanStep["state"], string> = {
   timeout: "시간 초과",
 };
 
-/** The Super Agent's plan, for an answer that had one.
+/** The graph behind an answer, whoever authored it.
+ *
+ * ONE SECTION FOR BOTH. A workflow a person drew on the canvas and one 슈퍼
+ * 에이전트 wrote for this question produce the same trace, and `author` is the
+ * only line that differs - which is deliberate: two trace shapes would make
+ * "which am I looking at" the first question on the screen instead of the last.
  *
  * The section exists for two questions the evidence table cannot answer: what
- * did it decide to do, and what did it fail to do. A refused plan is the most
+ * did it decide to do, and what did it fail to do. A refused graph is the most
  * interesting case of all - the answer came from the plain search path, and this
  * is the sentence that says why. */
 function PlanSection({ plan }: { plan: TracePlan }) {
@@ -100,6 +113,9 @@ function PlanSection({ plan }: { plan: TracePlan }) {
       <div className="mt-6 flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <h3 className="text-title font-medium">실행 계획</h3>
         <p className="text-caption text-on-surface-variant">
+          {/* 사람 or 슈퍼 에이전트, first: every number after it means something
+              different depending on who wrote the graph. */}
+          {plan.author ? `${plan.author}이 만든 절차 · ` : ""}
           {plan.step_count}단계 · 도구 {plan.tool_step_count}회 · {plan.elapsed_ms.toLocaleString()}ms
         </p>
       </div>
@@ -137,9 +153,16 @@ function PlanSection({ plan }: { plan: TracePlan }) {
                 </span>
               </div>
               <p className="mt-1 text-caption text-on-surface-variant">
-                {step.kind === "tool"
-                  ? `도구 ${step.tool} · 위험도 ${step.risk_level ?? "—"}`
-                  : `컬렉션 ${step.collections?.length ? step.collections.join(", ") : "전체"}`}
+                {/* A NODE, not a step, since Slice 6: 질문 and 답변 are nodes
+                    that call nothing, and printing 컬렉션 전체 under them - which
+                    this line used to do for every kind but `tool` - said the
+                    answer node had searched the whole corpus. */}
+                {step.kind === "tool" || step.kind === "rag"
+                  ? step.tool && step.tool !== "rag"
+                    ? `도구 ${step.tool} · 위험도 ${step.risk_level ?? "—"}`
+                    : `문서 검색 · 분류 ${step.collections?.length ? step.collections.join(", ") : "전체"}`
+                  : NODE_KIND_LABEL[step.kind] ?? step.kind}
+                {step.depth ? ` · ${step.depth}단계 안쪽` : ""}
                 {step.depends_on?.length ? ` · ${step.depends_on.join(", ")} 이후` : ""}
               </p>
               {step.error && <p className="mt-1 text-caption text-error">{step.error}</p>}
@@ -221,11 +244,21 @@ export default function TraceDialog({
                 agent is one of them, and 3 divides 9 while 4 leaves a single
                 orphan on the last row. */}
             <dl className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
-              {/* First, because it is the fact the other eight follow from: an
-                  agent decides which prompt answered, which corpus was in
-                  scope and which model ran. 기본 - not an em dash - because
-                  "the default agent answered" is a real answer, not a gap. */}
-              <Fact label="답변 에이전트" value={trace.agent_name ?? "기본"} />
+              {/* First, because it is the fact the other eight follow from: a
+                  workflow decides which procedure ran, which prompt answered,
+                  which corpus was in scope and which model ran. 기본 - not an em
+                  dash - because "no workflow answered" is a real answer, not a
+                  gap. */}
+              <Fact
+                label="답변 워크플로우"
+                value={
+                  trace.workflow_name
+                    ? `${trace.workflow_name}${
+                        trace.workflow_version ? ` v${trace.workflow_version}` : ""
+                      }`
+                    : "기본"
+                }
+              />
               <Fact label="답변 모델" value={trace.model ?? "—"} />
               <Fact
                 label="프롬프트 버전"

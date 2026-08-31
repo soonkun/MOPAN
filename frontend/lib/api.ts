@@ -197,7 +197,7 @@ export async function streamChat(
      * carries the orchestrator turns it on regardless; there is no way to turn
      * it off for one, which is why the composer shows the toggle forced on. */
     orchestrator?: boolean;
-    /** One of GET /api/agents/selectable. Omitted is the DEFAULT AGENT - no
+    /** One of GET /api/workflows/selectable. Omitted is the DEFAULT AGENT - no
      * prompt override, no restriction, orchestrator off - which is this app
      * exactly as it behaved before agents existed.
      *
@@ -208,7 +208,7 @@ export async function streamChat(
      * reach (400) and a tool it does not carry (403) are all Korean refusals
      * BEFORE the conversation is created, so they arrive here as a rejected
      * fetch rather than an error frame inside a 200. */
-    agent_id?: string;
+    workflow_id?: string;
   },
   onEvent: (event: ChatEvent) => void,
   signal?: AbortSignal,
