@@ -82,6 +82,39 @@ async def build_edges(
             ambiguous.add(key)
             continue
         index[key] = position
+
+    # A PATH NO CHUNK OPENS resolves to the first chunk that opens under it.
+    # 특허법 writes 제36조 as a bare heading and puts the article's text entirely in
+    # its 항, so `hierarchy.walk` no longer emits a chunk for 제36조 itself, and
+    # "제36조" as a citation has to land on the piece that opens 제36조제1항 - which
+    # is where 그 조 begins and the only place its words are.
+    #
+    # MEASURED before this existed: of the corpus's 5,923 RESOLVED `ref` edges,
+    # 3,026 landed on a heading-only chunk, so half of every citation delivered to
+    # the model was an article TITLE and nothing else - and it spent one of the two
+    # MAX_REFERENCES_PER_CHUNK slots to say it.
+    #
+    # The same ambiguity rule, for the same reason: a prefix TWO different runs
+    # produce names two provisions - 상표심사기준 prints both 【상표법】제28조 and
+    # 【상표법시행규칙】제28조 - and resolves to neither. "Different" means the
+    # previous chunk carrying a path did not already sit under it, so the several
+    # 항 of one 조 register it once.
+    opened = set(index)
+    previous: tuple[tuple[str, str], ...] = ()
+    for position, candidate in enumerate(candidates):
+        path = parse_key(candidate.metadata.get("path") or "", scheme)
+        if not path:
+            continue
+        for cut in range(1, len(path)):
+            key = path_key(path[:cut])
+            if key in opened or previous[:cut] == path[:cut]:
+                continue
+            if key in index:
+                ambiguous.add(key)
+            else:
+                index[key] = position
+        previous = path
+
     for key in ambiguous:
         index.pop(key, None)
 

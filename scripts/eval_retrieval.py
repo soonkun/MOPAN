@@ -22,15 +22,21 @@ the point: the redesign is decided one stage at a time, and a stage that cannot
 be switched off in this harness cannot be switched off in production either.
 
 Metrics, all against the fixture:
-  recall@N     - fraction of questions with at least one gold-PAGE chunk in the
-                 N returned. Page-level, so it survives a re-ingestion.
+  recall@N     - fraction of questions with at least one gold chunk in the N
+                 returned. A chunk's ADDRESS is its page where the document has
+                 pages and its hierarchy path ("조59/항2") where it has none, so
+                 the eight statutes - 2,669 chunks, page NULL on every one - are
+                 scorable at all. They were not: recall counted only pages, so a
+                 statute chunk entering the top 8 cost a question its recall by
+                 definition and the whole statute ingest could only read as harm.
+                 Either address survives a re-ingestion, which is the point.
   anchor@N     - fraction of questions where a chunk carrying the answer-bearing
                  SENTENCE reached the model. This is the metric that decides
                  things here; recall@N scored a hit on the owner's 공지예외
                  question for a page-594 chunk that restates the rule as a double
                  negative while the chunk on 593 that states it plainly never
                  arrived. The metric reported success and the answer was inverted.
-  prec@N       - mean share of the N slots holding a gold-page chunk.
+  prec@N       - mean share of the N slots holding a gold chunk.
   ms/q         - mean wall-clock of the retrieval path, per question. Excludes
                  the question embedding when it is served from cache, so the
                  dense arm's own latency is reported separately by --time-embed.
@@ -51,6 +57,11 @@ because the average hides exactly the failure class each was written for.
                noise. Every remaining miss was traced and none of them is a 준용
                hop, which is the measured answer to "is an entity graph the next
                slice": not on this evidence.
+  statute    - 14 questions whose answer is in one of the eight statutes and
+               addressed by PROVISION rather than by page. Without them the
+               fixture covered 17,035 of the corpus's 19,704 chunks and not one
+               of the eight statutes, so ingesting 특허법 had no way to show a
+               gain and every way to show a loss.
 
 The eval_kiwi table (--setup-kiwi / --drop-kiwi) is a THROWAWAY holding morpheme
 tsvectors, so the "morpheme tokens + ts_rank" cell can be measured with the real
@@ -687,7 +698,9 @@ async def main() -> int:
     parser.add_argument("--verify", action="store_true", help="anchors only; no API calls")
     parser.add_argument("--setup-lex", default="", help="build eval_lex_<name> tables")
     parser.add_argument("--drop-lex", action="store_true", help="drop every eval_lex_* table")
-    parser.add_argument("--show", default="", help="question id to print per-slot detail for")
+    parser.add_argument(
+        "--show", default="", help="question id, group name or '*' to print per-slot detail for"
+    )
     parser.add_argument(
         "--fixture", default=str(FIXTURE),
         help="question set to measure; defaults to eval_questions_ko.json",
@@ -757,7 +770,7 @@ async def main() -> int:
 
         columns = (
             Chunk.id, Chunk.page, Chunk.content, Chunk.document_id,
-            Chunk.chunk_index, Chunk.section,
+            Chunk.chunk_index, Chunk.section, Chunk.chunk_metadata,
         )
         # THE WHOLE CORPUS, because that is what the product searches. The dense
         # arm used to be built over the fixture's document alone while the shipped
@@ -794,18 +807,38 @@ async def main() -> int:
         # is what makes that true. A question names its own document in
         # `document`; a single-document fixture has nothing to name and its
         # questions default to the only one there is.
-        pages = {str(r.id): (by_id[r.document_id], r.page) for r in rows}
+        # A PAGE NUMBER IS NOT THE ONLY ADDRESS A GOLD ANSWER HAS. 특허법.html and
+        # the seven other statutes have no pages at all - `chunks.page` is NULL for
+        # every one of their 2,669 chunks - so scoring recall on pages alone made a
+        # statute chunk entering the top 8 cost a question its recall BY
+        # DEFINITION, and the whole statute ingest could only ever read as harm.
+        # The statute chunks already carry an address: `chunk_metadata["path"]`,
+        # "조36/항1", written by app/rag/chunking/hierarchy.py, stable across
+        # re-ingestion for the same reason a page number is. So the address of a
+        # chunk is its page when it has one and its hierarchy path when it does
+        # not, and a question names its gold in whichever the document uses -
+        # `gold_pages` or `gold_paths`. Both are scored the same way.
+        pages = {
+            str(r.id): (
+                by_id[r.document_id],
+                r.page if r.page is not None else (r.chunk_metadata or {}).get("path"),
+            )
+            for r in rows
+        }
         docs = {str(r.id): r.content for r in rows}
         for entry in questions:
+            document = entry.get("document", names[0])
             entry["_gold"] = {
-                (entry.get("document", names[0]), page) for page in entry["gold_pages"]
+                (document, address)
+                for address in [*entry.get("gold_pages", []), *entry.get("gold_paths", [])]
             }
         # `meta` is the whole corpus: a foreign chunk that wins a slot has to be
         # loadable, or it silently costs nothing in the anchor score it displaced.
         meta = {str(r.id): r for r in corpus_rows}
         print(
             f"corpus: {len(corpus_rows)} chunks searched, "
-            f"{len(rows)} in {', '.join(names)} ({len(set(pages.values()))} pages)"
+            f"{len(rows)} in {len(names)} scored documents "
+            f"({len(set(pages.values()))} distinct gold addresses)"
         )
 
         # Anchors are the fixture's own regression check: if extraction changes
@@ -1170,12 +1203,17 @@ async def measure_row(
         # fail" is one run rather than one run per question. The ANCHOR verdict is
         # printed next to the slots because that is the metric that decides here
         # and a slot list alone cannot say whether the sentence arrived.
-        if show and show in (entry["id"], entry.get("group", "base")):
+        if show and (show == "*" or show in (entry["id"], entry.get("group", "base"))):
             anchored = anchor_hit([c.content for c in chunks], entry["anchor"])
             print(f"  [{label}] {entry['id']} anchor={'HIT' if anchored else 'MISS'}")
             for i, cid in enumerate(selected, 1):
                 mark = "HIT " if pages.get(cid) in gold else "    "
-                print(f"    {mark}{i}. page={pages.get(cid)} idx={meta[cid].chunk_index}")
+                # THE TEXT, not only the slot. "which chunk won this slot" is
+                # unanswerable from a page number when the chunk has no page.
+                head = " ".join(meta[cid].content.split())[:110]
+                print(
+                    f"    {mark}{i}. page={pages.get(cid)} idx={meta[cid].chunk_index} {head}"
+                )
 
     total = defaultdict(list)
     for bucket in per_group.values():

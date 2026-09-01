@@ -2,19 +2,28 @@
   "_readme": [
     "Korean retrieval evaluation set. The 47 base/neighbor/tokenizer/proviso questions are about 특허·실용신안 심사기준; the crossref group also draws on 상표심사기준 and 지식재산권 권리회복 심사 가이드라인, so `document_filename` is a LIST and a question names its own document in `document` (absent = the first name). Scoring is per document: a gold page is the pair (document, page), never a bare page number.",
     "Each entry was written by reading the passage first, then writing the question it answers.",
-    "gold_pages are PDF page numbers (chunks.page), NOT chunk ids: chunk ids change on",
+    "A GOLD ANSWER IS ADDRESSED BY PAGE OR BY PROVISION, whichever its document has. `gold_pages` are PDF page numbers (chunks.page) and `gold_paths` are hierarchy paths (chunk_metadata.path, written by app/rag/chunking/hierarchy.py) - \"조59/항2\" is 제59조제2항. Neither is a chunk id: chunk ids change on every re-ingestion, page numbers and article numbers do not. The eight statutes have NO pages at all - page is NULL for all 2,669 of their chunks - so scoring them on pages made a statute chunk in the top 8 cost a question its recall by definition, which is why the 특허법 ingest could only ever read as harm. `anchor` is a verbatim substring of the gold passage - if the extractor changes and a page shifts, grep the anchor to re-locate it.",
     "every re-ingestion, page numbers do not. `anchor` is a verbatim substring of the gold",
     "passage - if the extractor changes and a page shifts, grep the anchor to re-locate it.",
     "`group` splits the set. Absent or \"base\" is the original 21 questions. \"neighbor\" is the 8 written FROM measured proviso splits: the rule is in one chunk and the 다만/그러나 that qualifies it is in the NEXT one, so retrieving only the rule chunk yields a confidently wrong answer. Their `anchor` is the proviso sentence, which is what makes them able to detect NEIGHBOR_EXPANSION at all - the base questions cannot, because none of them was chosen for spanning a chunk boundary.",
     "\"tokenizer\" is 8 questions that probe the known content_tsv bug: content_tsv is to_tsvector('simple', content), which does not segment Korean, so a josa stays glued to the noun and the document token 상표등록출원이나 never matches the query token 상표등록출원. Each was verified with plainto_tsquery('simple', ...) against the live corpus: the form in `query_form` matches ZERO chunks as a lexeme while the form in `doc_form` is what the corpus actually stores. `probe` says which way the mismatch runs - \"bare->inflected\" (question bare, document josa-glued) or \"inflected->bare\" (question josa-glued, document bare). query_form/doc_form are documentation, not scored. These questions can only be won by the dense side or by a tokenizer that segments Korean; a pure sparse run should fail them.",
     "\"proviso\" is 10 questions where retrieving the main rule WITHOUT its 단서/다만 clause produces a confidently WRONG answer. Each is phrased so the main rule alone answers backwards - the exception case is asked about directly, or the yes/no flips on the proviso - and the `anchor` is the PROVISO sentence, never the main rule, which is what lets the metric see the failure. Includes double-negative (p04, p07) and condition-stacking (p05, p06, p09) phrasings. `why` records what the wrong answer would be on the main rule alone; documentation, not scored.",
     "\"crossref\" is 25 questions whose answer needs a 준용/참조 hop. It was 5 and read anchor 0.800 for two days across every stage built - sparse bigrams, reranking, query expansion, neighbour expansion, classification-table chunking, hierarchical chunking, citation edges - and 0.800 at n=5 is ONE question, which is why it was enlarged before anything else was built. x01-x05 are the original manual-to-manual pointers: gold_pages lists both hops, pointer page first, and the `anchor` sits on the SECOND hop. x06-x25 were written from the corpus's REAL 준용 occurrences (254 clauses naming a 제N조 target; 128 of those targets exist elsewhere in the same document, 99 name a statute nobody uploaded). x06-x10 are the strongest shape available here and the one the owner's argument is about: the 권리회복 guideline prints 특허법 §16/§67의3/§81의3 in full and then says 실용신안법 §3/§15/§20 준용 them, so a question asked in 실용신안 vocabulary is answered by a sentence that says 특허 throughout and 실용신안 nowhere. Their gold_pages is the TARGET page only, so neither recall nor anchor can be won without the hop. MEASURED: all five are already answered by the deployed pipeline with no 준용 machinery of any kind - the embedding crosses the substitution on its own. The three anchor misses at n=25 are x01 (a 「제8부제2장 3.」 section-TITLE pointer, and its citing chunk sits at fused rank 10 with TOP_N=8), x11 (plain ranking: the whole 659-672 neighbourhood arrived and p.669 did not) and x23 (a 준용 조문 list split across two chunks with different ancestor lines). None is a 준용 failure.",
-    "Run with: python scripts/eval_retrieval.py"
+    "Run with: python scripts/eval_retrieval.py",
+    "\"statute\" is 14 questions whose answer is IN one of the eight statutes and nowhere else, written the way a person asks - 특허법 6, 상표법 3, 실용신안법 2, 특허법 시행규칙 2, 상표법 시행규칙 1. Without them nothing in this fixture covered the 2,669 statute chunks of the corpus's 19,704, so ingesting 특허법 had no way to show a gain. Each `anchor` was checked against the live corpus and sits in exactly ONE chunk, at the `gold_paths` provision; two of them (s04, s14) have their sentence QUOTED in a manual as well, which is the corpus telling the truth about itself rather than a defect in the question."
   ],
   "document_filename": [
     "특허·실용신안 심사기준.pdf",
     "상표심사기준.pdf",
-    "지식재산권 권리회복 심사 가이드라인.pdf"
+    "지식재산권 권리회복 심사 가이드라인.pdf",
+    "특허법.html",
+    "상표법.html",
+    "실용신안법.html",
+    "특허법 시행령.html",
+    "상표법 시행령.html",
+    "실용신안법 시행령.html",
+    "특허법 시행규칙.html",
+    "상표법 시행규칙.html"
   ],
   "questions": [
     {
@@ -730,6 +739,146 @@
         43
       ],
       "anchor": "제212조에 따라 준용되는 제68조의2제1항에 따른 직권 재심사를 하여 취소된 상품분류전환등록결정"
+    },
+    {
+      "id": "s01-특허출원서-첨부서류",
+      "group": "statute",
+      "question": "특허출원서 낼 때 명세서 말고 도면이랑 요약서도 같이 내야 하나요?",
+      "document": "특허법.html",
+      "gold_paths": [
+        "조42/항2"
+      ],
+      "anchor": "발명의 설명ㆍ청구범위를 적은 명세서와 필요한 도면 및 요약서를 첨부하여야 한다"
+    },
+    {
+      "id": "s02-심사청구-기간",
+      "group": "statute",
+      "question": "특허 심사청구는 출원한 날부터 언제까지 해야 하는지 알려주세요",
+      "document": "특허법.html",
+      "gold_paths": [
+        "조59/항2"
+      ],
+      "anchor": "특허출원일부터 3년 이내에 지식재산처장에게 출원심사의 청구를 할 수 있다"
+    },
+    {
+      "id": "s03-출원공개-시점",
+      "group": "statute",
+      "question": "제 특허출원은 언제 공개되나요? 앞당겨서 공개해달라고 할 수도 있나요?",
+      "document": "특허법.html",
+      "gold_paths": [
+        "조64/항1"
+      ],
+      "anchor": "1년 6개월이 지난 후 또는 그 전이라도 특허출원인이 신청한 경우에는"
+    },
+    {
+      "id": "s04-특허료-설정등록",
+      "group": "statute",
+      "question": "특허 설정등록을 받으려면 특허료를 몇 년치나 내야 하나요?",
+      "document": "특허법.html",
+      "gold_paths": [
+        "조79/항1"
+      ],
+      "anchor": "제87조제1항에 따른 특허권의 설정등록을 받으려는 자는 설정등록을 받으려는 날"
+    },
+    {
+      "id": "s05-거절결정불복심판-기간",
+      "group": "statute",
+      "question": "특허 거절결정을 받았는데 불복 심판은 언제까지 청구해야 하나요?",
+      "document": "특허법.html",
+      "gold_paths": [
+        "조132의17"
+      ],
+      "anchor": "특허거절결정 또는 특허권의 존속기간의 연장등록거절결정을 받은 자가 결정에 불복할 때에는"
+    },
+    {
+      "id": "s06-거짓행위의죄",
+      "group": "statute",
+      "question": "거짓으로 특허를 받아낸 경우에는 처벌이 어떻게 되나요?",
+      "document": "특허법.html",
+      "gold_paths": [
+        "조229"
+      ],
+      "anchor": "거짓이나 그 밖의 부정한 행위로 특허, 특허권의 존속기간의 연장등록"
+    },
+    {
+      "id": "s07-상표권-존속기간",
+      "group": "statute",
+      "question": "상표권은 등록하고 나면 몇 년 동안 유지되나요?",
+      "document": "상표법.html",
+      "gold_paths": [
+        "조83/항1"
+      ],
+      "anchor": "상표권의 존속기간은 제82조제1항에 따라 설정등록이 있는 날부터 10년으로 한다"
+    },
+    {
+      "id": "s08-상표등록료-분할납부",
+      "group": "statute",
+      "question": "상표등록료를 한꺼번에 내기 부담스러운데 나눠서 낼 수 있나요?",
+      "document": "상표법.html",
+      "gold_paths": [
+        "조72/항1"
+      ],
+      "anchor": "상표등록료를 2회로 분할하여 낼 수 있다"
+    },
+    {
+      "id": "s09-선사용권",
+      "group": "statute",
+      "question": "남이 상표를 먼저 등록했는데 저는 그 전부터 쓰고 있었어요. 계속 써도 되나요?",
+      "document": "상표법.html",
+      "gold_paths": [
+        "조99/항1"
+      ],
+      "anchor": "부정경쟁의 목적이 없이 타인의 상표등록출원 전부터 국내에서 계속하여 사용하고 있을 것"
+    },
+    {
+      "id": "s10-실용신안권-존속기간",
+      "group": "statute",
+      "question": "실용신안권은 몇 년 동안 보호받을 수 있나요?",
+      "document": "실용신안법.html",
+      "gold_paths": [
+        "조22/항1"
+      ],
+      "anchor": "실용신안등록출원일 후 10년이 되는 날까지로 한다"
+    },
+    {
+      "id": "s11-실용신안-도면첨부",
+      "group": "statute",
+      "question": "실용신안 출원할 때도 도면을 꼭 첨부해야 하나요?",
+      "document": "실용신안법.html",
+      "gold_paths": [
+        "조8/항2"
+      ],
+      "anchor": "고안의 설명, 청구범위를 적은 명세서와 도면 및 요약서를 첨부하여야 한다"
+    },
+    {
+      "id": "s12-우선심사-신청서류",
+      "group": "statute",
+      "question": "특허 우선심사를 신청하려면 어떤 서류를 준비해야 하나요?",
+      "document": "특허법 시행규칙.html",
+      "gold_paths": [
+        "조39"
+      ],
+      "anchor": "별지 제22호서식의 우선심사신청서에 다음 각 호의 서류를 첨부하여 지식재산처장에게 제출해야 한다"
+    },
+    {
+      "id": "s13-특허여부결정-보류",
+      "group": "statute",
+      "question": "특허 여부 결정을 조금 미뤄달라고 신청할 수 있나요? 언제까지 내야 하나요?",
+      "document": "특허법 시행규칙.html",
+      "gold_paths": [
+        "조40의2/항1"
+      ],
+      "anchor": "특허출원일부터 6개월 이내에 별지 제22호의2서식의 결정 보류신청서를"
+    },
+    {
+      "id": "s14-상표우선심사-신청서류",
+      "group": "statute",
+      "question": "상표 우선심사를 신청할 때 함께 내야 하는 서류가 뭔가요?",
+      "document": "상표법 시행규칙.html",
+      "gold_paths": [
+        "조49"
+      ],
+      "anchor": "「특허법 시행규칙」 별지 제22호서식의 우선심사신청서에"
     }
   ]
 }

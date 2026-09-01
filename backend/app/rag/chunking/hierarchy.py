@@ -353,6 +353,8 @@ class Run:
     opener: Block | None
     path: tuple[tuple[str, str], ...]  # (level name, number) for THIS run, addressable only
     body: list[Block] = field(default_factory=list)
+    # Did a later run open UNDER this one? See `walk`.
+    covered: bool = False
 
 
 def walk(blocks: list[Block], scheme: Scheme) -> list[Run]:
@@ -365,10 +367,35 @@ def walk(blocks: list[Block], scheme: Scheme) -> list[Run]:
 
     A run with `opener is None` is text no level covers - front matter, a preamble
     - and is size-bounded with no prefix, exactly as the table strategy does.
+
+    AN OPENER WITH NO BODY THAT SOMETHING ELSE OPENS UNDER IS NOT A RUN. Its chunk
+    would be the ancestor line and nothing else - "제3장 총칙 > 제3조(미성년자 등의
+    행위능력)" - and `ancestor_line` writes that same line at the head of every one
+    of its children, so the chunk is a verbatim prefix of the chunk below it. It
+    cannot be the best answer to anything (the child holding the same words holds
+    the provision as well) and it competes for one of the eight delivered slots.
+    MEASURED on this corpus: 738 chunks, 196 of 특허법's 1,019, and 5 of them held a
+    slot across the 72-question fixture - none of the five carrying an anchor, two
+    of them the SAME 제2장 우선심사 line twice, in slots 7 and 8 of one question.
+    They also took half of every citation the model was handed: 3,026 of the 5,923
+    resolved `ref` edges pointed at one, and after this it is 0 of 5,481.
+
+    "NO BODY" IS NOT "NO CONTENT" and the distinction is the whole care in this
+    rule. 특허법 writes a whole article on its 조 line - "제1조(목적) 이 법은 발명을
+    보호ㆍ장려하고 ..." - and that run has no body either; it is the only place that
+    sentence exists. A 편/장 heading naming a section with no runs beneath it -
+    특허·실용신안 심사기준's table of contents, 574 of them - is likewise the only
+    thing naming that section. So a run is dropped only when BOTH hold, which is
+    `_is_repeated_below`: something opened under it, AND the child's ancestor line
+    carries its opener WHOLE rather than as a trimmed label. 상표심사기준 sets
+    "제6조(재외자의 상표관리인) ① 국내에 주소나 영업소가 없는 자(이하 "재외자"" on one
+    line and its ② on the next; the child's line trims that back to the marker and
+    the title, so ①'s sentence exists nowhere else and the run is kept.
     """
     blocks = join_wrapped_levels(blocks, scheme)
     stack: list[tuple[int, Block]] = []
     runs: list[Run] = [Run(ancestors=(), opener=None, path=())]
+    opened_by: dict[int, Run] = {}
 
     def path_of(entries: list[tuple[int, Block]]) -> tuple[tuple[str, str], ...]:
         return tuple(
@@ -387,18 +414,42 @@ def walk(blocks: list[Block], scheme: Scheme) -> list[Run]:
         # under the previous 조; a 항 closes the 호 under the previous 항.
         stack = [entry for entry in stack if entry[0] < index]
         if index <= scheme.break_index:
-            runs.append(
-                Run(
-                    ancestors=tuple((scheme.levels[i].name, b.text) for i, b in stack),
-                    opener=block,
-                    path=path_of([*stack, (index, block)]),
-                )
+            for _, enclosing in stack:
+                covered = opened_by.get(id(enclosing))
+                if covered is not None:
+                    covered.covered = True
+            run = Run(
+                ancestors=tuple((scheme.levels[i].name, b.text) for i, b in stack),
+                opener=block,
+                path=path_of([*stack, (index, block)]),
             )
+            runs.append(run)
+            opened_by[id(block)] = run
         else:
             runs[-1].body.append(block)
         stack.append((index, block))
 
-    return [run for run in runs if run.opener is not None or run.body]
+    return [
+        run
+        for run in runs
+        if run.body or (run.opener is not None and not _is_repeated_below(run, scheme))
+    ]
+
+
+def _is_repeated_below(run: Run, scheme: Scheme) -> bool:
+    """Would this run's chunk be a verbatim prefix of the chunk under it?
+
+    `ancestor_line` writes each ancestor through `_label`, so a child repeats its
+    parent's opener WHOLE only when the label is the whole line. That is the exact
+    condition under which dropping the parent's own chunk loses no text.
+    """
+    if run.opener is None or not run.covered:
+        return False
+    opened = scheme.opens(run.opener.text)
+    if opened is None:
+        return False
+    text = " ".join(run.opener.text.split())
+    return _label(text, scheme, opened[0]) == text
 
 
 def _number(block: Block, scheme: Scheme, index: int) -> str:

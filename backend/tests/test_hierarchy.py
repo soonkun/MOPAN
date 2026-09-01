@@ -145,6 +145,63 @@ async def test_the_section_of_a_chunk_is_its_position_not_the_last_numbered_item
     assert all(c.section != "6. 그 밖에 산업통상자원부령으로 정하는 사항" for c in candidates)
 
 
+# --- the heading that is only a heading ----------------------------------------
+
+
+async def test_a_heading_its_own_children_repeat_is_not_a_chunk():
+    """"제3장 상표등록출원서류" opens a level and has no body of its own, and every
+    chunk under it already begins with that exact line. MEASURED: 742 such chunks
+    in this corpus, 196 of 특허법's 1,019, and five of them held one of the eight
+    delivered slots across the fixture - two of them the same line twice."""
+    candidates = await _hierarchical(target_chars=240).chunk([*P89, HANG_2], fake_embed_fn)
+
+    assert not any(c.content == "제3장 상표등록출원서류" for c in candidates)
+    # And it is not LOST: it is the head of every chunk that sits under it.
+    assert all(c.content.startswith("제3장 상표등록출원서류") for c in candidates)
+
+
+async def test_a_heading_that_names_a_section_nothing_opens_under_is_kept():
+    """The other half of the rule, and the reason it is not "drop every opener
+    with no body": 특허·실용신안 심사기준's contents page is 574 chapter titles with
+    nothing beneath them, and each is the only thing naming its chapter."""
+    blocks = [
+        Block(text="제9장 보칙", block_type="heading", page=1),
+        Block(text="제10장 벌칙", block_type="heading", page=1),
+        Block(text="제200조(벌칙) 이를 위반한 자는 처벌한다.", block_type="paragraph", page=1),
+    ]
+
+    candidates = await _hierarchical().chunk(blocks, fake_embed_fn)
+
+    assert any(c.content == "제9장 보칙" for c in candidates)
+    assert not any(c.content == "제10장 벌칙" for c in candidates)
+
+
+async def test_an_opener_carrying_its_own_clause_is_kept_even_with_children():
+    """상표심사기준 sets 제6조 and its ① on ONE line and the ② on the next. The
+    child's ancestor line trims a line that long back to the marker and the
+    title, so ①'s sentence exists nowhere else - dropping this run would delete
+    it from the corpus. The test is not "has no body", it is "is repeated below"."""
+    blocks = [
+        Block(
+            text=(
+                "제6조(재외자의 상표관리인) ① 국내에 주소나 영업소가 없는 자는 그 재외자의 "
+                "상표관리인에 의해서만 상표에 관한 절차를 밟을 수 있다."
+            ),
+            block_type="paragraph",
+            page=1,
+        ),
+        Block(
+            text="② 상표관리인은 위임된 권한의 범위에서 본인을 대리한다.",
+            block_type="paragraph",
+            page=1,
+        ),
+    ]
+
+    candidates = await _hierarchical().chunk(blocks, fake_embed_fn)
+
+    assert any("상표관리인에 의해서만" in c.content for c in candidates)
+
+
 # --- citations ----------------------------------------------------------------
 
 
@@ -424,6 +481,11 @@ STATUTE = "\n".join(
         "제45조(비밀유지) 심사관은 직무상 알게 된 비밀을 누설하여서는 아니 된다.",
         "제46조(조약에 따른 우선권 주장) ① 조약당사국에 출원한 자는 우선권을 주장할 수 있다.",
         "③ 제1항에 따라 우선권을 주장한 자는 최초의 출원서 등본을 제출하여야 한다.",
+        # 제48조's own line is a BARE HEADING, so it is no longer a chunk of its
+        # own and "제48조" is a path nothing opens. 제49조 cites it anyway.
+        "제48조(수수료의 반환)",
+        "① 잘못 낸 수수료는 청구에 따라 반환하여야 한다.",
+        "제49조(반환절차) 수수료의 반환은 제48조에 따른다.",
     ]
 )
 
@@ -623,6 +685,21 @@ async def test_a_retrieved_chunk_arrives_with_the_text_of_what_it_cites(db, stat
     assert item.section == citing.section
     assert [n["chunk_id"] for n in item.neighbors] == [str(cited.id)]
     assert item.neighbors[0]["reason"] == "ref:제36조제1항"
+
+
+async def test_a_citation_to_an_article_lands_on_the_clause_that_opens_it(db, statute):
+    """제48조 writes nothing on its own line, so there is no chunk at 조48 to point
+    at any more - and "제48조" still has to resolve, or half the corpus's citations
+    go dark. MEASURED before the prefix index existed: 3,026 of 5,923 `ref` edges
+    pointed at a heading-only chunk, which delivered an article TITLE to the model
+    and spent one of the two reference slots doing it."""
+    citing = _find(statute, "제49조(반환절차)")
+    item = _retrieved(citing)
+
+    await attach(db, [item], token_budget=WIDE_BUDGET, query="수수료 반환")
+
+    assert "잘못 낸 수수료는 청구에 따라 반환하여야 한다" in item.content
+    assert item.neighbors[0]["reason"] == "ref:제48조"
 
 
 async def test_a_budget_too_small_attaches_nothing(db, statute):
