@@ -128,7 +128,12 @@ async def main() -> None:
                     {"needle": needle},
                 )
             ).all()
-            print(f"\nNEEDLE {needle!r}: {len(targets)} chunks")
+            # `needle` is handed to LIKE verbatim, so a fragment without its own
+            # %wildcards% matches nothing - and a needle that matched nothing used
+            # to crash on scored[0] three lines into the diagnosis it was run to
+            # produce. The count is printed either way and the walk below is
+            # skipped when there is nothing to walk from.
+            print(f"\nNEEDLE {needle!r}: {len(targets)} chunks (LIKE - wrap it in %)")
             vector = "[" + ",".join(f"{v:.7g}" for v in embedding) + "]"
             scored = []
             for row in targets:
@@ -153,8 +158,8 @@ async def main() -> None:
             # needle chunk are counted BY DOCUMENT: if the re-cut document is not
             # most of them, it did not displace anything and the cause is
             # elsewhere. This is the one query that can tell those two apart.
-            best_target = scored[0][2]
-            ahead = (
+            best_target = scored[0][2] if scored else None
+            ahead = () if best_target is None else (
                 await db.execute(
                     text(
                         "select d.filename, count(*) as n from chunks c "
@@ -167,7 +172,11 @@ async def main() -> None:
                     {"v": vector, "t": best_target.id},
                 )
             ).all()
-            print(f"\nDENSE-AHEAD of the best needle chunk (rank {scored[0][0]}), by document:")
+            if best_target is not None:
+                print(
+                    f"\nDENSE-AHEAD of the best needle chunk "
+                    f"(rank {scored[0][0]}), by document:"
+                )
             for row in ahead:
                 print(f"  {row.n:>6}  {row.filename}")
 

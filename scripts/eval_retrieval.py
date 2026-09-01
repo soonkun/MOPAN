@@ -43,8 +43,14 @@ because the average hides exactly the failure class each was written for.
   tokenizer  - probes the josa/tokenizer mismatch in both directions
   proviso    - the answer turns on a 단서/다만 clause; the main rule alone is
                a confidently WRONG answer. The anchor is the PROVISO sentence.
-  crossref   - needs a 준용/참조 chain WITHIN the corpus. This is the group that
-               decides whether entity-graph retrieval is the next slice.
+  crossref   - 25 questions written FROM the corpus's real 준용/참조 occurrences,
+               including five whose answer exists ONLY inside a 특허법 provision
+               that governs 실용신안 through 실용신안법 §3/§15/§20 and never says
+               실용신안. It was 5 questions and read 0.800 for two days; the
+               enlarged group reads 0.880, so the old number was one question of
+               noise. Every remaining miss was traced and none of them is a 준용
+               hop, which is the measured answer to "is an entity graph the next
+               slice": not on this evidence.
 
 The eval_kiwi table (--setup-kiwi / --drop-kiwi) is a THROWAWAY holding morpheme
 tsvectors, so the "morpheme tokens + ts_rank" cell can be measured with the real
@@ -1160,8 +1166,13 @@ async def measure_row(
         bucket["wk<"].append(1 if best < settings.weak_evidence_rrf_score else 0)
         bucket["wk!"].append(0 if any_corr else 1)
         bucket["bestRRF"].append(best)
-        if show == entry["id"]:
-            print(f"  [{label}] {entry['id']}")
+        # `--show` takes a question id OR a group name, so "why does this group
+        # fail" is one run rather than one run per question. The ANCHOR verdict is
+        # printed next to the slots because that is the metric that decides here
+        # and a slot list alone cannot say whether the sentence arrived.
+        if show and show in (entry["id"], entry.get("group", "base")):
+            anchored = anchor_hit([c.content for c in chunks], entry["anchor"])
+            print(f"  [{label}] {entry['id']} anchor={'HIT' if anchored else 'MISS'}")
             for i, cid in enumerate(selected, 1):
                 mark = "HIT " if pages.get(cid) in gold else "    "
                 print(f"    {mark}{i}. page={pages.get(cid)} idx={meta[cid].chunk_index}")

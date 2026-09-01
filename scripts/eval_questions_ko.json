@@ -1,6 +1,6 @@
 {
   "_readme": [
-    "Korean retrieval evaluation set for the 특허·실용신안 심사기준 corpus.",
+    "Korean retrieval evaluation set. The 47 base/neighbor/tokenizer/proviso questions are about 특허·실용신안 심사기준; the crossref group also draws on 상표심사기준 and 지식재산권 권리회복 심사 가이드라인, so `document_filename` is a LIST and a question names its own document in `document` (absent = the first name). Scoring is per document: a gold page is the pair (document, page), never a bare page number.",
     "Each entry was written by reading the passage first, then writing the question it answers.",
     "gold_pages are PDF page numbers (chunks.page), NOT chunk ids: chunk ids change on",
     "every re-ingestion, page numbers do not. `anchor` is a verbatim substring of the gold",
@@ -8,10 +8,14 @@
     "`group` splits the set. Absent or \"base\" is the original 21 questions. \"neighbor\" is the 8 written FROM measured proviso splits: the rule is in one chunk and the 다만/그러나 that qualifies it is in the NEXT one, so retrieving only the rule chunk yields a confidently wrong answer. Their `anchor` is the proviso sentence, which is what makes them able to detect NEIGHBOR_EXPANSION at all - the base questions cannot, because none of them was chosen for spanning a chunk boundary.",
     "\"tokenizer\" is 8 questions that probe the known content_tsv bug: content_tsv is to_tsvector('simple', content), which does not segment Korean, so a josa stays glued to the noun and the document token 상표등록출원이나 never matches the query token 상표등록출원. Each was verified with plainto_tsquery('simple', ...) against the live corpus: the form in `query_form` matches ZERO chunks as a lexeme while the form in `doc_form` is what the corpus actually stores. `probe` says which way the mismatch runs - \"bare->inflected\" (question bare, document josa-glued) or \"inflected->bare\" (question josa-glued, document bare). query_form/doc_form are documentation, not scored. These questions can only be won by the dense side or by a tokenizer that segments Korean; a pure sparse run should fail them.",
     "\"proviso\" is 10 questions where retrieving the main rule WITHOUT its 단서/다만 clause produces a confidently WRONG answer. Each is phrased so the main rule alone answers backwards - the exception case is asked about directly, or the yes/no flips on the proviso - and the `anchor` is the PROVISO sentence, never the main rule, which is what lets the metric see the failure. Includes double-negative (p04, p07) and condition-stacking (p05, p06, p09) phrasings. `why` records what the wrong answer would be on the main rule alone; documentation, not scored.",
-    "\"crossref\" is 5 questions whose answer needs a 준용/참조 hop BETWEEN sections of this manual. gold_pages lists both hops, pointer page first, and the `anchor` sits on the SECOND hop, so a retriever that only wins the page the query lexically matches scores zero. References OUT to 특허법/시행령/시행규칙 were excluded on purpose: those statutes are not in the corpus, so they are not graph-traversable. 5 is close to the honest ceiling - internal manual-to-manual pointers are rare next to the ~hundreds of statute citations.",
+    "\"crossref\" is 25 questions whose answer needs a 준용/참조 hop. It was 5 and read anchor 0.800 for two days across every stage built - sparse bigrams, reranking, query expansion, neighbour expansion, classification-table chunking, hierarchical chunking, citation edges - and 0.800 at n=5 is ONE question, which is why it was enlarged before anything else was built. x01-x05 are the original manual-to-manual pointers: gold_pages lists both hops, pointer page first, and the `anchor` sits on the SECOND hop. x06-x25 were written from the corpus's REAL 준용 occurrences (254 clauses naming a 제N조 target; 128 of those targets exist elsewhere in the same document, 99 name a statute nobody uploaded). x06-x10 are the strongest shape available here and the one the owner's argument is about: the 권리회복 guideline prints 특허법 §16/§67의3/§81의3 in full and then says 실용신안법 §3/§15/§20 준용 them, so a question asked in 실용신안 vocabulary is answered by a sentence that says 특허 throughout and 실용신안 nowhere. Their gold_pages is the TARGET page only, so neither recall nor anchor can be won without the hop. MEASURED: all five are already answered by the deployed pipeline with no 준용 machinery of any kind - the embedding crosses the substitution on its own. The three anchor misses at n=25 are x01 (a 「제8부제2장 3.」 section-TITLE pointer, and its citing chunk sits at fused rank 10 with TOP_N=8), x11 (plain ranking: the whole 659-672 neighbourhood arrived and p.669 did not) and x23 (a 준용 조문 list split across two chunks with different ancestor lines). None is a 준용 failure.",
     "Run with: python scripts/eval_retrieval.py"
   ],
-  "document_filename": "특허·실용신안 심사기준.pdf",
+  "document_filename": [
+    "특허·실용신안 심사기준.pdf",
+    "상표심사기준.pdf",
+    "지식재산권 권리회복 심사 가이드라인.pdf"
+  ],
   "questions": [
     {
       "id": "q01-공지예외-국내우선권",
@@ -536,6 +540,196 @@
         628
       ],
       "anchor": "출원서류가 이관된 날로부터 4월 이내에 심사에 착수한다"
+    },
+    {
+      "id": "x06-실용신안-등록료회복-납부액",
+      "group": "crossref",
+      "question": "등록료를 추가납부기간에도 내지 못해 실용신안권이 소멸했는데, 권리를 회복하려면 등록료를 얼마나 내야 하나요?",
+      "document": "지식재산권 권리회복 심사 가이드라인.pdf",
+      "gold_pages": [
+        5
+      ],
+      "anchor": "특허료의 2배를 내고, 그 소멸한 권리의 회복을 신청할 수 있다"
+    },
+    {
+      "id": "x07-실용신안-심사청구기간-회복",
+      "group": "crossref",
+      "question": "정당한 사유로 실용신안등록출원의 심사청구기간을 놓쳐 출원이 취하된 것으로 되었는데 다시 심사청구를 할 수 있나요?",
+      "document": "지식재산권 권리회복 심사 가이드라인.pdf",
+      "gold_pages": [
+        5
+      ],
+      "anchor": "2개월 이내에 출원심사의 청구 또는 재심사의 청구를 할 수 있다"
+    },
+    {
+      "id": "x08-실용신안-절차무효-취소",
+      "group": "crossref",
+      "question": "실용신안에 관한 절차가 보정명령 불이행으로 무효처분됐습니다. 정당한 사유가 있으면 그 무효처분을 취소받을 수 있나요?",
+      "document": "지식재산권 권리회복 심사 가이드라인.pdf",
+      "gold_pages": [
+        5
+      ],
+      "anchor": "보정명령을 받은 자의 청구에 따라 그 무효처분을 취소할 수 있다"
+    },
+    {
+      "id": "x09-실용신안-무효처분취소-제척기간",
+      "group": "crossref",
+      "question": "실용신안 절차가 무효로 된 뒤 무효처분 취소를 청구할 수 있는 마지막 기한은 언제인가요?",
+      "document": "지식재산권 권리회복 심사 가이드라인.pdf",
+      "gold_pages": [
+        5
+      ],
+      "anchor": "지정된 기간의 만료일부터 1년이 지났을 때에는 그러하지 아니하다"
+    },
+    {
+      "id": "x10-실용신안-심사결정-준용범위",
+      "group": "crossref",
+      "question": "실용신안등록출원의 심사와 결정에는 특허법의 어떤 규정들이 준용되나요?",
+      "document": "지식재산권 권리회복 심사 가이드라인.pdf",
+      "gold_pages": [
+        6
+      ],
+      "anchor": "실용신안등록출원의 심사ㆍ결정에 관하여는"
+    },
+    {
+      "id": "x11-연장등록-거절이유통지-의견서기간",
+      "group": "crossref",
+      "question": "등록지연에 따른 특허권 존속기간 연장등록출원을 거절하려고 할 때 의견서 제출기간은 얼마로 지정하나요?",
+      "gold_pages": [
+        669
+      ],
+      "anchor": "의견서 제출기간을 4개월의 범위 이내로 지정하여 통지"
+    },
+    {
+      "id": "x12-연장등록-여부결정-형식",
+      "group": "crossref",
+      "question": "등록지연에 따른 특허권 존속기간의 연장 여부에 대한 결정은 어떤 형식으로 해야 하나요?",
+      "gold_pages": [
+        671
+      ],
+      "anchor": "같은 법 제67조에 따라 서면으로 하여야 한다"
+    },
+    {
+      "id": "x13-연장등록출원-보정시기-제한",
+      "group": "crossref",
+      "question": "특허권 존속기간 연장등록출원에서 거절이유통지를 받은 뒤에도 출원서를 보정할 수 있나요?",
+      "gold_pages": [
+        623,
+        659
+      ],
+      "anchor": "해당 거절이유통지에 따른 의견서 제출기간에만 보정할 수 있다"
+    },
+    {
+      "id": "x14-심사전치-보정각하-사유",
+      "group": "crossref",
+      "question": "거절결정불복심판을 청구하면서 30일 안에 한 보정을 각하해야 하는 경우는 어떤 경우인가요?",
+      "gold_pages": [
+        772
+      ],
+      "anchor": "특허법 제51조를 준용하는 같은 법 제174조에 따라 거절결정불복심판의 청구일로부터 30일 내에 한 보정을 각하하여야 하는 경우"
+    },
+    {
+      "id": "x15-심사전치-거절이유통지-준용63조",
+      "group": "crossref",
+      "question": "심사전치된 출원에 거절이유를 통지해야 하는 경우, 준용되는 규정은 심사관에게 무엇을 요구하나요?",
+      "gold_pages": [
+        775
+      ],
+      "anchor": "(준용된 제63조) 심사관은 제62조의 규정에 의하여 특허거절결정을 하고자"
+    },
+    {
+      "id": "x16-출원인변경신고-협의불성립",
+      "group": "crossref",
+      "question": "같은 날 출원인변경신고가 둘 이상 있어 협의결과 신고를 요구했는데 기간 안에 신고가 없으면 어떻게 처리하나요?",
+      "gold_pages": [
+        142
+      ],
+      "anchor": "그 기간 이내에 신고가 없는 때에는 협의는"
+    },
+    {
+      "id": "x17-서열목록-보정-준용",
+      "group": "crossref",
+      "question": "서열을 포함한 특허출원을 보정할 때 서열목록전자파일은 어떤 방법으로 작성해서 내야 하나요?",
+      "gold_pages": [
+        235
+      ],
+      "anchor": "서열을 포함하는 특허출원의 보정에 관하여는 제1항을 준용한다"
+    },
+    {
+      "id": "x18-재심절차-심판청구료-반환",
+      "group": "crossref",
+      "question": "재심 절차에서 특허거절결정이 취소된 경우에도 이미 낸 심판청구료를 돌려받을 수 있나요?",
+      "gold_pages": [
+        122
+      ],
+      "anchor": "재심의 절차에서 준용되는 경우를 포함하되, 보정이 있는 경우는 제외"
+    },
+    {
+      "id": "x19-선원지위-협의불성립거절",
+      "group": "crossref",
+      "question": "협의가 성립하지 않아 거절결정이 확정된 출원도 나중에 다른 출원에 대해 선출원의 지위를 갖나요?",
+      "gold_pages": [
+        347
+      ],
+      "anchor": "제3항의 규정에 의하여 준용되는 경우를 포함한다)의 규정에 해당하여 그 이유로 거절결정이나 거절한다는 취지의 심결이 확정된 경우에는 선원의 지위를 갖는다"
+    },
+    {
+      "id": "x20-심판관-거절이유통지-지연기간",
+      "group": "crossref",
+      "question": "심판관이 특허법 제63조를 준용해 거절이유를 통지하고 의견서 제출 기회를 준 경우에도 지연기간 계산은 같은가요?",
+      "gold_pages": [
+        654
+      ],
+      "anchor": "심판관이 거절이유를 통지하고 의견서 제출 기회를 준 경우에도 위의 사항이 동일하게 적용된다"
+    },
+    {
+      "id": "x21-확대선원-실용신안-출원공개",
+      "group": "crossref",
+      "question": "확대된 선출원을 적용할 때 먼저 출원된 실용신안등록출원은 어떤 요건을 갖춰야 인용될 수 있나요?",
+      "gold_pages": [
+        331
+      ],
+      "anchor": "「실용신안법」제15조에 따라 준용되는 이 법 제64조에"
+    },
+    {
+      "id": "x22-이의신청-심사관합의체-용어치환",
+      "group": "crossref",
+      "question": "이의신청 심사관합의체에 심판 규정을 준용할 때 ‘특허심판원장’은 누구로 바꿔 읽어야 하나요?",
+      "document": "상표심사기준.pdf",
+      "gold_pages": [
+        387
+      ],
+      "anchor": "이 경우 제130조제2항 중 “특허심판원장”은 “지식재산처장”으로"
+    },
+    {
+      "id": "x23-지정상품추가등록출원-준용조문",
+      "group": "crossref",
+      "question": "지정상품추가등록출원의 심사에는 상표법의 어떤 조문들이 준용되나요?",
+      "document": "상표심사기준.pdf",
+      "gold_pages": [
+        396
+      ],
+      "anchor": "지정상품추가등록출원에 관하여는 제37조, 제38조제1항, 제39조부터 제"
+    },
+    {
+      "id": "x24-분할출원-절차준용",
+      "group": "crossref",
+      "question": "상표등록출원을 분할할 때 분할출원서를 내는 절차는 어느 규정을 따르나요?",
+      "document": "상표심사기준.pdf",
+      "gold_pages": [
+        148
+      ],
+      "anchor": "법 제45조에 따른 출원의 분할에 관하여는 제28조제3항부터 제7항까지의규정을 준용한다"
+    },
+    {
+      "id": "x25-상품분류전환-직권재심사-거절이유통지",
+      "group": "crossref",
+      "question": "상품분류전환등록결정을 직권으로 취소하고 다시 심사한 뒤 이미 통지했던 거절이유로 거절하려면 거절이유를 다시 통지해야 하나요?",
+      "document": "상표심사기준.pdf",
+      "gold_pages": [
+        43
+      ],
+      "anchor": "제212조에 따라 준용되는 제68조의2제1항에 따른 직권 재심사를 하여 취소된 상품분류전환등록결정"
     }
   ]
 }
