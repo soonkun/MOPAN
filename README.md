@@ -1,167 +1,401 @@
-# MOPAN
+# MOPAN (모판)
 
-**Modular Orchestration Platform for Agent Nexus** — and, read in Korean, 모판: the seedling tray a rice farmer raises one crop in and transplants into any number of different fields. The two readings say the same thing from opposite ends. One base, many fields.
+**M**odular **O**rchestration **P**latform for **A**gent **N**exus — 그리고 국문으로 **모판**,
+못자리에서 모를 길러 내는 그 판입니다. 두 읽기가 반대편에서 같은 말을 합니다.
 
-MOPAN is the **base system** of a general-purpose RAG · MCP · LLM · Agent platform — not a chatbot for one domain. Users register and combine their own RAG collections, MCP servers, LLMs and agents, and a Super Agent decides per question which of them to use.
+> 한 판에서 길러 어느 논에나 옮겨 심습니다.
+>
+> RAG · MCP · LLM · 워크플로우를 직접 등록하고 조합하는 베이스 시스템입니다.
 
-**Slice 1, this repository's current state, delivers one complete vertical path:** login → document ingestion → semantic chunking → embedding → hybrid retrieval → RRF fusion → a cited answer. Everything is behind an interface (`VectorStore`, `Parser`, `ChunkingStrategy`, `Reranker`, `LLMProvider`) so the later slices add implementations rather than rewrite this one.
+특정 도메인용 챗봇이 아닙니다. 사용자가 자기 문서 분류(RAG 컬렉션), MCP 서버, 모델,
+워크플로우를 **직접 등록하고 조합하는 바탕 시스템**입니다. 지금 저장소에 들어 있는 한국어
+특허·상표 심사 문서는 소유자가 쓰는 **예시 데이터**일 뿐, 제품의 범위가 아닙니다.
 
-## Architecture
+<img src="docs/screenshots/workflows-list.png" width="860" alt="워크플로우 화면 — 저장된 워크플로우, 그래프, 간선 목록">
 
-A browser talks to **one origin**, the Next.js server on port 3000. Next serves the React app and proxies `/api/*` to **FastAPI** on port 8000 through `rewrites()`, so the API is same-origin: no CORS in normal operation, and a session cookie that needs no cross-site handling. FastAPI owns **Postgres 16 + pgvector** (users, collections, documents, chunks, conversations, and both retrieval indexes) and **Redis 7** (sessions, and the arq job queue). An **arq worker** runs off that same Redis and owns the ingestion pipeline — parse → chunk → embed → index — so an upload returns `202` immediately and the browser polls for status. Retrieval runs dense (pgvector HNSW, cosine) and sparse (Postgres full-text, GIN) in parallel and fuses them with Reciprocal Rank Fusion before the answer is composed.
+---
 
-## Quick start (Docker)
+## 지금 되는 것
+
+### 물어보면 근거를 달아 답합니다
+
+업로드한 문서를 파싱 → 청킹 → 임베딩 → 색인한 뒤, 질문이 오면 **덴스 검색(pgvector HNSW,
+코사인)과 스파스 검색(Postgres 전문 검색, GIN)을 동시에 돌리고 RRF로 융합**합니다. 답변에
+붙는 `[1]` 같은 인용은 실제 청크로 이어지고, 눌러서 원문을 확인할 수 있습니다. 인용 표시는
+프롬프트에 **실제로 실려 나간 근거 목록**에만 맞춰 풀립니다 — 모델이 지어낸 `[9]`는 아무
+데도 이어지지 않습니다.
+
+한국어를 위해 스파스 쪽은 **문자 bigram 토크나이저**를 씁니다(`SPARSE_TOKENIZER=bigram`,
+기본값). 띄어쓰기 토크나이저는 교착어인 한국어에서 제 몫을 못 합니다. 색인할 때와 질의할
+때의 토크나이저는 **반드시 같아야 합니다** — 다르면 스파스 갈래가 조용히 아무것도 돌려주지
+않고, 이 어긋남을 잡아내는 런타임 검사는 없습니다. 값을 바꿨다면
+`scripts/backfill_tsv.py`를 돌리십시오.
+
+규칙과 단서가 인접한 청크로 갈라지는 문제(`~~~가 가능하다` 다음 청크가 `다만, ~~~는
+예외`)를 위해 **이웃 청크 확장**이 기본으로 켜져 있습니다(`NEIGHBOR_EXPANSION=targeted`).
+전부 붙이지 않고 이어짐 표지가 보이는 것만 붙입니다.
+
+근거가 약할 때는 없는 답을 지어내는 대신 **되묻습니다**(`CLARIFY_ON_WEAK_EVIDENCE`, 기본
+켜짐). 판단은 질문 길이가 아니라 검색 결과에서 합니다 — 융합 점수가 임계값 아래이거나 두
+검색 갈래가 어느 것도 서로 뒷받침하지 못하면, 검색된 자료에 근거한 되물을 거리를 2~4개
+만들어 보냅니다.
+
+검색이 약하게 돌아왔을 때만 **질의를 다시 써서 한 번 더 찾습니다**(`QUERY_EXPANSION_COUNT`).
+단계가 아니라 **재시도**입니다 — 첫 패스는 절대 확장하지 않으므로, 꺼 두면 비용이 0이고
+켜도 되묻기 신호가 켜진 질문에서만 값을 씁니다.
+
+**기본값으로 꺼져 있는 것을 분명히 적어 둡니다.** 질의 확장(`QUERY_EXPANSION_COUNT=0`)과
+재순위(`RERANK_MODEL=""`)는 구현이 다 있지만 기본값이 꺼짐입니다. 재순위는 값이 비어 있으면
+단계 자체가 실행 경로에 없습니다. 둘 다 재 보고 끈 것이고, 그 사실은 고급 설정 화면에도
+같은 말로 적혀 있습니다.
+
+### 입력창에서 `@` 로 부릅니다
+
+<img src="docs/screenshots/composer-mention-menu.png" width="720" alt="@를 눌러 연 목록">
+
+`@`를 치면 **문서 분류 · MCP 도구 · 저장된 워크플로우가 한 목록으로** 뜹니다
+(`GET /api/tools`). 셋이 같은 `Tool` 인터페이스라서 한 줄에 섞여 있는 것이고, 전송 방식이
+HTTP냐 프로세스 안 호출이냐로 목록을 나누면 사용자가 MCP가 무엇인지 알아야 고를 수 있게
+됩니다. 고르면 `@…` 글자는 사라지고 칩이 됩니다. 한글 조합 중에는 목록이 열리지 않습니다 —
+열리면 다음 키를 목록이 가로채서 글자가 먹힙니다.
+
+### 워크플로우를 그림으로 짭니다
+
+<img src="docs/screenshots/workflow-graph.png" width="900" alt="질문 → 문서 검색 → 분기 → 답변 그래프">
+
+`/workflows`에 그래프 편집기가 있습니다. 노드는 `질문` · `도구` · `분기` · `답변` 네
+가지이고, **간선이 실행 순서입니다.** `도구` 노드는 문서 검색·MCP 도구·다른 워크플로우를
+모두 부를 수 있습니다. 노드 좌표까지 저장되므로 다시 열면 그림이 그대로입니다. 순환하는
+그래프는 저장 시점에 거부되고, 거부 사유는 화면 위 배너가 아니라 **틀린 노드와 간선에**
+붙습니다.
+
+저장할 때마다 **한 버전이 남습니다.** 되돌리기는 옛 버전을 다시 활성으로 만들 뿐 기록을
+지우지 않습니다. 그래서 답변에 `농약 안전 점검 v1`처럼 버전까지 남습니다 — 2주 전 답변은
+그때의 그래프가 만든 것이지 오늘의 그래프가 만든 것이 아닙니다.
+
+그래프 라이브러리는 쓰지 않았습니다. 절대 배치한 카드와 `<svg>` 선입니다.
+
+### 슈퍼 에이전트
+
+절차를 **사람이** 미리 짜 두면 워크플로우, **모델이** 질문을 받고 즉석에서 그리면 슈퍼
+에이전트입니다. 둘 다 결과물은 워크플로우 그래프이고 **실행기는 하나**라서, 추적 화면에
+남는 모양도 같습니다 — 다른 것은 `사람이 만든 절차`라고 적힌 한 줄뿐입니다.
+
+<img src="docs/screenshots/chat-workflow-trace.png" width="820" alt="워크플로우로 답한 뒤의 추적 화면">
+
+슈퍼 에이전트는 입력창 `+` 메뉴의 **토글 하나**이고 기본값은 꺼짐입니다. 브라우저에
+기억되어 이후 질문마다 적용됩니다. 이 스위치는 `/workflows` 화면에 **없습니다.**
+
+문서에서도 코드에서도 **"에이전트"라는 말은 쓰지 않습니다.** 예전 `/agents` 화면과
+`agents.orchestrator` 컬럼은 없어졌습니다(마이그레이션 `0010`). 저장된 절차가 자율 계획을
+켜고 있던 것이 층위를 섞은 원인이었습니다. 예전 주소는 `/workflows`로 넘겨줍니다(307).
+
+정직하게 적어 둘 것: 지금 있는 21문항 평가 세트에서는 **슈퍼 에이전트 경로가 직접 RAG보다
+못 나옵니다**(anchor@8 0.714 대 0.857). 단일 문서 코퍼스에 단발성 질문만 있는 픽스처는
+계획이 도울 수 있는 경우가 아니어서, 그래서 기본값이 꺼짐입니다. 숫자는
+`backend/app/core/config.py`에 그대로 있습니다.
+
+### 문서와 관리 화면
+
+<img src="docs/screenshots/documents-delete-desktop.png" width="820" alt="문서 화면 — 업로드, 필터, 청크 수와 상태">
+
+PDF · 워드 · 텍스트 · 마크다운 · 웹문서를 올릴 수 있습니다. 업로드는 즉시 `202`로 돌아오고,
+워커가 파싱 → 청킹 → 임베딩 → 색인을 진행하는 동안 목록에서 상태와 청크 수가 보입니다.
+실패하면 그 사유도 이 표에 그대로 남습니다. 삭제는 관리자만 할 수 있고, 확인 창이 파일
+이름과 청크 수를 말합니다.
+
+사이드바는 모두에게 **새 대화 · 문서**를, 관리자에게 추가로 **분류 관리 · 사용자 관리 ·
+프롬프트 관리 · MCP 서버 관리 · 워크플로우 · 고급 설정**을 보여줍니다. 프롬프트는 저장할
+때마다 버전이 남고 옛 버전을 다시 활성으로 만들 수 있습니다.
+
+<img src="docs/screenshots/admin-wide-settings-after.png" width="820" alt="고급 설정 화면">
+
+화면 하나하나의 근거와 그림은 **[docs/화면.md](docs/화면.md)** 에 있습니다.
+
+---
+
+## 빠르게 띄우기 (Docker)
 
 ```
-git clone <repo> && cd MOPAN
-cp .env.example .env      # then set OPENAI_API_KEY
+git clone https://github.com/soonkun/MOPAN && cd MOPAN
+cp .env.example .env      # 그다음 OPENAI_API_KEY 를 채웁니다
 docker compose up -d
 ```
 
-Open <http://localhost:3000> and register. **The first account to register becomes the admin.**
+<http://localhost:3000> 을 열고 가입합니다. **개발 환경에서는 첫 계정이 관리자가 됩니다.**
+`ENVIRONMENT=production`에서는 그렇지 않습니다 — 인증 없는 엔드포인트가 먼저 POST 한 사람에게
+공용 코퍼스의 관리자를 넘겨주는 셈이라, 운영에서는 아래 `scripts/create_admin.py`로 만들어야
+합니다.
 
-Database migrations run automatically: the `migrate` service runs `alembic upgrade head` to completion before `backend` and `worker` are allowed to start. You never run migrations by hand for a Docker deployment.
+마이그레이션은 손으로 돌리지 않습니다. `migrate` 서비스가 `alembic upgrade head`를 끝까지
+마친 뒤에야 `backend`와 `worker`가 뜹니다.
 
-Only port 3000 is published for the app. The backend is reachable on 8000 for debugging, and Postgres and Redis are bound to `127.0.0.1` only.
+공개 포트는 전부 `127.0.0.1`에만 묶여 있습니다 — 앱 3000, 백엔드 8000(디버깅용), Postgres
+5432, Redis 6379.
 
-## Prerequisites
+### 필요한 것
 
-- **Docker**: Docker Desktop (or any Docker Engine with Compose v2).
-- **Local development**: Python 3.13, Node 20, Postgres 16 with the `vector` extension available, Redis 7.
+- **Docker**: Docker Desktop 또는 Compose v2가 되는 Docker Engine.
+- **직접 돌릴 때**: Python 3.13, Node 20, `vector` 확장이 있는 Postgres 16, Redis 7.
 
-## Local development without Docker
+---
+
+## 구조
+
+브라우저는 **한 오리진**, 3000번의 Next.js 서버하고만 이야기합니다. Next가 React 앱을
+서빙하면서 `/api/*`를 `rewrites()`로 8000번 **FastAPI**에 넘깁니다. 그래서 API가 동일
+오리진이고, 평상시 CORS가 아예 적용되지 않으며, 세션 쿠키에 교차 사이트 처리가 필요 없습니다.
+
+FastAPI가 **Postgres 16 + pgvector**(사용자·분류·문서·청크·대화, 그리고 검색 색인 둘)와
+**Redis 7**(세션, arq 작업 큐)을 소유합니다. 세션은 JWT가 아니라 Redis에 있어서 로그아웃이
+서버에서 실제로 취소됩니다. 같은 Redis 위에서 도는 **arq 워커**가 수집 파이프라인을 맡기
+때문에, 업로드는 즉시 `202`로 돌아오고 브라우저가 상태를 폴링합니다.
 
 ```
-docker compose up -d postgres redis      # or run them natively
+backend/          FastAPI
+  app/rag/          파서(pdf·docx·html·txt·md), 청킹 전략, 수집 파이프라인
+  app/retrieval/    덴스·스파스 검색, RRF, 이웃 확장, 질의 확장, 근거 판정
+  app/workflow/     그래프, 실행기, 도구 인터페이스, 플래너
+  app/chat/         SSE 채팅 엔드포인트와 답변 프롬프트
+  app/mcp/          MCP 서버 등록·탐색·호출
+  app/documents/ app/users/ app/prompts/ app/observability/ app/auth/
+  alembic/          마이그레이션 (현재 head: 0014)
+frontend/         Next.js 15 App Router, /api/* 동일 오리진 프록시
+worker/           arq 워커 이미지
+scripts/          관리자 생성, 스모크 테스트, 검색 평가·프로브
+docs/             설계 문서와 화면 기록
+```
+
+포맷 하나를 더 붙이는 일은 `app/rag/parsers/__init__.py`의 딕셔너리 한 줄과
+`app/documents/validation.py`의 허용 목록 항목이 전부입니다.
+
+### 기본 설치에서는 잠들어 있는 것
+
+**문서 구조 인식**(`self_contained` / `reference_dependent` 판정), **조상 맥락을 앞에 붙이는
+계층 청킹**, 그리고 **조문 인용을 청크로 잇는 `chunk_edges`** 는 코드에 다 있고 검색 경로에
+연결되어 있지만, **분류(컬렉션)가 계층 청킹을 켠 경우에만** 동작합니다. 분류의 기본 청킹
+설정은 비어 있으므로, 갓 설치한 상태에서는 구조 판정이 아예 돌지 않고 인용 간선도 비어
+있습니다. 설계와 판정 기준은
+[docs/superpowers/specs/2026-09-01-document-structure.md](docs/superpowers/specs/2026-09-01-document-structure.md)에
+있습니다.
+
+**근거 활용률**(전달한 근거 중 실제로 인용된 비율)은 계산되어 로그와
+`GET /api/messages/{id}/trace` 응답에 들어가지만, **아직 화면에는 나오지 않습니다.**
+
+---
+
+## 설정
+
+값은 전부 저장소 루트의 `.env`에서 읽습니다. **각 항목이 왜 그 값인지는
+[.env.example](.env.example)에 측정치와 함께 적혀 있습니다** — 아래는 처음 띄울 때 실제로
+건드리게 되는 것만 추린 목록입니다.
+
+| 키 | 기본값 | 비고 |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | — | 수집과 답변에 필요합니다. 없어도 부팅은 됩니다 |
+| `ENVIRONMENT` | `development` | `production`은 키 없이, 또는 기본 DB 비밀번호로 부팅하기를 거부합니다 |
+| `ALLOW_SELF_REGISTRATION` | 미설정 | 미설정이면 운영에서만 금지 |
+| `DATABASE_URL` | `postgresql+asyncpg://mopan:mopan@127.0.0.1:5432/mopan` | `localhost`가 아닌 이유는 아래 |
+| `REDIS_URL` | `redis://127.0.0.1:6379/0` | 세션과 작업 큐 |
+| `SESSION_TTL_SECONDS` | `86400` | Redis 세션 |
+| `ANSWER_MODEL` / `ANSWER_MODELS` | `gpt-4o` / 빈 목록 | 뒤쪽은 사용자가 고를 수 있는 모델 허용 목록. 비우면 기본값 하나만 |
+| `EMBEDDING_MODEL` / `EMBEDDING_DIM` | `text-embedding-3-small` / `1536` | **아래 경고를 보십시오** |
+| `CHUNKING_STRATEGY` | `semantic` | `semantic`(구조 + 임베딩 병합) 또는 `fixed`(문자 창) |
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `150` | 문자 단위. `0 <= overlap < size` |
+| `RETRIEVAL_TOP_N` | `6` | 프롬프트까지 가는 청크 수 |
+| `RETRIEVAL_CANDIDATE_LIMIT` | `20` | 융합 전, 검색 갈래마다 |
+| `RRF_K` | `60` | RRF 상수 |
+| `SPARSE_TOKENIZER` | `bigram` | 바꾸면 `scripts/backfill_tsv.py`를 다시 돌려야 합니다 |
+| `SPARSE_WEIGHT` | `1.0` | `0`은 "덴스만" — 되묻기와 같이 쓰면 안 됩니다 |
+| `NEIGHBOR_EXPANSION` | `targeted` | `off` / `targeted` / `blanket` |
+| `CLARIFY_ON_WEAK_EVIDENCE` | `true` | 근거가 약하면 되묻습니다 |
+| `QUERY_EXPANSION_COUNT` | `0` | 0은 꺼짐. 켜도 **재시도에서만** 돕니다 (최대 5) |
+| `RERANK_MODEL` | `""` (빈 값) | **빈 값이면 재순위 단계 자체가 없습니다** |
+| `MAX_UPLOAD_SIZE_MB` | `50` | Next 프록시 본문 상한도 맞춰 올려 두었습니다 |
+| `UPLOAD_DIR` | `./data/uploads` | |
+| `API_INTERNAL_URL` | `http://localhost:8000` | **빌드 시점에만** 읽힙니다 |
+
+MCP·워크플로우·첨부 관련 한도(`MCP_*`, `WORKFLOW_MAX_*`, `ORCHESTRATOR_*`,
+`MAX_ATTACHMENT_SIZE_MB` 등)는 `.env.example`에 각각의 근거와 함께 있습니다.
+
+`docker-compose.yml`이 `DATABASE_URL`·`REDIS_URL`·`UPLOAD_DIR`을 서비스마다 컨테이너
+호스트명으로 덮어쓰므로, Docker로 돌릴 때 이 셋은 건드리지 않습니다.
+
+> **`EMBEDDING_MODEL`이나 `EMBEDDING_DIM`을 바꾸려면 `chunks.embedding` 컬럼 폭을 바꾸는
+> 새 Alembic 마이그레이션과 전체 문서 재색인이 함께 필요합니다.** 기존 벡터는 변환되지
+> 않습니다. `EMBEDDING_DIM`이 컬럼과 어긋나면 앱이 부팅을 거부합니다 — 조용한 검색 실패를
+> 요란한 부팅 실패로 바꾸려는 것입니다.
+
+**`localhost`가 아니라 `127.0.0.1`인 이유:** Compose는 Postgres와 Redis를 IPv4로만
+공개하는데 Windows에서 `localhost`는 `::1`을 먼저 찾습니다. 그래서 연결마다 실패한 IPv6
+시도를 한 번씩 물게 됩니다 — 실측 31 ms 대 2076 ms. 테스트가 체크아웃마다 새 연결을 여니
+이 폴백 하나로 52초짜리 스위트가 13분이 됐습니다.
+
+`API_INTERNAL_URL`은 **빌드 시점에만** 읽힙니다. `next build`가 `rewrites()`를 한 번
+평가해서 `.next/routes-manifest.json`에 목적지를 문자열로 박아 넣고, `next start`는 이
+변수를 무시합니다. `npm run build` **전에** 설정해야 하고, Compose는 build argument로
+넘깁니다.
+
+### 화면에서 바꿀 수 있는 값
+
+**고급 설정** 화면에서 재배포 없이 바꿀 수 있는 값은 열 개이고, 그렇게 저장된 값이 `.env`의
+값을 이깁니다. 각 항목에는 허용 범위와 `되돌리기`(저장값을 지우고 `.env` 값으로 복귀)가
+붙어 있습니다.
+
+- 검색과 답변 — `RETRIEVAL_TOP_N`, `RETRIEVAL_CANDIDATE_LIMIT`, `QUERY_EXPANSION_COUNT`,
+  `RRF_K`, `SPARSE_WEIGHT`, `ANSWER_CONTEXT_TOKEN_BUDGET`
+- 문서 분할 — `CHUNK_SIZE`, `CHUNK_OVERLAP`, `MAX_CHUNK_TOKENS`,
+  `SEMANTIC_SIMILARITY_THRESHOLD`
+
+같은 화면에 `EMBEDDING_MODEL` · `EMBEDDING_DIM` · `SPARSE_TOKENIZER` · `NEIGHBOR_EXPANSION`
+· `RERANK_MODEL`이 **여기서 바꿀 수 없는 값**으로 이유와 함께 표시됩니다. 이 다섯은 바꾸면
+재색인이나 재배포가 따라와야 하는 것들입니다. 문서 분할 값은 **그 뒤에 올린 문서부터**
+적용됩니다.
+
+---
+
+## 직접 돌리기 (Docker 없이)
+
+```
+docker compose up -d postgres redis      # 또는 직접 띄운 것을 씁니다
 pip install -r backend/requirements-dev.txt
 
 cd backend
 alembic upgrade head
-uvicorn app.main:app --reload            # terminal 1
-arq app.worker.WorkerSettings            # terminal 2 — the same command Docker uses
+uvicorn app.main:app --reload            # 터미널 1
+arq app.worker.WorkerSettings            # 터미널 2 — Docker가 쓰는 것과 같은 명령
 
 cd ../frontend
 npm install
 API_INTERNAL_URL=http://localhost:8000 npm run dev
 ```
 
-`.env` is read from the **repository root**, anchored by path, regardless of which directory you run from. There is no second `.env` under `backend/`.
+`.env`는 어느 디렉터리에서 돌리든 **저장소 루트**에서 읽습니다(경로로 고정되어 있습니다).
+`backend/.env`가 있으면 그것이 루트 값을 덮어쓰지만, 저장소에 그런 파일은 없습니다.
 
-`API_INTERNAL_URL` is read at **build time only** — `next build` bakes `rewrites()` into `.next/routes-manifest.json` and `next start` ignores the variable. Set it before `npm run build`, not before `npm start`. Compose passes it as a build argument.
-
-## Seeding an admin without the UI
+### UI 없이 관리자 만들기
 
 ```
 python scripts/create_admin.py admin@example.com
 ```
 
-The password comes from `MOPAN_ADMIN_PASSWORD` or an interactive prompt. There is deliberately no default: an unattended run with neither set exits non-zero rather than creating a guessable account.
+비밀번호는 `MOPAN_ADMIN_PASSWORD` 환경변수나 대화형 입력에서 받습니다. 기본값은 일부러
+없습니다 — 둘 다 없이 무인 실행하면 짐작 가능한 계정을 만드는 대신 0이 아닌 코드로
+끝납니다.
 
-## Tests
+---
+
+## 테스트
 
 ```
 cd backend
-pytest                # needs Postgres running
+pytest                # Postgres 가 떠 있어야 합니다
 ruff check .
 ```
 
-The suite creates and migrates its own `mopan_test` database and **never touches `mopan`**. It makes no network calls and no OpenAI API calls — every external boundary is stubbed.
+스위트는 `mopan_test` 데이터베이스를 스스로 만들고 마이그레이션하며 **`mopan`은 건드리지
+않습니다.** 네트워크도 OpenAI도 부르지 않습니다 — 바깥 경계는 전부 스텁입니다.
 
-Run **one pytest session at a time**. The database fixture does `downgrade base`, so two concurrent sessions corrupt each other. Do not use `-n auto`.
-
-Frontend:
+**pytest 세션은 한 번에 하나만** 돌립니다. DB 픽스처가 `downgrade base`를 하기 때문에 두
+세션이 동시에 돌면 서로를 망칩니다. `-n auto`를 쓰지 마십시오.
 
 ```
 cd frontend
 npm run typecheck
-npm test              # node --test, no test framework dependency
+npm test              # node --test, 테스트 프레임워크 의존성 없음
 npm run build
 ```
 
-## Smoke test
+### 스모크 테스트
 
-Against a running stack:
+떠 있는 스택을 상대로:
 
 ```
-python scripts/smoke_test.py                          # default http://localhost:3000
+python scripts/smoke_test.py                          # 기본 http://localhost:3000
 python scripts/smoke_test.py https://your.tunnel.url
 ```
 
-It runs against the **frontend** origin by default, which is what a browser talks to, so it also proves the rewrite proxy works. Pure Python + httpx — no bash, no curl, identical on Windows and Linux.
+기본으로 **프론트엔드** 오리진을 때리므로 브라우저가 실제로 지나는 경로, 즉 프록시까지
+함께 증명합니다. 순수 Python + httpx여서 Windows와 Linux에서 똑같이 돕니다.
 
-It registers a fresh account, so it needs no setup. But only the *first* account on a deployment is an admin, and the ingestion half - upload, wait for indexing, then assert the new document comes back from search - needs one. Point it at an existing admin to exercise the whole path:
+새 계정을 스스로 만들기 때문에 준비가 필요 없습니다. 다만 관리자는 첫 계정뿐이고, 수집
+쪽(업로드 → 색인 대기 → 검색으로 다시 나오는지 확인)은 관리자가 필요합니다. 전 구간을
+보려면 기존 관리자를 물려주십시오:
 
-    MOPAN_SMOKE_EMAIL=admin@example.com MOPAN_SMOKE_PASSWORD=... python scripts/smoke_test.py
+```
+MOPAN_SMOKE_EMAIL=admin@example.com MOPAN_SMOKE_PASSWORD=... python scripts/smoke_test.py
+```
 
-## Configuration
+검색 품질을 재는 것은 따로 있습니다 — `scripts/eval_retrieval.py`가
+`scripts/eval_questions_ko.json`의 질문들로 recall·anchor·precision을 뽑습니다.
 
-All settings live in `.env` at the repository root. `docker-compose.yml` overrides `DATABASE_URL` and `REDIS_URL` per service with container hostnames, so you do not edit those two for Docker.
+---
 
-| Key | Default | Notes |
-| --- | --- | --- |
-| `ENVIRONMENT` | `development` | `production` forbids self-registration unless `ALLOW_SELF_REGISTRATION=true` |
-| `DATABASE_URL` | `postgresql+asyncpg://mopan:mopan@127.0.0.1:5432/mopan` | `127.0.0.1`, not `localhost` — see below |
-| `REDIS_URL` | `redis://:mopan@127.0.0.1:6379/0` | Sessions and the job queue |
-| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | `10` / `10` | |
-| `CORS_ORIGINS` | `["http://localhost:3000"]` | Only for direct backend access; the browser uses the same-origin proxy |
-| `SESSION_TTL_SECONDS` | `86400` | Redis-backed sessions, not JWT — logout revokes server-side |
-| `ALLOW_SELF_REGISTRATION` | unset | Unset means: allowed outside production, forbidden in production |
-| `OPENAI_API_KEY` | — | Required for ingestion and answering |
-| `ANSWER_MODEL` | `gpt-4o` | |
-| `EMBEDDING_MODEL` | `text-embedding-3-small` | |
-| `EMBEDDING_DIM` | `1536` | **See the warning below** |
-| `EMBEDDING_BATCH_SIZE` | `128` | 1–2048, the endpoint's array cap |
-| `EMBEDDING_BATCH_CHARS` | `200000` | Character proxy for the per-request token cap; script-dependent |
-| `LLM_TIMEOUT_SECONDS` | `30.0` | Without it a hung completion holds a worker slot for ten minutes |
-| `LLM_MAX_RETRIES` | `3` | |
-| `RRF_K` | `60` | Reciprocal Rank Fusion constant |
-| `RETRIEVAL_TOP_N` | `6` | Chunks that reach the prompt |
-| `RETRIEVAL_CANDIDATE_LIMIT` | `20` | Per retriever, before fusion |
-| `CHUNKING_STRATEGY` | `semantic` | `semantic` (structure + embedding merge) or `fixed` (character windows) |
-| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `150` | Characters; both strategies; `0 <= overlap < size`. Overlap is carried only across a SIZE split, never across a heading |
-| `MAX_CHUNK_TOKENS` | `1300` | 1–4095; the hard ceiling every strategy is held to, where `CHUNK_SIZE` is the target |
-| `SEMANTIC_SIMILARITY_THRESHOLD` | `0.75` | Cosine, −1.0 to 1.0. Higher merges less. `1.0` is not "never" — float noise puts identical vectors at or above it |
-| `ANSWER_CONTEXT_TOKEN_BUDGET` | `8000` | Evidence tokens allowed into the prompt (`RETRIEVAL_TOP_N` x `MAX_CHUNK_TOKENS` = 7800) |
-| `UPLOAD_DIR` | `./data/uploads` | |
-| `MAX_UPLOAD_SIZE_MB` | `50` | Enforced server-side; the Next proxy body cap is raised to match |
-| `API_INTERNAL_URL` | `http://localhost:8000` | Build-time only, see above |
-
-> **Changing `EMBEDDING_MODEL` or `EMBEDDING_DIM` requires a new Alembic migration to alter the `chunks.embedding` column width AND a full re-index of every document.** Existing vectors are not convertible. The app refuses to start if `EMBEDDING_DIM` disagrees with the column, which turns a silent retrieval failure into a boot failure.
-
-**Why `127.0.0.1` and not `localhost`:** Compose publishes Postgres and Redis on IPv4 only, while on Windows `localhost` resolves to `::1` first. Every connection then pays a failed IPv6 attempt before falling back — measured at 2076 ms against 31 ms. The test suite opens a fresh connection per checkout, so that fallback alone took a 52-second suite to 13 minutes.
-
-## External access
+## 바깥에서 접속하기
 
 ```
 cloudflared tunnel --url http://localhost:3000
 ```
 
-**One tunnel exposes the whole app.** Because `/api/*` is proxied same-origin by Next.js, the API needs no tunnel of its own, no CORS entry, and no cookie `SameSite` relaxation. Nothing in the app depends on the tunnel; it is purely a way to let someone outside your network reach a local stack.
+**터널 하나가 앱 전체를 공개합니다.** `/api/*`가 Next를 통해 동일 오리진으로 프록시되므로
+API용 터널도, CORS 항목도, 쿠키 `SameSite` 완화도 필요 없습니다. 앱의 어떤 부분도 터널에
+의존하지 않습니다.
 
-The chat endpoint streams Server-Sent Events and sets `Cache-Control: no-transform` so intermediaries do not buffer it into a single response. Without that header, compression at the proxy collapses every progress frame into one read after the answer is already finished.
+채팅 엔드포인트는 SSE를 흘려보내면서 `Cache-Control: no-transform`을 답니다. 이 헤더가
+없으면 중간의 압축이 진행 프레임을 전부 하나로 뭉쳐서, 답이 이미 끝난 뒤에 한 번에
+도착합니다.
 
-## Frontend / backend type correspondence
+---
 
-`frontend/lib/types.ts` mirrors `backend/app/schemas/*` by hand. It is small enough that this is cheaper than a build step. If the two drift, generate the TypeScript instead of patching it:
+## 설계 문서
 
-```
-npx openapi-typescript http://localhost:8000/openapi.json -o frontend/lib/api-types.ts
-```
+결정의 근거는 코드 주석과 `docs/`에 있습니다. 특히:
 
-## Troubleshooting
+- [docs/화면.md](docs/화면.md) — 화면마다 무엇을 왜 그렇게 했는지, 그림과 함께
+- [docs/superpowers/specs/](docs/superpowers/specs/) — 설계 문서
+  - `2026-08-28-vertical-slice-1-design.md` — 바탕 구조와 로드맵
+  - `2026-08-30-design-language.md` — 디자인 언어
+  - `2026-08-30-slices-2-to-5-design.md` — MCP·관측·설정
+  - `2026-08-31-retrieval-redesign.md` — 검색 파이프라인 재설계와 측정치
+  - `2026-08-31-slice-6-workflow-design.md` — 워크플로우와 슈퍼 에이전트, 용어 정리
+  - `2026-09-01-document-structure.md` — 문서 구조 인식
+- [docs/superpowers/plans/](docs/superpowers/plans/) — 실행 계획
+- [.env.example](.env.example) — 설정값마다 그 숫자가 나온 측정
 
-**`extension "vector" is not available`** — Postgres is running without pgvector. The Compose file uses `pgvector/pgvector:pg16`; a native Postgres needs the extension installed separately.
+---
 
-**Documents always end at `failed`** — check `OPENAI_API_KEY`. The app boots fine without a valid key: only ingestion and answering fail, and the failure reason is shown in the document table.
+## 문제 해결
 
-**Settings look ignored** — `.env` is read from the repository root, not the current directory. Confirm the file is at the root and not under `backend/`.
+**`extension "vector" is not available`** — pgvector 없는 Postgres입니다. Compose는
+`pgvector/pgvector:pg16`을 쓰고, 직접 설치한 Postgres라면 확장을 따로 넣어야 합니다.
 
-**A document is stuck at `parsing` or `chunking`** — the worker is not running, or Redis restarted and lost the queue. Check `docker compose logs worker`, then re-upload. Redis runs with AOF persistence to make queue loss rare. The document list shows how long a document has been in its current state.
+**문서가 늘 `failed`로 끝납니다** — `OPENAI_API_KEY`를 확인하십시오. 키가 없어도 앱은 잘
+뜹니다. 수집과 답변만 실패하고, 실패 사유는 문서 목록에 그대로 보입니다.
 
-**`migrate` failed and backend will not start** — `docker compose logs migrate`. The backend deliberately refuses to start against an unmigrated database rather than failing later on a missing column.
+**설정이 무시되는 것 같습니다** — `.env`는 현재 디렉터리가 아니라 저장소 루트에서 읽습니다.
+그리고 위에 적은 열 개 값은 **고급 설정 화면에 저장된 값이 `.env`를 이깁니다.** 화면에서
+`되돌리기`를 누르면 `.env` 값으로 돌아옵니다.
 
-**Port already in use** — 3000, 8000, 5432 and 6379. Change the published port in `docker-compose.yml`; the internal ports are fixed.
+**검색이 아무것도 못 찾습니다** — `SPARSE_TOKENIZER`를 바꾼 적이 있다면
+`python scripts/backfill_tsv.py`를 돌리십시오. 색인이 다른 토크나이저로 쓰여 있으면 스파스
+갈래가 조용히 빈 결과를 돌려줍니다.
 
-**A document exists in the list but its detail page says `원본 파일을 더 이상 찾을 수 없습니다.`** - it was uploaded in a different run mode. Local development and Docker share the same Postgres, but `UPLOAD_DIR=./data/uploads` is a host directory for a local run and a named volume inside Docker. So a document uploaded outside Docker has a database row the Docker stack can see and a file it cannot open. Re-upload it, or bind-mount the host directory instead of the `uploaddata` volume if you want one corpus across both modes.
+**문서가 `parsing`이나 `chunking`에서 멈춰 있습니다** — 워커가 안 돌고 있거나, Redis가
+재시작하면서 큐를 잃은 것입니다. `docker compose logs worker`를 보고 다시 올리십시오. 큐
+유실을 드물게 하려고 Redis는 AOF 지속화를 켜고 돕니다. 문서 목록에 현재 상태로 얼마나
+있었는지가 나옵니다.
 
-**`npm run build` fails with `PageNotFoundError: Cannot find module for page: /_not-found`** — a stale `.next`. Delete `frontend/.next` and build again.
+**`migrate`가 실패하고 백엔드가 안 뜹니다** — `docker compose logs migrate`. 백엔드는
+마이그레이션 안 된 DB를 상대로 뜨기를 일부러 거부합니다. 나중에 없는 컬럼에서 터지는 것보다
+낫습니다.
+
+**포트가 이미 쓰이고 있습니다** — 3000, 8000, 5432, 6379. `docker-compose.yml`의 공개
+포트를 바꾸십시오. 컨테이너 안쪽 포트는 고정입니다.
+
+**목록에는 있는데 상세에서 `원본 파일을 더 이상 찾을 수 없습니다.`** — 다른 실행 모드에서
+올린 문서입니다. 로컬 실행과 Docker가 같은 Postgres를 쓰지만 `UPLOAD_DIR`은 로컬에서는 호스트
+디렉터리이고 Docker에서는 이름 있는 볼륨입니다. 다시 올리거나, 한 코퍼스를 양쪽에서 쓰려면
+`uploaddata` 볼륨 대신 호스트 디렉터리를 바인드 마운트하십시오.
+
+**`npm run build`가 `PageNotFoundError: Cannot find module for page: /_not-found`로
+실패합니다** — `.next`가 낡은 것입니다. `frontend/.next`를 지우고 다시 빌드하십시오.
