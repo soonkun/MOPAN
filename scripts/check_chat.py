@@ -67,8 +67,26 @@ def main() -> int:
                 f"[{citation.get('index')}] {citation.get('filename')} "
                 f"p.{citation.get('page')} / {citation.get('section')}"
             )
-            snippet = " ".join((citation.get("snippet") or "").split())
-            print(f"    {snippet[:400]}")
+            # THE WHOLE CHUNK, not the 300-character prefix the citation carries.
+            # That prefix is what turned a supported claim into a reported
+            # fabrication: 상표심사기준 p.458 says "이 경우 설명은 500자 이내로
+            # 간략하고 명확하게 적는 것을 원칙으로 합니다" at character ~330 of a
+            # 494-character chunk, so the answer's "설명은 500자 이내" was checked
+            # against a snippet that stops ~40 characters short of the sentence
+            # supporting it, and was written up as invented. The chat UI never
+            # had that bug - CitationBadge fetches this same endpoint for exactly
+            # this reason - only this script, which is what the grounding checks
+            # are actually read off.
+            #
+            # No cap. `snippet` was capped because it rides every SSE frame;
+            # nothing here is on that path, and a cap is the whole defect.
+            body = citation.get("snippet") or ""
+            chunk_id = citation.get("chunk_id")
+            if chunk_id:
+                chunk = client.get(f"/api/chunks/{chunk_id}")
+                if chunk.status_code == 200:
+                    body = chunk.json().get("content") or body
+            print(f"    {' '.join(body.split())}")
         print()
 
         if not message_id:
