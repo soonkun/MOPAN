@@ -252,13 +252,27 @@ export function placeGraphError(
  * new node takes 답변's column and pushes 답변 - and anything at or beyond it -
  * one column right. The person can still drag it anywhere; this is only where it
  * lands. */
-export function addNode(graph: WorkflowGraph, kind: GraphNode["kind"]): WorkflowGraph {
+export function addNode(
+  graph: WorkflowGraph,
+  kind: GraphNode["kind"],
+  init?: { x?: number; y?: number; tool?: string },
+): WorkflowGraph {
   const id = nextNodeId(graph);
+  // 자리를 지정하고 놓으면(팔레트에서 끌어다 놓기) 그 자리 그대로. 지정이
+  // 없으면 답변 노드 자리를 뺏고 답변을 오른쪽으로 민다 - max-x 뒤에 붙이면
+  // 답변이 행 중간에 놓인 그림이 되는, 배치가 만드는 거짓말 때문.
+  const placed = init?.x !== undefined && init?.y !== undefined;
   const answer = graph.nodes.find((n) => n.kind === "answer");
-  const x = answer ? answer.x : graph.nodes.reduce((max, n) => Math.max(max, n.x), 0) + 260;
-  const nodes = answer
-    ? graph.nodes.map((n) => (n.x >= x ? { ...n, x: n.x + 260 } : n))
-    : [...graph.nodes];
+  const x = placed
+    ? (init.x as number)
+    : answer
+      ? answer.x
+      : graph.nodes.reduce((max, n) => Math.max(max, n.x), 0) + 260;
+  const y = placed ? (init.y as number) : 0;
+  const nodes =
+    !placed && answer
+      ? graph.nodes.map((n) => (n.x >= x ? { ...n, x: n.x + 260 } : n))
+      : [...graph.nodes];
   const node: GraphNode =
     kind === "branch"
       ? {
@@ -266,10 +280,21 @@ export function addNode(graph: WorkflowGraph, kind: GraphNode["kind"]): Workflow
           kind,
           label: "",
           x,
-          y: 0,
+          y,
           condition: { kind: "exists", of: "" },
         }
-      : { id, kind, label: "", x, y: 0, tool: "rag", collections: [], arguments: { query: "" } };
+      : {
+          id,
+          kind,
+          label: "",
+          x,
+          y,
+          tool: init?.tool ?? "rag",
+          collections: [],
+          // 팔레트에서 도구를 집어 놓는 경우 인자의 기본은 질문 전체다 -
+          // 스타터 그래프의 검색 노드와 같은 이유: 빈 검색어는 저장이 거부된다.
+          arguments: { query: init?.tool !== undefined ? "{{input.text}}" : "" },
+        };
   return { nodes: [...nodes, node], edges: graph.edges };
 }
 
