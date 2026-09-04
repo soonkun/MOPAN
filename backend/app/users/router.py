@@ -1,4 +1,5 @@
 import logging
+import secrets
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -10,9 +11,9 @@ from app.auth.dependencies import require_admin
 from app.core.db import get_db_session
 from app.core.logging import log_event
 from app.core.redis import get_redis
-from app.core.security import revoke_user_sessions
+from app.core.security import hash_password, revoke_user_sessions
 from app.models.user import User
-from app.schemas.auth import AdminUserResponse, UserUpdate
+from app.schemas.auth import AdminPasswordResetResponse, AdminUserResponse, UserUpdate
 
 logger = logging.getLogger("mopan.users")
 router = APIRouter(prefix="/api", tags=["users"])
@@ -21,6 +22,7 @@ USER_NOT_FOUND_MESSAGE = "사용자를 찾을 수 없습니다."
 LAST_ADMIN_MESSAGE = "마지막 관리자입니다. 다른 사용자를 관리자로 지정한 뒤에 변경해 주세요."
 SELF_ROLE_MESSAGE = "자신의 권한은 변경할 수 없습니다. 다른 관리자에게 요청해 주세요."
 SELF_DEACTIVATE_MESSAGE = "자신의 계정은 비활성화할 수 없습니다."
+SELF_RESET_MESSAGE = "자신의 비밀번호는 계정 설정에서 변경해 주세요."
 
 
 @router.get("/users", response_model=list[AdminUserResponse])
@@ -95,3 +97,41 @@ async def update_user(
 
     await db.refresh(user)
     return user
+
+
+@router.post("/users/{user_id}/password", response_model=AdminPasswordResetResponse)
+async def reset_password(
+    user_id: uuid.UUID,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
+):
+    """임시 비밀번호 발급. 이 시스템에는 이메일 발송이 없어 "비밀번호 찾기"가
+    있을 수 없고, 비밀번호를 잊은 사용자의 유일한 출구가 관리자다.
+
+    임시 비밀번호는 서버가 만들고 응답에 딱 한 번 실린다 - 저장은 해시뿐이라
+    다시 보여줄 방법이 없고, 그래서 관리자가 아무 때나 남의 비밀번호를 "조회"
+    하는 창구가 되지 못한다. 관리자가 임시값을 아는 것은 어쩔 수 없으므로
+    사용자는 로그인 뒤 계정 설정에서 바로 바꾸는 것이 맞고, 화면이 그렇게
+    안내한다. 자신의 것은 거절 - 계정 설정이 정도(正道)다."""
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail=USER_NOT_FOUND_MESSAGE)
+    if user.id == admin.id:
+        raise HTTPException(status_code=409, detail=SELF_RESET_MESSAGE)
+
+    temporary = secrets.token_urlsafe(9)  # 12자, 가입 규칙(8자 이상)을 넉넉히 넘는다
+    user.password_hash = hash_password(temporary)
+    await db.commit()
+
+    # 커밋 뒤에: 되돌아간 트랜잭션이 멀쩡한 세션을 끊으면 안 된다. 옛 비밀번호를
+    # 아는 사람(도난 포함)의 세션이 살아 있으면 재설정이 재설정이 아니다.
+    revoked = await revoke_user_sessions(redis, str(user.id))
+    log_event(
+        logger,
+        "user_password_reset",
+        user_id=str(user.id),
+        by=str(admin.id),
+        sessions_revoked=revoked,
+    )
+    return AdminPasswordResetResponse(temporary_password=temporary)

@@ -183,7 +183,9 @@ body {
   /* The one place a border still carries meaning: a text field's resting
      outline is what says "you can type here". */
   .field {
-    @apply h-10 rounded-sm border border-outline bg-surface px-3 text-body text-on-surface transition-colors duration-150 placeholder:text-on-surface-variant focus:border-primary;
+    /* placeholder는 예시·기본값이다. 실값과 한눈에 갈리도록 확실히 연하게 -
+       "예)" 접두어와 함께 "이렇게 쓰라는 거구나"를 만든다(소유자 지적). */
+    @apply h-10 rounded-sm border border-outline bg-surface px-3 text-body text-on-surface transition-colors duration-150 placeholder:text-on-surface-variant placeholder:opacity-60 focus:border-primary;
   }
 }
 

@@ -28,6 +28,7 @@ from app.core.logging import log_event
 from app.core.redis import get_redis
 from app.documents.storage import delete_document_files
 from app.llm.base import LLMError, LLMProvider
+from app.mcp.auto import deliberate_and_run
 from app.mcp.service import load_tool_calls, run_tool_calls
 from app.models.attachment import Attachment
 from app.models.conversation import Conversation
@@ -205,6 +206,7 @@ async def _complete(
     attachment_ids: list[uuid.UUID],
     workflow: ResolvedWorkflow,
     user_nickname: str | None = None,
+    auto_tool_ids: list[uuid.UUID] | None = None,
 ) -> AsyncIterator[str]:
     """Everything after the evidence has been gathered: retrieve if there is
     none, answer, persist, emit `citations` and `done`.
@@ -236,6 +238,33 @@ async def _complete(
         )
     if intent == "chat":
         fell_back = False
+    # 자동 도구 사용 (app/mcp/auto.py) - 켜 둔 서버의 read 도구를 모델이 보고
+    # 필요하면 부른다. 의도와 무관하게 묻는다: "오늘 날씨 어때?"는 게이트가
+    # chat으로 분류하지만(코퍼스에 정답 청크가 없다는 판정 자체는 옳다) 답은
+    # 도구에 있다 - 게이트가 도구까지 막으면 서버를 켜 둔 의미가 없다(실사고:
+    # 잡담 에이전트가 "날씨는 기상청에서"라고 안내해 버림). 인사말이면 숙고가
+    # "pass"를 답해 호출이 없고, 그 한 번의 숙고가 서버를 켜 둔 값이다.
+    # 실패는 전부 "추가 근거 없음"으로 강등되므로 답변을 못 막는다.
+    auto_trace = None
+    if auto_tool_ids:
+        yield _sse({"type": "status", "status": "calling_tool"})
+        async with sessionmaker() as tool_db:
+            auto_evidence, auto_trace = await deliberate_and_run(
+                tool_db,
+                llm_provider,
+                settings=settings,
+                question=question,
+                auto_tool_ids=auto_tool_ids,
+                model=model,
+                workflow=workflow,
+            )
+        evidence = evidence + auto_evidence
+        if auto_evidence and intent == "chat":
+            # 도구가 근거를 냈으면 잡담이 아니다: 잡담 프롬프트 대신 근거 답변
+            # 프롬프트로, 근거-없음 경고 규칙도 정상 답변의 것으로.
+            if auto_trace is not None:
+                auto_trace["intent_promoted"] = "chat->search"
+            intent = "search"
     if fell_back:
         # THE FALLBACK. A run that yielded nothing - refused, a graph of just
         # input and answer, every node failed, or the clock ran out before the
@@ -282,6 +311,8 @@ async def _complete(
     # 이 이미 기록되지만, 그것이 게이트의 판정이었다는 사실은 여기만 안다.
     if intent != "search":
         chat_answer.trace["intent"] = intent
+    if auto_trace is not None:
+        chat_answer.trace["auto_tools"] = auto_trace
     if plan_trace is not None:
         # THE ACCEPTANCE TEST FOR THIS SLICE IS THAT answer() DID NOT CHANGE, so
         # the plan is merged into the trace `build_trace` already produced rather
@@ -587,6 +618,7 @@ async def chat(
                 attachment_ids=attachment_ids,
                 workflow=workflow,
                 user_nickname=user.nickname,
+                auto_tool_ids=payload.auto_tool_ids,
             ):
                 yield frame
         except LLMError:

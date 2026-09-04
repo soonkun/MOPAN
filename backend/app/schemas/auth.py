@@ -82,6 +82,13 @@ class AdminUserResponse(UserResponse):
     created_at: datetime
 
 
+class AdminPasswordResetResponse(BaseModel):
+    """POST /api/users/{id}/password의 응답. 임시 비밀번호는 여기 한 번 실리고
+    끝이다 - 서버에는 해시만 남아 다시 보여줄 수 없다."""
+
+    temporary_password: str
+
+
 class UserUpdate(BaseModel):
     """PATCH body, dumped with `exclude_unset=True, exclude_none=True`. Both
     columns are NOT NULL, so an explicit null can only mean "no change" here -

@@ -123,7 +123,7 @@ export default function BrandingSection() {
               value={title}
               onChange={(event) => setTitle(event.target.value)}
               maxLength={60}
-              placeholder="MOPAN"
+              placeholder="예) MOPAN"
               className="field mt-2 w-full"
             />
           </div>
@@ -182,7 +182,7 @@ export default function BrandingSection() {
               value={taglinePrimary}
               onChange={(event) => setTaglinePrimary(event.target.value)}
               maxLength={200}
-              placeholder="한 판에서 길러 어느 논에나 옮겨 심습니다."
+              placeholder="예) 한 판에서 길러 어느 논에나 옮겨 심습니다."
               className="field mt-2 w-full"
             />
           </div>
@@ -198,7 +198,7 @@ export default function BrandingSection() {
               value={taglineSecondary}
               onChange={(event) => setTaglineSecondary(event.target.value)}
               maxLength={300}
-              placeholder="RAG · MCP · LLM · 워크플로우를 직접 등록하고 조합하는 베이스 시스템입니다."
+              placeholder="예) RAG · MCP · LLM · 워크플로우를 직접 등록하고 조합하는 베이스 시스템입니다."
               className="field mt-2 w-full"
             />
           </div>
@@ -218,7 +218,7 @@ export default function BrandingSection() {
               value={questions}
               onChange={(event) => setQuestions(event.target.value)}
               rows={4}
-              placeholder={"출원전 공개를 했는데 공지예외주장이 가능한가요?\n어플 이름을 상표로 등록하려면 몇 류로 출원하나요?"}
+              placeholder={"예) 출원전 공개를 했는데 공지예외주장이 가능한가요?\n예) 어플 이름을 상표로 등록하려면 몇 류로 출원하나요?"}
               className="field mt-2 h-auto w-full py-2"
             />
           </div>

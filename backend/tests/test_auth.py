@@ -379,3 +379,40 @@ async def test_reactivating_a_user_lets_them_log_in_again(member_client, admin_c
         "/api/auth/login", json={"email": "member@example.com", "password": "pw123456"}
     )
     assert login.status_code == 200
+
+
+# --- 관리자 비밀번호 재설정 (POST /api/users/{id}/password) --------------------
+
+
+async def test_admin_password_reset_issues_a_working_temporary_password(
+    member_client, admin_client
+):
+    """임시값은 응답에 한 번 실리고, 옛 비밀번호와 살아 있던 세션은 그 즉시
+    죽는다 - 세 가지가 다 참이어야 "재설정"이다."""
+    member_id = await _user_id(admin_client, "member@example.com")
+    reset = await admin_client.post(f"/api/users/{member_id}/password")
+    assert reset.status_code == 200
+    temporary = reset.json()["temporary_password"]
+    assert len(temporary) >= 8  # 가입 규칙의 하한을 임시값도 지킨다
+
+    assert (await member_client.get("/api/auth/me")).status_code in (401, 403)
+    old = await member_client.post(
+        "/api/auth/login", json={"email": "member@example.com", "password": "pw123456"}
+    )
+    assert old.status_code == 401
+    fresh = await member_client.post(
+        "/api/auth/login", json={"email": "member@example.com", "password": temporary}
+    )
+    assert fresh.status_code == 200
+
+
+async def test_admin_cannot_reset_their_own_password_here(admin_client):
+    admin_id = await _user_id(admin_client, "admin@example.com")
+    refused = await admin_client.post(f"/api/users/{admin_id}/password")
+    assert refused.status_code == 409
+    assert "계정 설정" in refused.json()["detail"]
+
+
+async def test_password_reset_is_admin_only(member_client, admin_client):
+    member_id = await _user_id(admin_client, "member@example.com")
+    assert (await member_client.post(f"/api/users/{member_id}/password")).status_code == 403

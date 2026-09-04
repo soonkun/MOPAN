@@ -152,7 +152,7 @@ export default function McpPage() {
               onChange={(e) => setName(e.target.value)}
               required
               maxLength={200}
-              placeholder="사내 지식 서버"
+              placeholder="예) 사내 지식 서버"
               className="field mt-1 w-full"
             />
           </div>
@@ -166,7 +166,7 @@ export default function McpPage() {
               onChange={(e) => setBaseUrl(e.target.value)}
               required
               maxLength={1000}
-              placeholder="https://example.com/mcp"
+              placeholder="예) https://example.com/mcp"
               className="field mt-1 w-full"
             />
           </div>

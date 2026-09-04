@@ -166,7 +166,7 @@ export default function PromptsPage() {
               // The server pattern, stated here too so the refusal arrives
               // before the round trip rather than instead of it.
               pattern="[a-z][a-z0-9_]*"
-              placeholder="field_agent"
+              placeholder="예) field_agent"
               className="field mt-1 w-full font-mono"
             />
             <p className="mt-1 text-caption text-on-surface-variant">
@@ -183,7 +183,7 @@ export default function PromptsPage() {
               onChange={(e) => setNewText(e.target.value)}
               rows={4}
               spellCheck={false}
-              placeholder="너는 현장 담당자를 돕는 조수다. ..."
+              placeholder="예) 너는 현장 담당자를 돕는 조수다. ..."
               className="mt-1 w-full rounded-sm border border-outline bg-surface px-3 py-2 font-mono text-body text-on-surface transition-colors duration-150 focus:border-primary"
             />
           </div>

@@ -7,6 +7,7 @@ import MentionMenu from "@/components/chat/MentionMenu";
 import ModelPicker from "@/components/chat/ModelPicker";
 import PopoverSheet from "@/components/chat/PopoverSheet";
 import ToolPicker from "@/components/chat/ToolPicker";
+import Switch from "@/components/ui/Switch";
 import {
   filterEntries,
   mentionAt,
@@ -65,7 +66,7 @@ const MAX_HEIGHT = 8 * 26 + 16;
  * Two states would let the + menu and a picker be open together, which is the
  * bug the hand-off was written to avoid: two stacked sheets over a composer,
  * two Escapes to get out, and a scrim over a scrim. */
-type Sheet = null | "menu" | "model" | "workflow" | "tool";
+type Sheet = null | "menu" | "model" | "workflow" | "tool" | "mcp";
 
 // The four-point spark. Plain currentColor, NOT the brand gradient: §2 reserves
 // that for the wordmark, the assistant sparkle and the streaming indicator.
@@ -91,13 +92,15 @@ const CHIP = (
     <path d="M9.5 2v3M14.5 2v3M9.5 19v3M14.5 19v3M2 9.5h3M2 14.5h3M19 9.5h3M19 14.5h3" />
   </>
 );
-const WRENCH = (
+const CLIP = <path d="M17 8.5 9.4 16a2.5 2.5 0 0 0 3.6 3.6l7.1-7.1a4.5 4.5 0 0 0-6.4-6.4l-7 7a6.5 6.5 0 0 0 9.2 9.2l5.6-5.6" />;
+// 플러그 - MCP 서버 행. 렌치(수동 도구 호출)와 구분되는 "연결"의 은유.
+const PLUG = (
   <>
-    <path d="M14.5 5.5a3.5 3.5 0 0 0 4.6 4.6l-8.9 8.9a2.2 2.2 0 0 1-3.1-3.1z" />
-    <path d="M5 5l3 3" />
+    <path d="M9 2v5M15 2v5" />
+    <path d="M7 7h10v4a5 5 0 0 1-5 5 5 5 0 0 1-5-5z" />
+    <path d="M12 16v6" />
   </>
 );
-const CLIP = <path d="M17 8.5 9.4 16a2.5 2.5 0 0 0 3.6 3.6l7.1-7.1a4.5 4.5 0 0 0-6.4-6.4l-7 7a6.5 6.5 0 0 0 9.2 9.2l5.6-5.6" />;
 
 function Glyph({ children, className = "h-5 w-5 shrink-0" }: { children: React.ReactNode; className?: string }) {
   return (
@@ -126,6 +129,7 @@ function MenuRow({
   icon,
   label,
   value,
+  trailing,
   onClick,
   pressed,
   disabled,
@@ -134,6 +138,8 @@ function MenuRow({
   icon: React.ReactNode;
   label: string;
   value?: string;
+  /** 값 대신 실물 컨트롤(스위치)을 달 때. `value`와 함께 오면 값이 앞선다. */
+  trailing?: React.ReactNode;
   onClick: () => void;
   pressed?: boolean;
   disabled?: boolean;
@@ -155,6 +161,7 @@ function MenuRow({
           {value}
         </span>
       )}
+      {!value && trailing}
     </button>
   );
 }
@@ -227,6 +234,8 @@ export default function Composer({
   onToolRemove,
   orchestrator,
   onOrchestratorChange,
+  mcpServers,
+  onMcpServerChange,
   workflows,
   workflowId,
   onWorkflowChange,
@@ -272,6 +281,12 @@ export default function Composer({
    * the disabled-but-on chip that used to say so is gone with it. */
   orchestrator: boolean;
   onOrchestratorChange: (value: boolean) => void;
+  /** 서버 단위의 자동 사용 스위치, 클로드 데스크톱의 커넥터 토글 모양. 켜 두면
+   * 상황이 맞을 때 모델이 그 서버의 도구를 알아서 쓰고, `@`로 직접 부르는
+   * 길은 꺼져 있어도 열려 있다. 도구 단위가 아니라 서버 단위인 것이 요점이다 -
+   * "서버를 연결하면 그 안의 기능은 다 쓰는 것"이라는 소유자의 말 그대로. */
+  mcpServers: { name: string; on: boolean }[];
+  onMcpServerChange: (name: string, on: boolean) => void;
   /** GET /api/workflows/selectable. Empty for a deployment with no workflow
    * configured, which drops the row rather than offering a single 기본 row that
    * is not a choice. */
@@ -763,9 +778,6 @@ export default function Composer({
                 fileRef.current?.click();
               }}
             />
-            {tools.length > 0 && (
-              <MenuRow icon={WRENCH} label="도구 사용" onClick={() => setSheet("tool")} />
-            )}
           </div>
 
           <div
@@ -798,7 +810,7 @@ export default function Composer({
             <MenuRow
               icon={SPARK}
               label="슈퍼 에이전트"
-              value={orchestrator ? "켬" : "끔"}
+              trailing={<Switch on={orchestrator} />}
               pressed={orchestrator}
               // Stays open: the row IS the state readout, so the user has to be
               // able to see it flip. Closing on toggle would hide the only
@@ -806,6 +818,16 @@ export default function Composer({
               onClick={() => onOrchestratorChange(!orchestrator)}
               title="질문에 맞춰 모델이 그 자리에서 워크플로우를 짜서 실행합니다."
             />
+            {/* 서버 목록은 서브시트로 - 메뉴에 펼치면 서버가 늘어나는 만큼
+                메뉴가 자란다(소유자 지적). 값은 켜진 개수 요약. */}
+            {mcpServers.length > 0 && (
+              <MenuRow
+                icon={PLUG}
+                label="도구 설정"
+                value={`${mcpServers.filter((s) => s.on).length}/${mcpServers.length} 켬`}
+                onClick={() => setSheet("mcp")}
+              />
+            )}
           </div>
         </div>
       </PopoverSheet>
@@ -835,6 +857,35 @@ export default function Composer({
         onClose={closeSheet}
         initialToolId={toolSeed}
       />
+
+      {/* 도구 설정 - MCP 서버 단위 스위치, 클로드 데스크톱의 커넥터 목록.
+          서버가 늘어나면 목록이 스크롤로 감당한다. 끈 서버도 @로 직접 부르는
+          길은 항상 열려 있다. */}
+      <PopoverSheet
+        open={sheet === "mcp"}
+        onClose={closeSheet}
+        anchorRef={plusRef}
+        label="도구 설정"
+      >
+        <div className="max-h-[60vh] overflow-y-auto p-2 pb-6 sm:pb-2">
+          <p className="px-3 py-2 text-label font-medium text-on-surface-variant">
+            연결된 MCP 서버
+          </p>
+          {mcpServers.map((server) => (
+            <MenuRow
+              key={server.name}
+              icon={PLUG}
+              label={server.name}
+              trailing={<Switch on={server.on} />}
+              pressed={server.on}
+              // 슈퍼 에이전트와 같은 규칙: 행이 곧 상태 표시라 시트를 닫지
+              // 않는다 - 뒤집히는 것이 보여야 한다.
+              onClick={() => onMcpServerChange(server.name, !server.on)}
+              title="켜 두면 상황이 맞을 때 모델이 이 서버의 도구를 알아서 씁니다. @로 직접 부르는 것은 이 설정과 무관합니다."
+            />
+          ))}
+        </div>
+      </PopoverSheet>
     </form>
   );
 }

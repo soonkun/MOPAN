@@ -64,6 +64,11 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mopan}:${POSTGRES_PASSWORD:-mopan}@postgres:5432/${POSTGRES_DB:-mopan}
       REDIS_URL: redis://:${REDIS_PASSWORD:-mopan}@redis:6379/0
       UPLOAD_DIR: /app/data/uploads
+      # 동봉된 생활정보 MCP(mcp-examples)가 컨테이너망 안에 있어서, 그것을
+      # 등록하려면 사설망 MCP 주소를 허용해야 한다. 등록은 관리자 전용이라
+      # 이 완화가 열어 주는 것은 "관리자가 내부 주소를 등록할 수 있다"까지다.
+      # 외부에 공개하는 배포에서 내부망 탐색이 걱정되면 .env에서 false로.
+      MCP_ALLOW_PRIVATE_NETWORKS: ${MCP_ALLOW_PRIVATE_NETWORKS:-true}
     depends_on:
       postgres:
         condition: service_healthy
@@ -77,6 +82,25 @@ services:
       - uploaddata:/app/data/uploads
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # 생활정보 MCP - 키 없는 공공 API(날씨·환율·공휴일)를 MCP 도구로 감싼 동봉
+  # 예시. backend와 같은 이미지로 돌므로 새 Dockerfile도 새 의존성도 없다.
+  # DB·Redis가 필요 없어 depends_on도 없다.
+  mcp-examples:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    command: ["uvicorn", "app.examples_mcp.main:app", "--host", "0.0.0.0", "--port", "8100"]
+    # 확인용 호스트 노출: 브라우저에서 http://localhost:8100/healthz 로 살아있는지
+    # 볼 수 있다. backend가 부르는 주소는 컨테이너망의 http://mcp-examples:8100/mcp.
+    ports:
+      - "127.0.0.1:8100:8100"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8100/healthz').status==200 else 1)\""]
       interval: 10s
       timeout: 5s
       retries: 10

@@ -45,6 +45,10 @@ class ChatRequest(BaseModel):
     # reasons attachment_ids' is: it is operator configuration, and a
     # Field(max_length=...) would freeze it at import time and answer in English.
     tool_calls: list[ToolCallRequest] | None = None
+    # 자동 사용이 켜진 도구들(+ 메뉴의 서버 토글이 브라우저에 기억하는 기본
+    # 설정). 모델이 이 중에서 필요할 때 알아서 부른다 - app/mcp/auto.py.
+    # 낡은 id가 섞여 있는 것이 정상이라(서버 삭제 등) 서버는 조용히 거른다.
+    auto_tool_ids: list[uuid.UUID] | None = Field(default=None, max_length=64)
     # 슈퍼 에이전트, OPT-IN and defaulting to off, chosen per question
     # the way `model` is. The direct RAG path of Slice 1 stays the default until
     # the orchestrator measures better on scripts/eval_questions_ko.json: a

@@ -192,6 +192,9 @@ export async function streamChat(
      * refused with a Korean 4xx BEFORE the conversation is created - so it
      * arrives here as a rejected fetch, not as an error frame inside a 200. */
     tool_calls?: { tool_id: string; arguments: Record<string, unknown> }[];
+    /** 자동 사용이 켜진 도구들(+ 메뉴의 MCP 서버 토글). 모델이 이 중에서
+     * 필요할 때 알아서 부른다. 낡은 id는 서버가 조용히 거른다. */
+    auto_tool_ids?: string[];
     /** Slice 3's Super Agent, opt-in per question the way `model` is. Off means
      * the Slice 1 direct RAG path, which is still the default. An agent that
      * carries the orchestrator turns it on regardless; there is no way to turn

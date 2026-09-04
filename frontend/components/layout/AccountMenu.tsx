@@ -3,14 +3,16 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { apiFetch, errorMessage } from "@/lib/api";
+import Switch from "@/components/ui/Switch";
 import type { User } from "@/lib/types";
 
-/** 계정 창 - 사이드바 아래 계정 줄을 누르면 뜬다.
+/** 계정 창 - 사이드바 아래 계정 줄을 누르면 뜬다. 클로드 데스크톱의 계정
+팝오버가 모양의 기준이다.
 
-소유자 피드백대로 컴팩트하다: 설명 문장은 없고, 테마는 해/달 아이콘 하나가
-번갈아 바뀌며, 로그아웃은 그 옆의 나가기 아이콘이다. 계정 삭제는 첫 화면에
-두지 않는다 - "계정 설정" 안으로 한 번 더 들어가야 맨 아래 나온다. 파괴적
-동작이 클릭 한 번 거리면 그것은 기능이 아니라 함정이다.
+컴팩트하다: 좁은 창(18rem), 설명 문장 없음. 위에서부터 프로필 헤더 → 닉네임
+→ 테마 스위치 행(아이콘은 지금 상태 - 라이트면 해) → 계정 설정 행 → 로그아웃
+행. 계정 삭제는 첫 화면에 두지 않는다 - "계정 설정" 안으로 한 번 더 들어가야
+맨 아래 나온다. 파괴적 동작이 클릭 한 번 거리면 그것은 기능이 아니라 함정이다.
 
 네이티브 <dialog> + showModal() (ConfirmDialog와 같은 이유). 창 밖(backdrop)을
 클릭하면 닫힌다 - 닫기 버튼은 없다: dialog 요소 자체가 클릭 대상이면 그것이
@@ -32,7 +34,7 @@ function currentTheme(): "light" | "dark" {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
-function IconGlyph({ name }: { name: "sun" | "moon" | "logout" | "back" | "chevron" }) {
+function IconGlyph({ name }: { name: "sun" | "moon" | "logout" | "back" | "chevron" | "gear" }) {
   const paths = {
     sun: (
       <>
@@ -50,6 +52,14 @@ function IconGlyph({ name }: { name: "sun" | "moon" | "logout" | "back" | "chevr
     ),
     back: <path d="m14 6-6 6 6 6" />,
     chevron: <path d="m10 6 6 6-6 6" />,
+    // 슬라이더 - 설정. 톱니보다 획이 적고 이 크기에서 더 또렷하다.
+    gear: (
+      <>
+        <path d="M4 7h8M18 7h2M4 17h4M14 17h6" />
+        <circle cx="15" cy="7" r="2.2" />
+        <circle cx="11" cy="17" r="2.2" />
+      </>
+    ),
   } as const;
   return (
     <svg
@@ -185,20 +195,20 @@ export default function AccountMenu({
       onClick={(event) => {
         if (event.target === dialogRef.current) dialogRef.current?.close();
       }}
-      className="m-auto w-full max-w-sm rounded-lg bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim md:mb-20 md:ml-4 md:mr-auto md:mt-auto"
+      className="m-auto w-[calc(100vw-2rem)] max-w-[18rem] rounded-lg border border-outline-variant bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim md:mb-20 md:ml-4 md:mr-auto md:mt-auto"
     >
-      <div className="p-5">
+      <div className="p-2">
         {view === "main" ? (
           <>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 px-2 pb-2 pt-2">
               <span
                 aria-hidden="true"
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary-container text-title font-medium text-on-primary-container"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary-container text-body font-medium text-on-primary-container"
               >
                 {(user.nickname ?? user.email).slice(0, 1).toUpperCase()}
               </span>
               <div className="min-w-0 flex-1">
-                <h2 id="account-menu-title" className="truncate text-title font-medium">
+                <h2 id="account-menu-title" className="truncate text-body font-medium">
                   {user.nickname ? `${user.nickname}님` : "내 계정"}
                 </h2>
                 <p className="truncate text-caption text-on-surface-variant">
@@ -206,67 +216,85 @@ export default function AccountMenu({
                   {user.role === "admin" ? " · 관리자" : ""}
                 </p>
               </div>
-              {/* 컴팩트 아이콘 줄: 해/달 토글, 나가기. 설명은 없다 - 해와 달과
-                  문 그림이 곧 설명이다. */}
-              <button
-                type="button"
-                onClick={toggleTheme}
-                aria-label={theme === "light" ? "다크 모드로" : "라이트 모드로"}
-                className="icon-btn shrink-0"
-              >
-                <IconGlyph name={theme === "light" ? "moon" : "sun"} />
-              </button>
-              <button
-                type="button"
-                onClick={() => void onLogout()}
-                aria-label="로그아웃"
-                className="icon-btn shrink-0"
-              >
-                <IconGlyph name="logout" />
-              </button>
             </div>
 
-            <div className="mt-4 border-t border-outline-variant pt-4">
-              <label
-                htmlFor="account-nickname"
-                className="text-label font-medium text-on-surface-variant"
-              >
-                닉네임
-              </label>
-              <div className="mt-2 flex gap-2">
+            <div className="border-t border-outline-variant px-2 py-2">
+              <div className="flex gap-2">
                 <input
                   id="account-nickname"
                   value={nickname}
                   onChange={(event) => setNickname(event.target.value)}
                   maxLength={60}
-                  className="field min-w-0 flex-1"
+                  placeholder="닉네임"
+                  aria-label="닉네임"
+                  className="field h-9 min-w-0 flex-1 text-body"
                 />
-                <button
-                  type="button"
-                  onClick={() => void saveNickname()}
-                  disabled={savingNickname || !nicknameDirty}
-                  className="btn-tonal btn-compact shrink-0 self-center"
-                >
-                  {savingNickname ? "저장 중..." : savedNickname ? "저장됨" : "저장"}
-                </button>
+                {/* 저장 버튼은 바꿨을 때만 나타난다 - 안 바꾼 창에 버튼이 있는
+                    것이 곧 "묻힌" 인상의 절반이었다. */}
+                {nicknameDirty && (
+                  <button
+                    type="button"
+                    onClick={() => void saveNickname()}
+                    disabled={savingNickname}
+                    className="btn-tonal btn-compact shrink-0 self-center"
+                  >
+                    {savingNickname ? "저장 중..." : "저장"}
+                  </button>
+                )}
+                {savedNickname && !nicknameDirty && (
+                  <span className="self-center text-caption text-primary">저장됨</span>
+                )}
               </div>
             </div>
 
-            <button
-              type="button"
-              onClick={() => {
-                setView("settings");
-                setError(null);
-              }}
-              className="mt-4 flex w-full items-center justify-between rounded-md border-t border-outline-variant px-1 pb-1 pt-4 text-body text-on-surface hover:bg-surface-container"
-            >
-              계정 설정
-              <IconGlyph name="chevron" />
-            </button>
+            {/* 메뉴 행들. 테마 행의 아이콘은 지금 상태다: 라이트면 해. */}
+            <div className="border-t border-outline-variant pt-1">
+              <button
+                type="button"
+                onClick={toggleTheme}
+                aria-pressed={theme === "dark"}
+                className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left text-body hover:bg-surface-container-high"
+              >
+                <span className="text-on-surface-variant">
+                  <IconGlyph name={theme === "light" ? "sun" : "moon"} />
+                </span>
+                <span className="min-w-0 flex-1">다크 모드</span>
+                <Switch on={theme === "dark"} />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setView("settings");
+                  setError(null);
+                }}
+                className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left text-body hover:bg-surface-container-high"
+              >
+                <span className="text-on-surface-variant">
+                  <IconGlyph name="gear" />
+                </span>
+                <span className="min-w-0 flex-1">계정 설정</span>
+                <span className="text-on-surface-variant">
+                  <IconGlyph name="chevron" />
+                </span>
+              </button>
+            </div>
+
+            <div className="mt-1 border-t border-outline-variant pt-1">
+              <button
+                type="button"
+                onClick={() => void onLogout()}
+                className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left text-body hover:bg-surface-container-high"
+              >
+                <span className="text-on-surface-variant">
+                  <IconGlyph name="logout" />
+                </span>
+                로그아웃
+              </button>
+            </div>
           </>
         ) : (
           <>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 px-1 pt-1">
               <button
                 type="button"
                 onClick={() => {
@@ -280,12 +308,12 @@ export default function AccountMenu({
               >
                 <IconGlyph name="back" />
               </button>
-              <h2 id="account-menu-title" className="text-title font-medium">
+              <h2 id="account-menu-title" className="text-body font-medium">
                 계정 설정
               </h2>
             </div>
 
-            <div className="mt-4 border-t border-outline-variant pt-4">
+            <div className="mt-2 border-t border-outline-variant px-2 pt-3">
               <span className="text-label font-medium text-on-surface-variant">비밀번호 변경</span>
               <div className="mt-2 space-y-2">
                 <input
@@ -332,7 +360,7 @@ export default function AccountMenu({
             </div>
 
             {/* 파괴적 동작은 맨 아래, 한 겹 더 안쪽에. */}
-            <div className="mt-4 border-t border-outline-variant pt-4">
+            <div className="mt-3 border-t border-outline-variant px-2 pb-1 pt-2">
               {!deleting ? (
                 <button
                   type="button"
@@ -383,7 +411,7 @@ export default function AccountMenu({
         )}
 
         {error && (
-          <p className="mt-3 rounded-sm bg-error-container px-3 py-2 text-caption text-on-error-container">
+          <p className="mx-2 mb-1 mt-3 rounded-sm bg-error-container px-3 py-2 text-caption text-on-error-container">
             {error}
           </p>
         )}

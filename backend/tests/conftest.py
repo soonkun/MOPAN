@@ -187,6 +187,12 @@ async def app(test_engine, test_sessionmaker, fake_redis, tmp_path_factory):
             # SHIPPED default (True) is not exercised end to end, which is why
             # the live check in the plan's Task 146 is not optional.
             "clarify_on_weak_evidence": False,
+            # Pinned for the same reason again: docker-compose.yml now defaults
+            # this to true so the bundled 생활정보 MCP(컨테이너망 주소) can be
+            # registered, and inheriting that would turn the SSRF-guard tests
+            # into connection attempts. The escape-hatch test switches it on
+            # deliberately (tests/test_mcp.py).
+            "mcp_allow_private_networks": False,
         }
     )
     application.state.settings = settings

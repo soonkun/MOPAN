@@ -60,6 +60,12 @@ const ORCHESTRATOR_STORAGE_KEY = "mopan.orchestrator";
 // exactly as it behaved before agents existed - the safe direction.
 const WORKFLOW_STORAGE_KEY = "mopan.workflow";
 
+// 자동 사용을 끈 MCP 서버 이름들. 기본이 "연결하면 켬"이라 켠 쪽이 아니라 끈
+// 쪽을 기억한다 - 새 서버는 등록만 하면 아무도 손대지 않아도 바로 자동 사용
+// 후보가 된다(클로드 데스크톱의 방향). 서버 쪽 위험 필터(read 등급만)가 진짜
+// 경계라 여기 남은 낡은 이름은 해가 없다.
+const MCP_OFF_STORAGE_KEY = "mopan.mcp-servers-off";
+
 /** 시간대별 인사. 경계는 체감으로 골랐고 상수가 곧 문서다 - "안녕하세요" 한
  * 문장이 새벽 2시에도 아침 9시에도 똑같이 나가는 것이 어색하다는 소유자
  * 지적에서 왔다. */
@@ -130,6 +136,8 @@ export default function ChatWindow({
   // Slice 3, opt-in per question. False on the server too, so a client that
   // never sends the flag gets the Slice 1 path unchanged.
   const [orchestrator, setOrchestrator] = useState(false);
+  // 자동 사용을 끈 MCP 서버 이름들. 여기 없는 서버는 전부 켜져 있는 것이다.
+  const [mcpOff, setMcpOff] = useState<string[]>([]);
   // Every ENABLED workflow that has a graph. Empty for a deployment with none
   // configured, and the picker then renders nothing at all.
   const [workflows, setWorkflows] = useState<WorkflowOption[]>([]);
@@ -183,6 +191,15 @@ export default function ChatWindow({
   // than unmounting it, and a []-keyed cleanup never runs for the case that
   // actually reproduced.
   useEffect(() => () => abortRef.current?.abort(), [initialConversationId]);
+
+  // 입력창은 항상 받아쓸 준비가 되어 있어야 한다. 첫 질문의 전송은 /chat ->
+  // /chat/{id} 라우트 전환이라 이 컴포넌트가 통째로 갈리고, 그때 포커스가
+  // 죽는다 - 다음 질문을 치려면 창을 다시 클릭해야 했다(소유자 지적). 마운트와
+  // 대화 전환마다 되돌려 두면 전송 직후에도, 옛 대화를 열어도 바로 이어 칠 수
+  // 있다.
+  useEffect(() => {
+    textareaRef.current?.focus();
+  }, [initialConversationId]);
 
   useEffect(() => {
     const urls = previewUrlsRef.current;
@@ -253,6 +270,12 @@ export default function ChatWindow({
     } catch {
       // Private mode, or site data blocked. The default is off, which is where
       // this already is.
+    }
+    try {
+      const stored = JSON.parse(localStorage.getItem(MCP_OFF_STORAGE_KEY) ?? "[]");
+      if (Array.isArray(stored)) setMcpOff(stored.filter((n) => typeof n === "string"));
+    } catch {
+      // Same fallback, and here "the default" means every server ON.
     }
   }, []);
 
@@ -518,8 +541,14 @@ export default function ChatWindow({
     const question = input;
     const sent = attachments.filter((a) => a.attachment !== null).map((a) => a.attachment!);
     const calls = toolCall ? [toolCall] : [];
+    const autoToolIds = tools
+      .filter((t) => !mcpOff.includes(t.server_name))
+      .map((t) => t.id);
     const pendingId = `temp-${Date.now()}`;
     setInput("");
+    // 마우스로 전송을 누르면 포커스가 버튼에 남는다. 다음 질문은 언제나 바로
+    // 이어서 온다는 것이 이 화면의 전제이므로, 여기서 입력창으로 되돌린다.
+    textareaRef.current?.focus();
     // Cleared here rather than on `done`: these rows are claimed by the send,
     // so leaving the chips up would offer a 삭제 that now answers 409
     // 이미 전송된 첨부파일은 삭제할 수 없습니다.
@@ -560,6 +589,9 @@ export default function ChatWindow({
           ...(calls.length
             ? { tool_calls: calls.map((c) => ({ tool_id: c.tool.id, arguments: c.arguments })) }
             : {}),
+          // 켜져 있는 서버의 모든 도구 id. 서버가 read 등급만 걸러 쓰므로 여기서
+          // 위험도를 가리지 않고, 비어 있으면 아예 싣지 않아 예전 요청 그대로다.
+          ...(autoToolIds.length ? { auto_tool_ids: autoToolIds } : {}),
           // Omitted, not sent empty, while the list is still loading: the
           // backend reads an absent `model` as ANSWER_MODEL and an unknown one
           // as a 400.
@@ -593,6 +625,22 @@ export default function ChatWindow({
       pendingId,
       (onEvent, signal) => approveChat({ approval_token, approved }, onEvent, signal),
     );
+  }
+
+  /** MCP 서버 하나의 자동 사용 스위치. `@`로 직접 부르는 길은 이 값과 무관하게
+   * 항상 열려 있다 - 이것은 "상황이 맞으면 모델이 알아서 쓴다"의 기본 설정이다. */
+  function chooseMcpServer(name: string, on: boolean) {
+    setMcpOff((prev) => {
+      const next = on ? prev.filter((n) => n !== name) : [...prev.filter((n) => n !== name), name];
+      try {
+        localStorage.setItem(MCP_OFF_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // The choice still applies to this session; it just will not survive a
+        // reload.
+      }
+      return next;
+    });
+    setNotice(on ? `${name} 서버를 자동으로 사용합니다.` : `${name} 서버 자동 사용을 껐습니다.`);
   }
 
   function chooseOrchestrator(value: boolean) {
@@ -877,6 +925,11 @@ export default function ChatWindow({
           onToolRemove={() => setToolCall(null)}
           orchestrator={orchestrator}
           onOrchestratorChange={chooseOrchestrator}
+          mcpServers={[...new Set(tools.map((t) => t.server_name))].map((name) => ({
+            name,
+            on: !mcpOff.includes(name),
+          }))}
+          onMcpServerChange={chooseMcpServer}
           workflows={workflows}
           workflowId={workflowId}
           onWorkflowChange={chooseWorkflow}
