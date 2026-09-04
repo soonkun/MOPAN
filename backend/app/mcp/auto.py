@@ -44,9 +44,19 @@ MAX_OFFERED_TOOLS = 24
 _SYSTEM = (
     "You can call the tools below. Call one ONLY when the user's question actually needs live "
     "or external data that a tool provides - a greeting, an opinion, or a question answerable "
-    "from documents needs NO tool. When no tool helps, reply with the single word: pass. "
-    "Never invent tool output."
+    "from documents needs NO tool. "
+    "If a tool clearly WOULD answer the question but a REQUIRED argument is missing and cannot "
+    "be inferred from the conversation, do not guess and do not stay silent: reply with exactly "
+    "'ask: ' followed by ONE short Korean question asking for that detail "
+    "(예: ask: 어떤 지역의 날씨가 궁금하신가요?). "
+    "When no tool helps, reply with the single word: pass. Never invent tool output."
 )
+
+# 숙고에 같이 보여줄 직전 대화 수. 되묻기("어떤 지역...?")에 사용자가 "대전"이라고
+# 답하는 턴은 이 맥락 없이는 해석이 안 된다. 길이는 토큰 예산 - 한 턴을 짧게
+# 자르고(아래) 여섯 턴이면 되묻기 왕복 두어 번을 넉넉히 덮는다.
+_HISTORY_TURNS = 6
+_HISTORY_CHARS = 500
 
 
 def _spec_name(server: str, tool: str, taken: set[str]) -> str:
@@ -70,15 +80,19 @@ async def deliberate_and_run(
     auto_tool_ids: list[uuid.UUID],
     model: str,
     workflow: ResolvedWorkflow = DEFAULT_WORKFLOW,
-) -> tuple[list[Evidence], dict | None]:
+    history: list[dict] | None = None,
+) -> tuple[list[Evidence], dict | None, str | None]:
     """켜진 도구를 모델에게 보여주고, 부르겠다는 것을 실행해 Evidence로.
 
-    돌려주는 dict는 추적용이다: 무엇을 보여줬고 무엇이 불렸는지. 아무 도구도
-    남지 않았거나 모델이 부르지 않았으면 ([], trace)로 조용히 끝난다.
+    돌려주는 것은 (evidence, trace, ask)다. `ask`는 "도구가 답인데 필수 인자가
+    질문에 없다"일 때 모델이 적은 되물음 한 줄 - '오늘 날씨 알려줘'가 도구를
+    타지도 못하고 문서 검색으로 새던 실사고에서 왔다: 조용한 pass는 이 경우
+    가장 나쁜 답이다. 아무 도구도 남지 않았거나 모델이 부르지도 묻지도
+    않았으면 ([], trace, None)으로 조용히 끝난다.
     """
     started = time.perf_counter()
     if not auto_tool_ids:
-        return [], None
+        return [], None, None
 
     # 알 수 없는 id·꺼진 도구·read가 아닌 등급·워크플로우 경계 밖은 조용히
     # 거른다. @ 경로(load_tool_calls)가 404·409로 거절하는 것과 다른 이유:
@@ -98,7 +112,7 @@ async def deliberate_and_run(
     ).all()
     rows = [(t, s) for t, s in rows if workflow.allows_tool(t.id)][:MAX_OFFERED_TOOLS]
     if not rows:
-        return [], None
+        return [], None, None
 
     taken: set[str] = set()
     by_name: dict[str, tuple[McpTool, McpServer]] = {}
@@ -118,12 +132,19 @@ async def deliberate_and_run(
         )
 
     trace: dict = {"offered": len(specs), "called": []}
+    messages = [ChatMessage(role="system", content=_SYSTEM)]
+    # 되묻기 왕복이 해석되려면 직전 대화가 보여야 한다: "어떤 지역...?"에 대한
+    # "대전"은 이 맥락 없이는 도시 이름이 아니라 소음이다. 한 턴은 짧게 자른다 -
+    # 여기 실리는 것은 인자 추론의 실마리지 본문이 아니다.
+    for turn in (history or [])[-_HISTORY_TURNS:]:
+        role = turn.get("role")
+        content = (turn.get("content") or "")[:_HISTORY_CHARS]
+        if role in ("user", "assistant") and content:
+            messages.append(ChatMessage(role=role, content=content))
+    messages.append(ChatMessage(role="user", content=question))
     try:
         result = await llm_provider.chat(
-            [
-                ChatMessage(role="system", content=_SYSTEM),
-                ChatMessage(role="user", content=question),
-            ],
+            messages,
             temperature=0.0,
             tools=specs,
             model=model,
@@ -132,7 +153,7 @@ async def deliberate_and_run(
         logger.warning("tool deliberation failed; answering without tools", exc_info=True)
         trace["error"] = "deliberation_failed"
         trace["ms"] = int((time.perf_counter() - started) * 1000)
-        return [], trace
+        return [], trace, None
 
     calls: list[PendingToolCall] = []
     for tool_call in (result.tool_calls or [])[: settings.max_tool_calls_per_message]:
@@ -161,8 +182,16 @@ async def deliberate_and_run(
 
     if not calls:
         trace["ms"] = int((time.perf_counter() - started) * 1000)
-        return [], trace
+        # 호출 대신 되물음을 적었는가. 형식은 계약("ask: " 접두)이고, 벗어난
+        # 출력은 전부 "부르지 않음"으로 읽는다 - 강등 규칙은 여기도 같다.
+        ask = None
+        content = (result.content or "").strip()
+        if content.lower().startswith("ask:"):
+            ask = content[4:].strip().splitlines()[0][:200] or None
+        if ask:
+            trace["ask"] = ask
+        return [], trace, ask
 
     evidence = await run_tool_calls(calls, settings=settings)
     trace["ms"] = int((time.perf_counter() - started) * 1000)
-    return evidence, trace
+    return evidence, trace, None

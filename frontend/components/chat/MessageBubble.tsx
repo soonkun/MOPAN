@@ -110,10 +110,11 @@ export default function MessageBubble({
       <div className="min-w-0 flex-1">
         {/* No whitespace-pre-wrap any more: markdown owns the block structure,
             and pre-wrap would double every blank line between paragraphs. */}
-        {/* 잡담(smalltalk_agent)에는 이 경고가 붙지 않는다: 검색을 일부러
-            돌리지 않은 답이라 "근거를 찾지 못했다"는 명제 자체가 거짓이다.
-            실측: "안녕?"의 인사 위에 이 경고가 떠 있었다. */}
-        {message.citations.length === 0 && message.prompt_name !== "smalltalk_agent" && (
+        {/* 잡담(smalltalk_agent)과 도구 되물음(tool_clarify)에는 이 경고가
+            붙지 않는다: 검색을 일부러 돌리지 않은 답이라 "근거를 찾지 못했다"는
+            명제 자체가 거짓이다. 실측: "안녕?"의 인사 위에 이 경고가 떠 있었다. */}
+        {message.citations.length === 0 &&
+          !["smalltalk_agent", "tool_clarify"].includes(message.prompt_name ?? "") && (
           // See the note at the top of this component: the prompt cannot
           // guarantee grounding, so the absence of a citation is treated as
           // what it is - an answer that cannot be shown to come from the

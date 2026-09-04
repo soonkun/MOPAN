@@ -21,7 +21,7 @@ from app.attachments.service import (
 from app.auth.authorization import get_owned_conversation
 from app.auth.dependencies import get_current_user
 from app.chat.intent import classify_intent
-from app.chat.service import answer, load_history, persist_turn, retrieve
+from app.chat.service import ChatAnswer, answer, load_history, persist_turn, retrieve
 from app.core.config import MODEL_LABELS, Settings, get_app_settings
 from app.core.db import get_db_session
 from app.core.logging import log_event
@@ -246,10 +246,11 @@ async def _complete(
     # "pass"를 답해 호출이 없고, 그 한 번의 숙고가 서버를 켜 둔 값이다.
     # 실패는 전부 "추가 근거 없음"으로 강등되므로 답변을 못 막는다.
     auto_trace = None
+    auto_ask = None
     if auto_tool_ids:
         yield _sse({"type": "status", "status": "calling_tool"})
         async with sessionmaker() as tool_db:
-            auto_evidence, auto_trace = await deliberate_and_run(
+            auto_evidence, auto_trace, auto_ask = await deliberate_and_run(
                 tool_db,
                 llm_provider,
                 settings=settings,
@@ -257,6 +258,7 @@ async def _complete(
                 auto_tool_ids=auto_tool_ids,
                 model=model,
                 workflow=workflow,
+                history=history,
             )
         evidence = evidence + auto_evidence
         if auto_evidence and intent == "chat":
@@ -265,6 +267,13 @@ async def _complete(
             if auto_trace is not None:
                 auto_trace["intent_promoted"] = "chat->search"
             intent = "search"
+        if auto_ask and not evidence and not plan_evidence:
+            # 도구가 답인데 필수 인자가 질문에 없다("오늘 날씨 알려줘"에 지역이
+            # 없다). 문서 검색으로 새면 "관련 문서가 없습니다"가 나가는데, 그건
+            # 이 되물음보다 무조건 나쁜 답이다 - 검색을 건너뛰고 아래에서 이
+            # 문장이 그대로 답이 된다. 사용자가 지역을 답하면 다음 턴의 숙고가
+            # 대화 이력으로 그것을 읽는다.
+            fell_back = False
     if fell_back:
         # THE FALLBACK. A run that yielded nothing - refused, a graph of just
         # input and answer, every node failed, or the clock ran out before the
@@ -295,18 +304,28 @@ async def _complete(
         plan_trace["fell_back_to_direct_rag"] = fell_back
 
     yield _sse({"type": "status", "status": "answering"})
-    chat_answer = await answer(
-        llm_provider,
-        question,
-        history,
-        evidence + plan_evidence,
-        settings=settings,
-        images=images,
-        model=model,
-        prompt_name=workflow.prompt_name,
-        intent=intent,
-        user_nickname=user_nickname,
-    )
+    if auto_ask and not evidence and not plan_evidence:
+        # 되물음이 곧 답이다. 모델을 다시 부르지 않는다 - 숙고가 적은 문장을
+        # 그대로 내보내야 "무엇이 부족한지"가 왜곡 없이 닿는다.
+        chat_answer = ChatAnswer(
+            content=auto_ask,
+            model=model or settings.answer_model,
+            prompt_name="tool_clarify",
+            prompt_version="",
+        )
+    else:
+        chat_answer = await answer(
+            llm_provider,
+            question,
+            history,
+            evidence + plan_evidence,
+            settings=settings,
+            images=images,
+            model=model,
+            prompt_name=workflow.prompt_name,
+            intent=intent,
+            user_nickname=user_nickname,
+        )
     # 추적 화면이 "왜 인용이 없는가"에 답할 수 있게. prompt_name(smalltalk_agent)
     # 이 이미 기록되지만, 그것이 게이트의 판정이었다는 사실은 여기만 안다.
     if intent != "search":

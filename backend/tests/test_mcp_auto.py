@@ -64,7 +64,7 @@ def provider():
 
 
 async def test_only_enabled_read_tools_on_enabled_servers_are_offered(db, catalogue, provider):
-    evidence, trace = await deliberate_and_run(
+    evidence, trace, ask = await deliberate_and_run(
         db,
         provider,
         settings=settings_with(),
@@ -90,7 +90,7 @@ async def test_a_chosen_call_is_executed_as_a_read_pending_call(
         ],
     )
 
-    evidence, trace = await deliberate_and_run(
+    evidence, trace, ask = await deliberate_and_run(
         db,
         provider,
         settings=settings_with(),
@@ -131,7 +131,7 @@ async def test_more_calls_than_the_ceiling_are_capped(db, catalogue, provider, m
 async def test_stale_ids_mean_no_deliberation_at_all(db, provider):
     """브라우저에 남은 낡은 id는 정상 상태다 - 조용히 걸러지고, 남는 도구가
     없으면 모델 호출 자체가 없다(비용 0)."""
-    evidence, trace = await deliberate_and_run(
+    evidence, trace, ask = await deliberate_and_run(
         db,
         provider,
         settings=settings_with(),
@@ -139,14 +139,14 @@ async def test_stale_ids_mean_no_deliberation_at_all(db, provider):
         auto_tool_ids=[uuid.uuid4()],
         model="gpt-4o",
     )
-    assert (evidence, trace) == ([], None)
+    assert (evidence, trace, ask) == ([], None, None)
     provider.chat.assert_not_called()
 
 
 async def test_failures_degrade_to_no_extra_evidence(db, catalogue, provider):
     # 숙고 호출이 죽어도 답변은 나간다.
     provider.chat.side_effect = RuntimeError("provider down")
-    evidence, trace = await deliberate_and_run(
+    evidence, trace, ask = await deliberate_and_run(
         db,
         provider,
         settings=settings_with(),
@@ -166,7 +166,7 @@ async def test_failures_degrade_to_no_extra_evidence(db, catalogue, provider):
             ToolCall(id="2", name="invented_tool", arguments="{}"),
         ],
     )
-    evidence, trace = await deliberate_and_run(
+    evidence, trace, ask = await deliberate_and_run(
         db,
         provider,
         settings=settings_with(),
@@ -176,3 +176,40 @@ async def test_failures_degrade_to_no_extra_evidence(db, catalogue, provider):
     )
     assert evidence == []
     assert trace["called"] == []
+
+
+async def test_a_missing_required_argument_becomes_a_korean_ask(db, catalogue, provider):
+    """"오늘 날씨 알려줘"의 실사고: 조용한 pass는 문서 검색의 "관련 문서가
+    없습니다"로 샌다. 모델이 ask:를 적으면 그 문장이 그대로 답이 된다."""
+    provider.chat.return_value = ChatResult(content="ask: 어떤 지역의 날씨가 궁금하신가요?")
+    evidence, trace, ask = await deliberate_and_run(
+        db,
+        provider,
+        settings=settings_with(),
+        question="오늘 날씨 알려줘",
+        auto_tool_ids=[catalogue["read"]],
+        model="gpt-4o",
+    )
+    assert evidence == []
+    assert ask == "어떤 지역의 날씨가 궁금하신가요?"
+    assert trace["ask"] == ask
+
+
+async def test_history_reaches_the_deliberation(db, catalogue, provider):
+    """되물음에 "대전"이라고 답하는 턴은 직전 대화 없이는 해석이 안 된다."""
+    await deliberate_and_run(
+        db,
+        provider,
+        settings=settings_with(),
+        question="대전",
+        auto_tool_ids=[catalogue["read"]],
+        model="gpt-4o",
+        history=[
+            {"role": "user", "content": "오늘 날씨 알려줘"},
+            {"role": "assistant", "content": "어떤 지역의 날씨가 궁금하신가요?"},
+        ],
+    )
+    sent = provider.chat.call_args.args[0]
+    assert [m.role for m in sent] == ["system", "user", "assistant", "user"]
+    assert sent[1].content == "오늘 날씨 알려줘"
+    assert sent[-1].content == "대전"
