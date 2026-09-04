@@ -167,6 +167,7 @@ class RagTool(Tool):
                 # 이 인자를 빠뜨리면 bigram 인덱스를 'simple'로 조회해 sparse
                 # 팔이 조용히 죽는다 - 실제로 이 호출부가 빠뜨리고 있었다.
                 sparse_tokenizer=ctx.settings.sparse_tokenizer,
+                sparse_df_trim=ctx.settings.sparse_df_trim,
                 collapse=ctx.settings.retrieval_collapse,
             )
 

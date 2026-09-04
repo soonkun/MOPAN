@@ -145,12 +145,54 @@ _TS_QUERY = text("""to_tsquery('simple',
 )
 
 
+# 질의 토큰의 문서빈도(DF) 조회. scripts/build_lexeme_df.py 가 만든 표를 읽고,
+# '__total__' 행이 전체 청크 수다. 진짜 bigram 은 전부 짧은 한글 조각이라
+# 이 마커와 충돌할 수 없다.
+_DF = text(
+    "SELECT lexeme, df FROM sparse_lexeme_df WHERE lexeme = ANY(:toks)"
+).bindparams(bindparam("toks", type_=ARRAY(Text)))
+
+
+async def _trim_common_tokens(
+    db: AsyncSession, tokens: list[str], words: list[str], df_trim: float
+) -> tuple[list[str], list[str]]:
+    """흔한 토큰을 버리고 희귀한 토큰만 남긴다 - 선택 단계의 가난한 IDF.
+
+    ts_rank 에는 IDF가 없다(모듈 머리의 주석). 그 결과가 측정된 실패다:
+    "동네 마트 이름을 상표로 등록하려는데" 에서 정답 청크에 '마트' 렉심이
+    실제로 있는데도 sparse 300위 밖 - 질의의 흔한 bigram(상표·등록·이름…)이
+    수천 청크와 겹치면서 희귀 신호가 익사한다. 점수 함수는 바꿀 수 없어도
+    (BM25 확장은 이 배포에서 생성 불가 - 재설계 문서 §1.4) **후보 선택**은
+    바꿀 수 있다: 전체 청크의 df_trim 비율보다 흔한 렉심은 tsquery에서 뺀다.
+
+    전부 흔한 토큰이면 빈 목록을 돌려주고 sparse 팔은 기권한다 - 희귀한
+    신호가 하나도 없는 질의에서 sparse가 내놓는 것은 잡음뿐이라는, 전부
+    불용어일 때와 같은 철학이다.
+
+    DF 표에 없는 렉심은 df 0으로 - 백필 이후에 들어온 문서의 어휘는 희귀한
+    쪽으로 안전하게 틀린다.
+    """
+    unique = list(dict.fromkeys([*tokens, "__total__"]))
+    rows = (await db.execute(_DF.bindparams(toks=unique))).all()
+    df = {row.lexeme: row.df for row in rows}
+    total = df.get("__total__", 0)
+    if total <= 0:
+        raise RuntimeError(
+            "sparse_lexeme_df 표가 비어 있습니다. SPARSE_DF_TRIM 을 켜기 전에 "
+            "scripts/build_lexeme_df.py 를 돌려야 합니다."
+        )
+    ceiling = total * df_trim
+    kept = [(t, w) for t, w in zip(tokens, words) if df.get(t, 0) <= ceiling]
+    return [t for t, _ in kept], [w for _, w in kept]
+
+
 async def keyword_search(
     db: AsyncSession,
     query_text: str,
     limit: int,
     collection_ids: list[uuid.UUID] | None = None,
     tokenizer: str = "simple",
+    df_trim: float = 0.0,
 ) -> list[str]:
     """The sparse half of hybrid retrieval: ordered chunk ids, best first.
 
@@ -171,6 +213,12 @@ async def keyword_search(
         for token in tokenize(word, tokenizer):
             words.append(word)
             tokens.append(token)
+    # 0.0 이면 이 단계는 호출 경로에 없다. 켜져 있으면 흔한 토큰이 빠지고,
+    # 전부 흔하면 sparse 팔이 기권한다 (_trim_common_tokens 참조).
+    if df_trim > 0 and tokens:
+        tokens, words = await _trim_common_tokens(db, tokens, words, df_trim)
+        if not tokens:
+            return []
     ts_query = _TS_QUERY.bindparams(tokens=tokens, words=words)
     # is_comparison=True types the result as boolean; without it the expression
     # inherits TSVECTOR and only happens to render correctly in a WHERE clause.

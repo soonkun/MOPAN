@@ -182,6 +182,18 @@ class Settings(BaseSettings):
     # and it needs only this value plus a backfill.
     sparse_tokenizer: Literal["simple", "bigram"] = "bigram"
 
+    # RARE-TOKEN SELECTION for the sparse arm: drop query lexemes whose document
+    # frequency exceeds this FRACTION of the corpus before the tsquery is built.
+    # ts_rank has no IDF (keyword_search.py) and no BM25 extension can be
+    # created on this deployment (redesign doc §1.4), so rarity has to act at
+    # CANDIDATE SELECTION instead of scoring. Measured failure this exists for:
+    # a colloquial query's common bigrams (상표/등록/이름) drowned a chunk that
+    # actually carried the rare ones (마트) - sparse rank outside 300.
+    # 0.0 is off and off costs nothing. Turning it on REQUIRES
+    # scripts/build_lexeme_df.py to have built the sparse_lexeme_df table;
+    # with the table missing the sparse arm fails loudly rather than guessing.
+    sparse_df_trim: float = 0.0
+
     # MULTI-QUERY EXPANSION: how many EXTRA retrieval queries an LLM writes from
     # the question. 0 is off and off costs nothing - not one comparison more.
     # Every variant feeds BOTH arms, so N variants produce 2N ranked lists. See

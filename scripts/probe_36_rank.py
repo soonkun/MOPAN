@@ -17,7 +17,6 @@ re-ingestion it exists to measure.
 """
 
 import asyncio
-import os
 import sys
 
 sys.path.insert(0, "/app")

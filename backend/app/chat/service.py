@@ -128,6 +128,8 @@ async def retrieve(
         # match the one the index was built with, and a call site that forgets it
         # silently degrades to `simple` against a bigram index.
         sparse_tokenizer=settings.sparse_tokenizer,
+        # 흔한 질의 토큰을 선택 단계에서 버리는 가난한 IDF. 0.0 = 꺼짐.
+        sparse_df_trim=settings.sparse_df_trim,
         # 0.0 by default, i.e. off, and measured that way: see the note over
         # Settings.evidence_floor_rrf_score. The knob exists because a corpus
         # whose questions are NOT all answerable - unlike this fixture - may well

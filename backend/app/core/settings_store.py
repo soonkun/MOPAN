@@ -260,6 +260,16 @@ ENV_ONLY_SETTINGS: list[EnvOnlySetting] = [
         ),
     ),
     EnvOnlySetting(
+        key="SPARSE_DF_TRIM",
+        label="흔한 토큰 잘라내기",
+        reason=(
+            "키워드 검색이 후보를 고르기 전에, 전체 청크의 이 비율보다 흔한 질의 토큰을 "
+            "버립니다. 켜려면 먼저 scripts/build_lexeme_df.py 로 어휘 빈도표를 만들어야 하고, "
+            "코퍼스가 크게 바뀌면 그 표를 다시 만들어야 하므로 "
+            "scripts/eval_retrieval.py 로 측정한 뒤 환경변수로 바꿉니다. 0이면 꺼져 있습니다."
+        ),
+    ),
+    EnvOnlySetting(
         key="RETRIEVAL_COLLAPSE",
         label="그룹 붕괴 융합",
         reason=(

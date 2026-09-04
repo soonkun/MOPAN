@@ -34,7 +34,11 @@ async def backfill(tokenizer: str, batch_size: int) -> int:
     # Same host rewrite scripts/eval_retrieval.py uses: 'postgres' resolves inside
     # the compose network, 127.0.0.1 is the published port from the host. Running
     # inside the container leaves it a no-op.
-    engine = create_async_engine(settings.database_url.replace("@postgres:", "@127.0.0.1:"))
+    db_url = settings.database_url
+    from pathlib import Path
+    if not Path("/.dockerenv").exists():
+        db_url = db_url.replace("@postgres:", "@127.0.0.1:")
+    engine = create_async_engine(db_url)
     maker = async_sessionmaker(engine, expire_on_commit=False)
     done = 0
     started = time.perf_counter()

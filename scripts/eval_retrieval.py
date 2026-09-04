@@ -259,7 +259,11 @@ async def sparse_current(session, query, limit):
     from app.retrieval.keyword_search import keyword_search
 
     return await keyword_search(
-        session, query, limit, tokenizer=get_settings().sparse_tokenizer
+        session,
+        query,
+        limit,
+        tokenizer=get_settings().sparse_tokenizer,
+        df_trim=get_settings().sparse_df_trim,
     )
 
 
@@ -562,7 +566,7 @@ async def expand_selection(session, selected, meta, *, mode, settings, query):
     reference does not win one - it is text added to a slot already won.
     """
     from app.retrieval.evidence import RetrievedChunk
-    from app.retrieval.neighbors import expand
+    from app.retrieval.neighbors import attach_section_heads, expand
     from app.retrieval.references import attach as attach_references
 
     chunks = [
@@ -579,6 +583,12 @@ async def expand_selection(session, selected, meta, *, mode, settings, query):
         if cid in meta
     ]
     await attach_references(
+        session,
+        chunks,
+        token_budget=settings.answer_context_token_budget,
+        query=query,
+    )
+    await attach_section_heads(
         session,
         chunks,
         token_budget=settings.answer_context_token_budget,

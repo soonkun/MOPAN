@@ -13,7 +13,7 @@ from app.retrieval.collapse import GroupInfo, fuse_groups, group_key
 from app.retrieval.evidence import Evidence, RetrievedChunk, chunk_to_evidence
 from app.retrieval.expansion import expand_query
 from app.retrieval.keyword_search import keyword_search
-from app.retrieval.neighbors import ExpansionMode, expand
+from app.retrieval.neighbors import ExpansionMode, attach_section_heads, expand
 from app.retrieval.references import attach as attach_references
 from app.retrieval.reranker import Reranker
 from app.retrieval.rrf import reciprocal_rank_fusion
@@ -88,6 +88,7 @@ async def hybrid_search(
     query_expansion_model: str = "",
     query_expansion_timeout: float = 8.0,
     sparse_tokenizer: str = "simple",
+    sparse_df_trim: float = 0.0,
     evidence_floor: float = 0.0,
     collapse: bool = False,
 ) -> list[Evidence]:
@@ -168,7 +169,12 @@ async def hybrid_search(
         dense_seen.update(rankings[-1])
         weights.append(1.0)
         keywords = await keyword_search(
-            db, variant, candidate_limit, collection_ids, tokenizer=sparse_tokenizer
+            db,
+            variant,
+            candidate_limit,
+            collection_ids,
+            tokenizer=sparse_tokenizer,
+            df_trim=sparse_df_trim,
         )
         rankings.append(keywords)
         sparse_seen.update(keywords)
@@ -293,6 +299,11 @@ async def hybrid_search(
     # this costs one indexed query. There is no stage here that can be "on" and do
     # nothing - the reason NoneReranker was deleted.
     await attach_references(db, selected, token_budget=token_budget, query=query)
+
+    # 섹션의 첫 조각 - "상품의 범위 ◦…" 줄이 사는 곳 - 을 배달된 조각에
+    # 붙인다. 접기 융합이 대표 하나만 남기면서 생긴 구멍의 반대편이고,
+    # 인용·이웃과 같은 자리(이긴 슬롯에 더해지는 텍스트)를 쓴다.
+    await attach_section_heads(db, selected, token_budget=token_budget, query=query)
 
     # After the truncation, on the items that survived it. Expanding the whole
     # candidate set instead would pay for 20 neighbours to use 14, and expanding

@@ -292,3 +292,83 @@ def _record(row, offset: int, reason: str, text: str) -> dict:
         "reason": reason,
         "tokens": count_tokens(text),
     }
+
+
+async def attach_section_heads(
+    db: AsyncSession,
+    selected: list[RetrievedChunk],
+    *,
+    token_budget: int,
+    query: str,
+) -> None:
+    """섹션의 첫 조각을 전달 시점에 붙인다 - 접기 융합이 만든 구멍의 반대편.
+
+    측정된 실패 (구어체 픽스처, 2026-09-05): 검색이 정답 섹션의 조각을 1~3위로
+    가져오는데도 anchor 0.100 - "상품의 범위 ◦…" 줄(질문에 실제로 답하는 줄)이
+    섹션의 **첫 조각**에 살고, 대표로 뽑힌 것은 질의와 어휘가 겹친 다른
+    조각이라서다. 이웃 확장(±1)은 몇 조각 떨어진 머리에 닿지 못한다.
+
+    그래서 배달된 청크와 같은 (문서, 섹션)의 첫 조각이 배달되지 않았으면 그
+    본문을 붙인다. 재설계 문서 §6.4가 "류·유사군 머리글을 상품 목록에 붙여야
+    한다"고 적은 것의 전달 시점 판본이고, 재적재가 필요 없다.
+
+    이웃·인용과 같은 계약: 정체는 그대로, content만 자라고, neighbors 에
+    reason="section-head" 로 기록되며, 예산은 전체 근거 집합의 천장이다.
+    """
+    if not selected or token_budget <= 0:
+        return
+    wanted = {
+        (uuid.UUID(chunk.document_id), chunk.section)
+        for chunk in selected
+        if chunk.section
+    }
+    if not wanted:
+        return
+    rows = (
+        await db.execute(
+            select(
+                Chunk.id,
+                Chunk.document_id,
+                Chunk.section,
+                Chunk.content,
+                Chunk.page,
+                Chunk.chunk_index,
+            )
+            .where(tuple_(Chunk.document_id, Chunk.section).in_(sorted(wanted, key=str)))
+            .order_by(Chunk.document_id, Chunk.section, Chunk.chunk_index)
+            .distinct(Chunk.document_id, Chunk.section)
+        )
+    ).all()
+    heads = {(row.document_id, row.section): row for row in rows}
+
+    delivered = {chunk.chunk_id for chunk in selected}
+    total = (
+        FENCE_RESERVE_TOKENS
+        + count_tokens(query)
+        + PER_ITEM_OVERHEAD_TOKENS * len(selected)
+        + sum(count_tokens(chunk.content) for chunk in selected)
+    )
+    for chunk in selected:
+        if not chunk.section:
+            continue
+        head = heads.get((uuid.UUID(chunk.document_id), chunk.section))
+        if head is None or str(head.id) in delivered or head.chunk_index == chunk.chunk_index:
+            continue
+        if any(note.get("chunk_id") == str(head.id) for note in chunk.neighbors):
+            continue
+        cost = count_tokens(head.content) + 1
+        if total + cost > token_budget:
+            continue
+        total += cost
+        chunk.content = "\n".join([chunk.content, head.content])
+        chunk.neighbors = [
+            *chunk.neighbors,
+            {
+                "chunk_id": str(head.id),
+                "chunk_index": head.chunk_index,
+                "offset": 0,
+                "page": head.page,
+                "reason": "section-head",
+                "tokens": count_tokens(head.content),
+            },
+        ]
