@@ -54,8 +54,12 @@ class ChunkEdge(Base):
     src_chunk_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("chunks.id", ondelete="CASCADE"), nullable=False
     )
+    # SET NULL, not CASCADE (0015): 문서 간 간선의 주인은 인용하는 문서다. 대상
+    # 문서가 재적재되어 청크가 사라지면 이 간선은 "미해소"로 돌아가야지 행째
+    # 사라지면 안 된다 - 사라진 적이 있고(재적재 직후 실용신안법 cross-doc 0개),
+    # relink가 대상이 다시 색인될 때 도로 잇는다.
     dst_chunk_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("chunks.id", ondelete="CASCADE"), nullable=True
+        UUID(as_uuid=True), ForeignKey("chunks.id", ondelete="SET NULL"), nullable=True
     )
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
     # The citation EXACTLY AS WRITTEN - "제46조제3항", "[특법54(3)]". It is what the

@@ -659,7 +659,9 @@ async def test_a_citation_naming_another_law_is_recorded_and_not_resolved(db, st
 
     assert edge.kind == "ref"
     assert edge.dst_chunk_id is None
-    assert edge.target_path == "조950"
+    # 법명이 경로에 함께 남는다 - 민법이 나중에 업로드되면 relink_external이
+    # 이 프리픽스로 자기를 가리키는 간선을 찾는 열쇠다.
+    assert edge.target_path == "민법#조950"
     structure = statute["document"].structure
     assert structure["citations"]["unresolved"] >= 1
     assert "[민법950]" in structure["unresolved_examples"]
@@ -858,3 +860,32 @@ async def test_a_provision_arrives_with_the_declaration_that_준용s_it(db, two_
     assert "준용한다" in item.content
     reverse = [n for n in item.neighbors if str(n["reason"]).startswith("cited-by:")]
     assert [n["chunk_id"] for n in reverse] == [str(declaring.id)]
+
+
+async def test_a_law_uploaded_later_relinks_the_waiting_citations(db, collection, tmp_path):
+    """인용하는 문서가 먼저 들어오는 순서. 준용 간선은 미해소로 기록됐다가,
+    대상 법령이 색인되는 순간 relink_external이 "법명#경로" 프리픽스로 자기를
+    가리키는 간선을 찾아 도로 잇는다 - 재적재로 dst가 비워진(0015) 간선도
+    같은 길로 회복된다."""
+    override = {"override": "reference_dependent"}
+    um = await _upload(db, collection, tmp_path, UM_ACT, "실용신안법.txt", structure=override)
+    await _process(db, um, RecordingFixed(chunk_size=200, overlap=20))
+    declaring = next(c for c in await _chunks(db, um) if "준용한다" in c.content)
+
+    edge = (
+        await db.execute(
+            select(ChunkEdge).where(
+                ChunkEdge.src_chunk_id == declaring.id,
+                ChunkEdge.label == "「특허법」 제64조",
+            )
+        )
+    ).scalar_one()
+    assert edge.dst_chunk_id is None
+    assert edge.target_path == "특허법#조64"
+
+    patent = await _upload(db, collection, tmp_path, PATENT_ACT, "특허법.txt", structure=override)
+    await _process(db, patent, RecordingFixed(chunk_size=200, overlap=20))
+    target = next(c for c in await _chunks(db, patent) if "출원공개를 하여야" in c.content)
+
+    await db.refresh(edge)
+    assert edge.dst_chunk_id == target.id

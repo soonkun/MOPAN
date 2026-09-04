@@ -272,9 +272,28 @@ async def build_edges(
                     "dst_chunk_id": destination,
                     "kind": "ref",
                     "label": citation.label[:200],
-                    "target_path": path_key(citation.path),
+                    # 법명을 경로에 함께 적는다 ("특허법#조64"). 대상 문서가
+                    # 재적재돼 dst가 비워졌을 때(0015 SET NULL) relink_external이
+                    # 이 프리픽스로 자기를 가리키는 간선을 찾아 도로 잇는다.
+                    "target_path": f"{law}#{path_key(citation.path)}",
                 }
             )
+
+    # 삽입 직전 dst 생존 검증. 문서 간 해소는 남의 문서 청크를 가리키는데, 그
+    # 문서가 동시에 재적재되면 방금 찾은 id가 삽입 전에 사라질 수 있다 - 실제로
+    # 동시 재적재 8건 중 3건이 FK 위반으로 통째로 실패했다. 죽은 dst는
+    # 미해소로 강등하고, 대상이 다시 색인될 때 relink가 잇는다.
+    destinations = {e["dst_chunk_id"] for e in edges if e["dst_chunk_id"] is not None}
+    if destinations:
+        alive = {
+            row[0]
+            for row in (await db.execute(select(Chunk.id).where(Chunk.id.in_(destinations)))).all()
+        }
+        for e in edges:
+            if e["dst_chunk_id"] is not None and e["dst_chunk_id"] not in alive:
+                e["dst_chunk_id"] = None
+                if e["kind"] == "ref":
+                    resolved -= 1
 
     await db.execute(delete(ChunkEdge).where(ChunkEdge.document_id == document_id))
     # Chunked for the same asyncpg int16 bind-parameter ceiling PgVectorStore.upsert
@@ -290,3 +309,64 @@ async def build_edges(
         "parents": sum(1 for edge in edges if edge["kind"] == "parent"),
         "examples": unresolved_examples,
     }
+
+
+async def relink_external(db: AsyncSession, document_id: uuid.UUID, scheme: Scheme) -> int:
+    """방금 색인된 문서를 법명으로 가리키는, 다른 문서의 미해소 간선을 다시 잇는다.
+
+    두 경우가 여기로 온다: ① 인용하는 문서가 먼저 들어와서 대상 법령이 아직
+    없었던 경우, ② 대상 문서가 재적재되면서 0015의 SET NULL이 dst를 비운 경우.
+    어느 쪽이든 간선 행에는 라벨과 "법명#경로"가 그대로 남아 있으므로, 대상
+    문서의 path 인덱스에 대고 같은 최장-접두 규칙으로 도로 잇기만 하면 된다.
+
+    돌려주는 값은 다시 이은 간선 수 - 로그가 찍는다.
+    """
+    filename = (
+        await db.execute(select(Document.filename).where(Document.id == document_id))
+    ).scalar_one_or_none()
+    if filename is None:
+        return 0
+    title = _document_title(filename)
+    # 같은 제목의 문서가 또 있으면 모호 - build_edges의 같은 규칙.
+    twins = (await db.execute(select(Document.filename))).scalars().all()
+    if sum(1 for f in twins if _document_title(f) == title) > 1:
+        return 0
+
+    edges = (
+        (
+            await db.execute(
+                select(ChunkEdge).where(
+                    ChunkEdge.kind == "ref",
+                    ChunkEdge.dst_chunk_id.is_(None),
+                    ChunkEdge.target_path.like(f"{title}#%"),
+                    ChunkEdge.document_id != document_id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not edges:
+        return 0
+
+    rows = (
+        await db.execute(
+            select(Chunk.id, Chunk.chunk_metadata["path"].astext)
+            .where(Chunk.document_id == document_id)
+            .order_by(Chunk.chunk_index)
+        )
+    ).all()
+    index = _path_index([key for _, key in rows], scheme)
+    ids = {i: chunk_id for i, (chunk_id, _) in enumerate(rows)}
+
+    relinked = 0
+    for edge in edges:
+        path = parse_key(edge.target_path.split("#", 1)[1], scheme)
+        if not path:
+            continue
+        position = _resolve_in(index, path)
+        if position is None:
+            continue
+        edge.dst_chunk_id = ids[position]
+        relinked += 1
+    return relinked

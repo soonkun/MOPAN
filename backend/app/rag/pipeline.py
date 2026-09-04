@@ -12,7 +12,7 @@ from app.models.document import Document
 from app.rag.chunking.base import ChunkingStrategy
 from app.rag.chunking.hierarchy import CHARACTERS, Scheme, detect
 from app.rag.parsers import get_parser
-from app.rag.references import build_edges
+from app.rag.references import build_edges, relink_external
 from app.retrieval.vector_store import VectorItem, VectorStore
 
 logger = logging.getLogger("mopan.pipeline")
@@ -175,6 +175,14 @@ async def process_document(
                 "parent_edges": counts["parents"],
             }
 
+        # 이 문서를 법명으로 가리키는 남의 미해소 간선을 다시 잇는다 - 인용
+        # 문서가 먼저 들어온 경우와, 이 문서의 재적재가 dst를 비운(0015) 경우
+        # 둘 다 여기서 회복된다. 계층으로 잘린 문서만: path가 없으면 이을
+        # 자리도 없다.
+        relinked = 0
+        if scheme is not None and strategy is not fallback:
+            relinked = await relink_external(db, document.id, scheme)
+
         document.status = "indexed"
         document.error_message = None
         await db.commit()
@@ -184,6 +192,7 @@ async def process_document(
             "document_indexed",
             document_id=document_id,
             chunk_count=len(candidates),
+            relinked_edges=relinked,
             duration_ms=round((time.perf_counter() - started) * 1000, 2),
         )
     except Exception:
