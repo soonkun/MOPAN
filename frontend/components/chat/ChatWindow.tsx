@@ -60,6 +60,16 @@ const ORCHESTRATOR_STORAGE_KEY = "mopan.orchestrator";
 // exactly as it behaved before agents existed - the safe direction.
 const WORKFLOW_STORAGE_KEY = "mopan.workflow";
 
+/** 시간대별 인사. 경계는 체감으로 골랐고 상수가 곧 문서다 - "안녕하세요" 한
+ * 문장이 새벽 2시에도 아침 9시에도 똑같이 나가는 것이 어색하다는 소유자
+ * 지적에서 왔다. */
+export function timeGreeting(hour: number): string {
+  if (hour >= 5 && hour < 11) return "좋은 아침이에요.";
+  if (hour >= 11 && hour < 17) return "안녕하세요.";
+  if (hour >= 17 && hour < 22) return "좋은 저녁이에요.";
+  return "늦은 시간까지 애쓰시네요.";
+}
+
 function rejection(file: File): string | null {
   // Same rule as validation.py's extension_of: no dot means no extension, not
   // "the whole name is the extension".
@@ -424,6 +434,7 @@ export default function ChatWindow({
                 id: event.message_id,
                 role: "assistant",
                 content: event.content,
+                prompt_name: event.prompt_name ?? null,
                 citations: event.citations,
                 attachments: [],
                 feedback: null,
@@ -745,11 +756,15 @@ export default function ChatWindow({
                 </>
               )}
               <hr className="my-5 w-12 border-t border-outline-variant" />
-              {/* 호칭. 닉네임은 본인이 계정 창에서 정한 값이라 부를 자격이
-                  있다 - 이메일 앞부분으로 어림하는 것은 호칭이 아니라 추측이다. */}
+              {/* 호칭 + 시간대 인사. 닉네임은 본인이 계정 창에서 정한 값이라
+                  부를 자격이 있다 - 이메일 앞부분으로 어림하는 것은 호칭이
+                  아니라 추측이다. 시각은 브라우저의 로컬 시계다: 사용자에게
+                  "지금"은 자기 시계이지 서버의 시간대가 아니다. me가 클라이언트
+                  fetch 후에만 채워지므로 이 블록은 SSR에 없고, 시(hour)를
+                  렌더에서 바로 읽어도 하이드레이션이 어긋나지 않는다. */}
               {me?.nickname && (
                 <p className="mb-1 max-w-[32rem] break-keep text-body-lg text-on-surface">
-                  {me.nickname}님, 안녕하세요.
+                  {me.nickname}님, {timeGreeting(new Date().getHours())}
                 </p>
               )}
               <p className="max-w-[32rem] break-keep text-body-lg text-on-surface">

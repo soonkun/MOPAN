@@ -311,6 +311,9 @@ async def _complete(
             "content": chat_answer.content,
             "citations": chat_answer.citations,
             "model": chat_answer.model,
+            # 화면이 "왜 인용이 없는가"를 구분할 열쇠 - smalltalk_agent 답변에는
+            # 근거-없음 경고 자체가 부적용이다.
+            "prompt_name": chat_answer.prompt_name,
             # Null when no workflow answered. Carried on the frame so the answer
             # on screen says what produced it without waiting for a reload,
             # exactly as `model` is.

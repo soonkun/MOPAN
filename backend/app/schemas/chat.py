@@ -147,6 +147,9 @@ class MessageResponse(BaseModel):
     # reloaded conversation cannot say which model gave which answer, which is the
     # whole point of being able to pick one.
     model: str | None = None
+    # 어느 저장 프롬프트가 답했는가. smalltalk_agent면 검색 없이 답한
+    # 대화형 응답이라, 화면이 근거-없음 경고를 붙이지 않는다.
+    prompt_name: str | None = None
     # WHICH WORKFLOW ANSWERED, and which VERSION of it. Null on every user turn,
     # on every answer written before workflows existed, and on every answer given
     # without one - all three of which the transcript renders the same way,

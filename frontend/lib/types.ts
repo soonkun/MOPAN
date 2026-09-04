@@ -599,6 +599,9 @@ export interface Message {
   // The model that produced this answer, as the provider resolved it
   // ("gpt-4o-2024-08-06"). Null on every user turn, and on assistant turns
   // written before the model became a per-question choice.
+  /** 어느 저장 프롬프트가 답했는가. "smalltalk_agent"면 검색 없이 답한
+   * 대화형 응답이라 근거-없음 경고를 붙이지 않는다. 과거 답변은 null. */
+  prompt_name?: string | null;
   model: string | null;
   // WHICH WORKFLOW ANSWERED, and which version of it. Null on every user turn,
   // on every answer written before workflows existed, and on every answer given
@@ -640,6 +643,9 @@ export type ChatEvent =
       content: string;
       citations: Citation[];
       model: string | null;
+      /** 어느 저장 프롬프트가 답했는가 - "smalltalk_agent"면 근거-없음 경고를
+       * 붙이지 않는다. 과거 서버의 프레임에는 없을 수 있다. */
+      prompt_name?: string | null;
       // So the answer on screen can say what produced it without a reload,
       // exactly as `model` does. Null when no workflow was named.
       workflow_name: string | null;
