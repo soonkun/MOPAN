@@ -103,7 +103,8 @@ async def main() -> None:
             print(
                 f" {slot:>2}{both} rrf={score:.4f} d={dense_rank.get(cid, '-'):>3} "
                 f"s={sparse_rank.get(cid, '-'):>3} "
-                f"{(row.filename if row else '?')[:14]:<14} p.{row.page if row else '?':<4} "
+                f"{(row.filename if row else '?')[:14]:<14} "
+                f"p.{(row.page if row and row.page is not None else '?'):<4} "
                 f"{head(row.content) if row else ''}"
             )
 

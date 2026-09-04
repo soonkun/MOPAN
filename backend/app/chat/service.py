@@ -133,6 +133,10 @@ async def retrieve(
         # whose questions are NOT all answerable - unlike this fixture - may well
         # want one, and leaving it unreachable would mean re-deriving it later.
         evidence_floor=settings.evidence_floor_rrf_score,
+        # 그룹 붕괴 융합 - 같은 조문·같은 분류표 섹션이 표를 나눠 갖지 않게.
+        # app/retrieval/collapse.py의 측정 기록 참조. 끄면 융합은 이전과
+        # 바이트 단위로 동일하다.
+        collapse=settings.retrieval_collapse,
     )
 
     # EXPANSION IS A RETRY, NOT A STAGE. Measured at QUERY_EXPANSION_COUNT=3 on

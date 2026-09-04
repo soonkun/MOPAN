@@ -141,6 +141,17 @@ class Settings(BaseSettings):
     # chunks that have nothing to do with the question.
     retrieval_candidate_limit: int = 20
 
+    # GROUP-FOLD FUSION: fold chunks that share an address - the same 항 of the
+    # same document, or the same classification-table section - into one fused
+    # candidate, so copies stop occupying several of the 10 slots. Measured on
+    # the 86-question fixture: ALL anchor 0.872 -> 0.884 and crossref
+    # 0.880 -> 0.920 with every other group held; the folded-free slots are
+    # where the second hop of a cross-reference had been getting cut. The
+    # measured table, including the three more ambitious variants this REJECTED
+    # (vote pooling, overfetch, article-level folding), lives at the top of
+    # app/retrieval/collapse.py. Off means fusion is byte-identical to before.
+    retrieval_collapse: bool = True
+
     # HOW THE SPARSE ARM TOKENISES, at ingest AND at query time - the two must
     # agree or the index answers a question nobody asked. See
     # app/retrieval/tokenize.py for the functions and

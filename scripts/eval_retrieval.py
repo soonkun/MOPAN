@@ -694,6 +694,11 @@ async def main() -> int:
         "--floor", default="0", help="relevance floor(s): fused RRF score below which a "
         "candidate is not delivered at all. 0 is off."
     )
+    parser.add_argument(
+        "--collapse",
+        default="off",
+        help="그룹 붕괴 융합: off | on | on:CAP | on:CAP:OVERFETCH (기본 on:2:5)",
+    )
     parser.add_argument("--pgvector", action="store_true", help="sanity row: shipped HNSW arm")
     parser.add_argument("--verify", action="store_true", help="anchors only; no API calls")
     parser.add_argument("--setup-lex", default="", help="build eval_lex_<name> tables")
@@ -706,6 +711,19 @@ async def main() -> int:
         help="question set to measure; defaults to eval_questions_ko.json",
     )
     args = parser.parse_args()
+
+    # --collapse off | on | on:CAP | on:CAP:OVERFETCH | on:CAP:OVERFETCH:jo|hang
+    # 'on'만 쓰면 배포 형태(접기만, 자연 깊이, 항 단위)와 같다.
+    if args.collapse == "off":
+        collapse_cfg = (False, 0, 1, "hang")
+    else:
+        parts = args.collapse.split(":")
+        collapse_cfg = (
+            True,
+            int(parts[1]) if len(parts) > 1 else 1,
+            int(parts[2]) if len(parts) > 2 else 1,
+            parts[3] if len(parts) > 3 else "hang",
+        )
 
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -721,7 +739,11 @@ async def main() -> int:
     questions = fixture["questions"]
     env_settings = get_settings()
 
-    engine = create_async_engine(env_settings.database_url.replace("@postgres:", "@127.0.0.1:"))
+    # 호스트에서 돌리면 published 포트(127.0.0.1)로, 컨테이너 안에서 돌리면 그대로.
+    db_url = env_settings.database_url
+    if not Path("/.dockerenv").exists():
+        db_url = db_url.replace("@postgres:", "@127.0.0.1:")
+    engine = create_async_engine(db_url)
     maker = async_sessionmaker(engine, expire_on_commit=False)
 
     async with maker() as session:
@@ -991,6 +1013,11 @@ async def main() -> int:
                                         label += f"/r{n_retry}"
                                     if rerank_model:
                                         label += "/rr"
+                                    if collapse_cfg[0]:
+                                        label += (
+                                            f"/col{collapse_cfg[1]}x{collapse_cfg[2]}"
+                                            f"{collapse_cfg[3]}"
+                                        )
                                     label += f"/{mode}"
                                     await measure_row(
                                         label, session, provider, settings, questions, groups,
@@ -1002,6 +1029,7 @@ async def main() -> int:
                                         limit=limit, rrf_k=rrf_k, show=args.show, floor=floor,
                                         query_cost=query_cost.get(dense_name, 0.0),
                                         fuse=reciprocal_rank_fusion,
+                                        collapse_cfg=collapse_cfg,
                                     )
 
         if args.pgvector and dense_keys:
@@ -1035,11 +1063,35 @@ async def measure_row(
     label, session, provider, settings, questions, groups, pages, docs, meta,
     dense_indexes, dense_vectors, sparse_arms, *, arm, dense_name, sparse_name,
     weight, n_expand, rerank_model, mode, top_n, limit, rrf_k, show, query_cost, fuse,
-    floor=0.0, n_retry=0,
+    floor=0.0, n_retry=0, collapse_cfg=(False, 0, 1),
 ) -> None:
     from app.chat.service import evidence_is_weak
     from app.core.tokens import count_tokens
+    from app.retrieval.collapse import GroupInfo, fuse_groups, group_key
     from app.retrieval.evidence import chunk_to_evidence
+
+    do_collapse, member_cap, overfetch, granularity = collapse_cfg
+
+    def collapse_keys(rankings: list[list[str]]) -> dict[str, str]:
+        keys: dict[str, str] = {}
+        for ranking in rankings:
+            for cid in ranking:
+                if cid in keys or cid not in meta:
+                    continue
+                row = meta[cid]
+                md = row.chunk_metadata or {}
+                if granularity == "jo" and md.get("strategy") == "hierarchical" and md.get("path"):
+                    # 'jo': 조 단위 접기 - 기각된 변형이지만 스윕 재현용으로 남긴다.
+                    keys[cid] = f"{row.document_id}#p:{md['path'].split('/', 1)[0]}"
+                else:
+                    # 'hang': 제품과 같은 키 (전체 경로 - 배포 형태).
+                    keys[cid] = group_key(
+                        cid,
+                        GroupInfo(
+                            str(row.document_id), md.get("strategy"), md.get("path"), row.section
+                        ),
+                    )
+        return keys
 
     per_group = defaultdict(lambda: defaultdict(list))
     for entry in questions:
@@ -1062,21 +1114,33 @@ async def measure_row(
             # measures a field this harness never sets.
             dense_seen: set[str] = set()
             sparse_seen: set[str] = set()
+            # 붕괴가 켜지면 각 팔이 overfetch배 깊게 가져온다 - 제품의
+            # hybrid_search와 같은 모양 (app/retrieval/collapse.py).
+            fetch = limit * overfetch if do_collapse else limit
             for variant in queries:
                 if arm in ("dense", "hybrid") and dense_name != "none":
                     vector = dense_vectors[dense_name].get(variant)
                     if vector is None:
                         vector = (await _embed_one(dense_name, variant, settings))
-                    rankings.append(dense_indexes[dense_name].search(vector, limit))
+                    rankings.append(dense_indexes[dense_name].search(vector, fetch))
                     dense_seen.update(rankings[-1])
                     row_weights.append(1.0)
                     cost += query_cost
                 if arm in ("sparse", "hybrid") and sparse_name != "none":
-                    rankings.append(await sparse_arms[sparse_name](session, variant, limit))
+                    rankings.append(await sparse_arms[sparse_name](session, variant, fetch))
                     sparse_seen.update(rankings[-1])
                     row_weights.append(weight)
 
-            fused = fuse(rankings, k=rrf_k, weights=row_weights)[:limit] if rankings else []
+            if do_collapse and rankings:
+                folded = fuse_groups(
+                    rankings, k=rrf_k, weights=row_weights,
+                    keys=collapse_keys(rankings), member_cap=member_cap,
+                )[:limit]
+                fused = [(g.chunk_id, g.score) for g in folded]
+                members_of = {g.chunk_id: g.members for g in folded}
+            else:
+                fused = fuse(rankings, k=rrf_k, weights=row_weights)[:limit] if rankings else []
+                members_of = {cid: (cid,) for cid, _ in fused}
             selected = [cid for cid, _ in fused]
             # THE RELEVANCE FLOOR, applied exactly where hybrid_search applies it:
             # after fusion, before anything is loaded or reranked.
@@ -1112,13 +1176,17 @@ async def measure_row(
             # `hybrid_search` computes it at, and the reason this harness had to
             # stop reading it off the delivered items: on the colloquial set the
             # corroborated chunk lands at fused rank 8-9 and top_n=5 hides it.
-            any_corr = any(c in dense_seen and c in sparse_seen for c in fused_scores)
+            def corroborated_group(cid: str) -> bool:
+                ms = members_of.get(cid, (cid,))
+                return any(m in dense_seen for m in ms) and any(m in sparse_seen for m in ms)
+
+            any_corr = any(corroborated_group(c) for c in fused_scores)
             # Stamped HERE, not at the scoring site, because the retry decision
             # below reads exactly the fields the clarify column reads.
             for chunk, cid in zip(chunks, selected, strict=False):
                 chunk.rrf_score = fused_scores.get(cid, 0.0)
                 chunk.variants = len(queries)
-                chunk.corroborated = cid in dense_seen and cid in sparse_seen
+                chunk.corroborated = corroborated_group(cid)
                 chunk.candidates_corroborated = any_corr
                 chunk.vector_rank = vector_rank.get(cid)
                 chunk.keyword_rank = keyword_rank.get(cid)

@@ -9,6 +9,7 @@ from app.core.logging import log_event
 from app.llm.base import LLMProvider
 from app.models.chunk import Chunk
 from app.models.document import Document
+from app.retrieval.collapse import GroupInfo, fuse_groups, group_key
 from app.retrieval.evidence import Evidence, RetrievedChunk, chunk_to_evidence
 from app.retrieval.expansion import expand_query
 from app.retrieval.keyword_search import keyword_search
@@ -31,6 +32,29 @@ async def _load_chunks(db: AsyncSession, chunk_ids: list[str]) -> dict[str, tupl
         )
     ).all()
     return {str(chunk.id): (chunk, filename) for chunk, filename in rows}
+
+
+async def _load_group_keys(db: AsyncSession, chunk_ids: set[str]) -> dict[str, str]:
+    """융합 그룹 키. 색인이 이미 저장한 사실(전략·경로·섹션)만 읽는다."""
+    if not chunk_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(
+                Chunk.id,
+                Chunk.document_id,
+                Chunk.chunk_metadata["strategy"].astext,
+                Chunk.chunk_metadata["path"].astext,
+                Chunk.section,
+            ).where(Chunk.id.in_([uuid.UUID(cid) for cid in chunk_ids]))
+        )
+    ).all()
+    return {
+        str(cid): group_key(
+            str(cid), GroupInfo(str(document_id), strategy, path, section)
+        )
+        for cid, document_id, strategy, path, section in rows
+    }
 
 
 def _ranks(ids: list[str]) -> dict[str, int]:
@@ -65,6 +89,7 @@ async def hybrid_search(
     query_expansion_timeout: float = 8.0,
     sparse_tokenizer: str = "simple",
     evidence_floor: float = 0.0,
+    collapse: bool = False,
 ) -> list[Evidence]:
     """Query -> (dense + sparse) -> RRF -> rerank -> top-N -> expand -> Evidence.
 
@@ -133,6 +158,10 @@ async def hybrid_search(
     # - which today is every caller.
     dense_seen: set[str] = set()
     sparse_seen: set[str] = set()
+    # Collapse does NOT dig deeper. Overfetching so folded groups could pool
+    # deep members was measured and rejected - two arms agreeing at mid-rank
+    # started beating one arm's rank-1 truth, the same failure that pins
+    # RETRIEVAL_CANDIDATE_LIMIT at 10 (app/retrieval/collapse.py has the table).
     for variant, embedding in zip(variants, embeddings, strict=True):
         hits = await vector_store.search(embedding, candidate_limit, collection_ids)
         rankings.append([hit.chunk_id for hit in hits])
@@ -149,7 +178,25 @@ async def hybrid_search(
     # default here is 1.0, plain RRF, so this function keeps its textbook
     # behaviour for a caller that says nothing; the application wiring in
     # chat/service.py is what opts into anything else.
-    fused = reciprocal_rank_fusion(rankings, k=rrf_k, weights=weights)[:candidate_limit]
+    #
+    # `collapse` swaps the fusion for the same arithmetic OVER GROUPS
+    # (app/retrieval/collapse.py). `members_of` is what corroboration reads:
+    # the dense arm finding one chunk of a section and the keyword arm finding a
+    # DIFFERENT chunk of the same section is agreement about the section, and
+    # chunk-identity corroboration structurally could not see it. Off, every
+    # group is its own chunk and every judgement below is byte-identical.
+    if collapse:
+        keys = await _load_group_keys(
+            db, {chunk_id for ranking in rankings for chunk_id in ranking}
+        )
+        groups = fuse_groups(rankings, k=rrf_k, weights=weights, keys=keys)[
+            :candidate_limit
+        ]
+        fused = [(group.chunk_id, group.score) for group in groups]
+        members_of = {group.chunk_id: group.members for group in groups}
+    else:
+        fused = reciprocal_rank_fusion(rankings, k=rrf_k, weights=weights)[:candidate_limit]
+        members_of = {chunk_id: (chunk_id,) for chunk_id, _ in fused}
     # THE RELEVANCE FLOOR: drop candidates nothing actually liked, and return
     # FEWER than top_n rather than padding the answer's context to fill it.
     #
@@ -185,9 +232,13 @@ async def hybrid_search(
     # diverted to the clarify prompt while bestRRF was 3-4x its threshold. The
     # question the detector asks is about the SEARCH, so it is answered where the
     # search's own candidate set is still in scope.
-    any_corroborated = any(
-        chunk_id in dense_seen and chunk_id in sparse_seen for chunk_id, _ in fused
-    )
+    def corroborated_group(chunk_id: str) -> bool:
+        members = members_of.get(chunk_id, (chunk_id,))
+        return any(m in dense_seen for m in members) and any(
+            m in sparse_seen for m in members
+        )
+
+    any_corroborated = any(corroborated_group(chunk_id) for chunk_id, _ in fused)
     # The union of two candidate_limit-long lists can be twice candidate_limit,
     # so the slice above is a real cap on what the reranker is asked to score.
     loaded = await _load_chunks(db, [chunk_id for chunk_id, _ in fused]) if fused else {}
@@ -211,7 +262,7 @@ async def hybrid_search(
                 chunk_index=chunk.chunk_index,
                 vector_rank=vector_rank.get(chunk_id),
                 keyword_rank=keyword_rank.get(chunk_id),
-                corroborated=chunk_id in dense_seen and chunk_id in sparse_seen,
+                corroborated=corroborated_group(chunk_id),
                 candidates_corroborated=any_corroborated,
                 variants=len(variants),
                 rrf_score=score,
@@ -265,6 +316,7 @@ async def hybrid_search(
         rankings=len(rankings),
         candidates=len(candidates),
         floored=evidence_floor,
+        collapsed=collapse,
         reranked=reranker is not None,
         corroborated=any_corroborated,
         documents=len({chunk.document_id for chunk in selected}),

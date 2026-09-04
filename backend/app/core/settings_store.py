@@ -260,6 +260,15 @@ ENV_ONLY_SETTINGS: list[EnvOnlySetting] = [
         ),
     ),
     EnvOnlySetting(
+        key="RETRIEVAL_COLLAPSE",
+        label="그룹 붕괴 융합",
+        reason=(
+            "켜짐/꺼짐 값이라 이 화면의 숫자 입력 칸으로는 다룰 수 없습니다. 같은 조문이나 같은 "
+            "분류표 섹션의 청크들이 검색 순위에서 표를 나눠 갖지 않도록 그룹 단위로 융합하는 "
+            "단계이며, scripts/eval_retrieval.py 로 측정한 뒤 환경변수로 바꿉니다."
+        ),
+    ),
+    EnvOnlySetting(
         key="RERANK_MODEL",
         label="재순위 모델",
         reason=(

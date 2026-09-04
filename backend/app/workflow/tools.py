@@ -163,6 +163,11 @@ class RagTool(Tool):
                 # prevent. hybrid_search reads [] as an IN () predicate that
                 # matches no row, which is the truthful answer.
                 collection_ids=list(self.collection_ids),
+                # 질의 측 토크나이저는 인덱스를 만든 토크나이저와 같아야 한다.
+                # 이 인자를 빠뜨리면 bigram 인덱스를 'simple'로 조회해 sparse
+                # 팔이 조용히 죽는다 - 실제로 이 호출부가 빠뜨리고 있었다.
+                sparse_tokenizer=ctx.settings.sparse_tokenizer,
+                collapse=ctx.settings.retrieval_collapse,
             )
 
 
