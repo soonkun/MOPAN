@@ -9,6 +9,7 @@ it.
 """
 
 import logging
+import re
 import uuid
 
 from sqlalchemy import delete, select
@@ -16,8 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chunk import Chunk
 from app.models.chunk_edge import ChunkEdge
+from app.models.document import Document
 from app.rag.chunking.base import ChunkCandidate
 from app.rag.chunking.hierarchy import (
+    Citation,
     Scheme,
     find_citations,
     parse_key,
@@ -31,6 +34,74 @@ logger = logging.getLogger("mopan.references")
 # screen. The COUNT is the metric; a handful of examples is what turns "189
 # unresolved" into "[민법950] - you have not uploaded 민법".
 UNRESOLVED_EXAMPLES = 5
+
+
+def _path_index(keys: list[str | None], scheme: Scheme) -> dict[str, int]:
+    """문서 순서의 path 키 목록 -> 각 경로를 여는 첫 위치.
+
+    path -> the FIRST piece that carries it. A run longer than the size bound
+    ships as several chunks all holding the same path; a citation to that clause
+    wants the piece that opens it, the one carrying the clause's own first
+    sentence.
+
+    A path TWO runs opened is AMBIGUOUS and resolves to nothing. 상표심사기준
+    prints 【상표법】 제28조 and 【상표법시행규칙】 제28조, and the citing chunk
+    almost never spells out which law it means. MEASURED, in a live answer
+    before this guard: the 시행규칙 chunk's own "제28조" attached 상표법 제28조
+    (서류 제출의 효력 발생 시기) as the definition of what goes on the form. A
+    WRONG provision is worse than a missing one. The longest-prefix walk in
+    `resolve_citation` still rescues "제28조제2항" when only one 제28조 has a
+    제2항.
+
+    A PATH NO CHUNK OPENS resolves to the first chunk that opens under it.
+    특허법 writes 제36조 as a bare heading with the text entirely in its 항, so
+    "제36조" as a citation lands on the piece opening 제36조제1항. MEASURED
+    before this existed: 3,026 of 5,923 resolved edges landed on heading-only
+    chunks - half of every citation delivered was an article TITLE.
+    """
+    index: dict[str, int] = {}
+    ambiguous: set[str] = set()
+    for position, key in enumerate(keys):
+        if not key:
+            continue
+        if key in index:
+            ambiguous.add(key)
+            continue
+        index[key] = position
+
+    opened = set(index)
+    previous: tuple[tuple[str, str], ...] = ()
+    for position, key in enumerate(keys):
+        path = parse_key(key or "", scheme)
+        if not path:
+            continue
+        for cut in range(1, len(path)):
+            prefix = path_key(path[:cut])
+            if prefix in opened or previous[:cut] == path[:cut]:
+                continue
+            if prefix in index:
+                ambiguous.add(prefix)
+            else:
+                index[prefix] = position
+        previous = path
+
+    for key in ambiguous:
+        index.pop(key, None)
+    return index
+
+
+def _document_title(filename: str) -> str:
+    """파일명 -> 정규화된 제목. "특허법 시행규칙.html" -> "특허법시행규칙"."""
+    return re.sub(r"\s+", "", re.sub(r"\.[A-Za-z0-9]+$", "", filename))
+
+
+def _resolve_in(index: dict[str, int], path: tuple[tuple[str, str], ...]) -> int | None:
+    """가장 긴 접두가 실제로 열려 있는 위치. resolve_citation 규칙 3과 같다."""
+    for cut in range(len(path), 0, -1):
+        position = index.get(path_key(path[:cut]))
+        if position is not None:
+            return position
+    return None
 
 
 async def build_edges(
@@ -55,72 +126,14 @@ async def build_edges(
     ).all()
     by_index = {index: chunk_id for chunk_id, index in rows}
 
-    # path -> the FIRST piece that carries it. A run longer than the size bound
-    # ships as several chunks all holding the same path; a citation to that clause
-    # wants the piece that opens it, which is the one carrying the clause's own
-    # first sentence.
-    index: dict[str, int] = {}
-    # A path that TWO runs opened. 상표심사기준 prints 【상표법】 제28조 and
-    # 【상표법시행규칙】 제28조, and the citing chunk almost never spells out which
-    # law it means - so "조28" names two different provisions and there is no
-    # deterministic way to pick one.
-    #
-    # MEASURED, in a live answer before this guard: the 시행규칙 chunk's own
-    # "제28조" attached 상표법 제28조(서류 제출의 효력 발생 시기) - a rule about when a
-    # filing takes effect, delivered to the model as the definition of what goes on
-    # the form. A WRONG provision is worse than a missing one, so an ambiguous key
-    # resolves to nothing and the unresolved count says so on screen.
-    #
-    # The longest-prefix walk in `resolve_citation` still rescues the specific
-    # case: "제28조제2항" resolves fine when only one of the two 제28조 has a 제2항.
-    ambiguous: set[str] = set()
-    for position, candidate in enumerate(candidates):
-        key = candidate.metadata.get("path")
-        if not key:
-            continue
-        if key in index:
-            ambiguous.add(key)
-            continue
-        index[key] = position
-
-    # A PATH NO CHUNK OPENS resolves to the first chunk that opens under it.
-    # 특허법 writes 제36조 as a bare heading and puts the article's text entirely in
-    # its 항, so `hierarchy.walk` no longer emits a chunk for 제36조 itself, and
-    # "제36조" as a citation has to land on the piece that opens 제36조제1항 - which
-    # is where 그 조 begins and the only place its words are.
-    #
-    # MEASURED before this existed: of the corpus's 5,923 RESOLVED `ref` edges,
-    # 3,026 landed on a heading-only chunk, so half of every citation delivered to
-    # the model was an article TITLE and nothing else - and it spent one of the two
-    # MAX_REFERENCES_PER_CHUNK slots to say it.
-    #
-    # The same ambiguity rule, for the same reason: a prefix TWO different runs
-    # produce names two provisions - 상표심사기준 prints both 【상표법】제28조 and
-    # 【상표법시행규칙】제28조 - and resolves to neither. "Different" means the
-    # previous chunk carrying a path did not already sit under it, so the several
-    # 항 of one 조 register it once.
-    opened = set(index)
-    previous: tuple[tuple[str, str], ...] = ()
-    for position, candidate in enumerate(candidates):
-        path = parse_key(candidate.metadata.get("path") or "", scheme)
-        if not path:
-            continue
-        for cut in range(1, len(path)):
-            key = path_key(path[:cut])
-            if key in opened or previous[:cut] == path[:cut]:
-                continue
-            if key in index:
-                ambiguous.add(key)
-            else:
-                index[key] = position
-        previous = path
-
-    for key in ambiguous:
-        index.pop(key, None)
+    index = _path_index([candidate.metadata.get("path") for candidate in candidates], scheme)
 
     edges: list[dict] = []
     found = resolved = 0
     unresolved_examples: list[str] = []
+    # 법명이 명시된 인용(「특허법」 제3조 …)은 이 문서의 인덱스로는 해소할 수
+    # 없다. 모아 뒀다가 아래에서 코퍼스의 그 법령 문서에 대고 해소한다.
+    external: list[tuple[uuid.UUID, Citation]] = []
 
     for position, candidate in enumerate(candidates):
         src = by_index.get(position)
@@ -158,6 +171,9 @@ async def build_edges(
         # reachable from this chunk", not of "citations in the document".
         for citation in find_citations(candidate.content, scheme):
             found += 1
+            if citation.law:
+                external.append((src, citation))
+                continue
             target = resolve_citation(citation, source_path, index, scheme)
             destination = by_index.get(target) if target is not None else None
             if destination == src:
@@ -172,6 +188,81 @@ async def build_edges(
             if destination is not None:
                 resolved += 1
             elif len(unresolved_examples) < UNRESOLVED_EXAMPLES and citation.label not in unresolved_examples:
+                unresolved_examples.append(citation.label)
+            edges.append(
+                {
+                    "id": uuid.uuid4(),
+                    "document_id": document_id,
+                    "src_chunk_id": src,
+                    "dst_chunk_id": destination,
+                    "kind": "ref",
+                    "label": citation.label[:200],
+                    "target_path": path_key(citation.path),
+                }
+            )
+
+    # ---- 문서 간 해소 -------------------------------------------------------
+    # 문서↔법령 동일성은 추측이 아니라 파일명이다: 정규화한 파일명("특허법
+    # 시행규칙.html" -> "특허법시행규칙")이 인용된 법명과 같을 때만 잇는다.
+    # 같은 제목의 문서가 둘이면 모호이므로 잇지 않는다 - 잘못된 조문은 없는
+    # 조문보다 나쁘다는, 같은 문서 안 모호 규칙과 같은 비대칭.
+    #
+    # 이것이 chunk_edges에 문서 간 간선이 생기는 유일한 경로다. 이 간선이
+    # 생기기 전에는 "「특허법」 제80조 … 를 준용한다"는 실용신안법 선언이
+    # 그래프 어디에도 없었고, 역방향 걷기(retrieval/references.py의 _CITERS)가
+    # 걸을 것도 없었다.
+    if external:
+        docs = (await db.execute(select(Document.id, Document.filename))).all()
+        titles: dict[str, uuid.UUID | None] = {}
+        own_title = ""
+        for doc_id, filename in docs:
+            title = _document_title(filename)
+            if doc_id == document_id:
+                own_title = title
+            titles[title] = None if title in titles else doc_id
+
+        # 대상 문서의 path 인덱스는 법령당 한 번만 만든다.
+        target_cache: dict[uuid.UUID, tuple[dict[str, int], dict[int, uuid.UUID]]] = {}
+
+        async def target_index(doc_id: uuid.UUID) -> tuple[dict[str, int], dict[int, uuid.UUID]]:
+            cached = target_cache.get(doc_id)
+            if cached is None:
+                target_rows = (
+                    await db.execute(
+                        select(Chunk.id, Chunk.chunk_metadata["path"].astext)
+                        .where(Chunk.document_id == doc_id)
+                        .order_by(Chunk.chunk_index)
+                    )
+                ).all()
+                cached = (
+                    _path_index([key for _, key in target_rows], scheme),
+                    {i: chunk_id for i, (chunk_id, _) in enumerate(target_rows)},
+                )
+                target_cache[doc_id] = cached
+            return cached
+
+        for src, citation in external:
+            law = re.sub(r"\s+", "", citation.law)
+            destination = None
+            if law == own_title:
+                # 자기 법을 낫표로 부른 경우 - 자기 인덱스로 해소한다.
+                position = _resolve_in(index, citation.path)
+                destination = by_index.get(position) if position is not None else None
+            else:
+                target_doc = titles.get(law)
+                if target_doc is not None:
+                    target_paths, target_ids = await target_index(target_doc)
+                    position = _resolve_in(target_paths, citation.path)
+                    destination = target_ids.get(position) if position is not None else None
+            if destination == src:
+                found -= 1
+                continue
+            if destination is not None:
+                resolved += 1
+            elif (
+                len(unresolved_examples) < UNRESOLVED_EXAMPLES
+                and citation.label not in unresolved_examples
+            ):
                 unresolved_examples.append(citation.label)
             edges.append(
                 {

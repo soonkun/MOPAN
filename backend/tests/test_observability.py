@@ -431,6 +431,9 @@ async def test_the_api_key_can_be_neither_read_nor_written(owner, db, app):
         # simple/bigram - also a choice, and changing it additionally invalidates
         # every stored tsvector until scripts/backfill_tsv.py has run.
         "SPARSE_TOKENIZER",
+        # 켜짐/꺼짐 - 숫자 입력 칸으로 다룰 수 없는 값. 측정과 함께 바꾸는
+        # 배포 결정이라 환경변수로만 바꾼다. app/retrieval/collapse.py 참조.
+        "RETRIEVAL_COLLAPSE",
         # A model name, and "" means the rerank stage is absent from the call
         # path. It is listed so the screen SAYS the stage exists and is off,
         # rather than leaving the user to infer it from silence.

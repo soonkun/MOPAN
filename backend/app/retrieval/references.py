@@ -45,6 +45,26 @@ REFERENCE_DEPTH = 1
 # token budget would then be spent by whichever item happened to rank first.
 MAX_REFERENCES_PER_CHUNK = 2
 
+# ---- 역방향: 이 청크를 인용하는 쪽 ------------------------------------------
+#
+# 준용이 사는 방향이다. "제80조, 제81조 … 를 준용한다"라고 선언하는 실용신안법
+# 제20조는 조문 번호 나열뿐이라 질문과 겹치는 어휘가 없어 검색으로는 영원히
+# 도달하지 못하고, 정방향 걷기(인용하는 쪽 -> 인용되는 쪽)로도 닿지 않는다 -
+# 특허법 조문이 선택됐을 때 필요한 것은 그 조문을 인용하는 선언문이다.
+#
+# 정방향보다 훨씬 엄격하게 제한하는 이유는 허브다: 인기 조문은 수십 곳에서
+# 인용된다. 한국 법령 QA 연구(SearchFireSafety, arXiv 2604.06173)가 인용 그래프
+# 전파에 in-degree 페널티를 두지 않으면 허브가 결과를 다시 독점한다고 측정했다.
+#
+# - 문서가 다른 인용자만 본다. 같은 문서 안의 문맥은 조상 접두와 이웃 확장이
+#   이미 나른다. 준용은 정의상 다른 법을 가리킨다.
+# - 피인용이 과다한 청크(허브)는 역방향을 아예 붙이지 않는다. 수십 개 중
+#   하나를 고르는 것은 어떤 규칙이든 자의적이다.
+# - 인용자 중에서는 나가는 ref 간선이 많은 쪽을 고른다. 준용 선언은 조문
+#   번호의 목록이라 out-degree가 크고, 해설 문단은 한둘이다.
+MAX_CITERS_PER_CHUNK = 1
+CITER_HUB_LIMIT = 8
+
 # The recursive walk. Depth 1 is every 'ref' edge out of a retrieved chunk; each
 # further round follows the refs of what the previous round reached. `visited`
 # carries the whole path so a citation cycle - 제1조 cites 제2조 cites 제1조, which
@@ -76,6 +96,25 @@ SELECT DISTINCT ON (w.root, w.chunk_id)
 """
 )
 
+# 역방향 후보 전부: 선택된 청크를 인용하는, 다른 문서의 청크들. 인용자마다
+# 나가는 ref 간선 수(out_degree)를 함께 가져와 파이썬 쪽에서 허브 판정과
+# 우선순위를 정한다 - 후보 수는 root당 많아야 수십이고, 허브 판정에는 어차피
+# 전체 개수가 필요하다.
+_CITERS = text(
+    """
+SELECT e.dst_chunk_id AS root, e.src_chunk_id AS chunk_id, e.label,
+       c.content, c.page, c.chunk_index,
+       (SELECT count(*) FROM chunk_edges o
+         WHERE o.src_chunk_id = e.src_chunk_id AND o.kind = 'ref') AS out_degree
+  FROM chunk_edges e
+  JOIN chunks c ON c.id = e.src_chunk_id
+  JOIN chunks target ON target.id = e.dst_chunk_id
+ WHERE e.kind = 'ref'
+   AND e.dst_chunk_id = ANY(:roots)
+   AND c.document_id <> target.document_id
+"""
+)
+
 
 async def attach(
     db: AsyncSession,
@@ -102,12 +141,17 @@ async def attach(
         return
     roots = [uuid.UUID(chunk.chunk_id) for chunk in selected]
     rows = (await db.execute(_WALK, {"roots": roots, "depth": depth})).all()
-    if not rows:
+    citer_rows = (await db.execute(_CITERS, {"roots": roots})).all()
+    if not rows and not citer_rows:
         return
 
     by_root: dict[str, list] = {}
     for row in rows:
         by_root.setdefault(str(row.root), []).append(row)
+
+    citers_by_root: dict[str, list] = {}
+    for row in citer_rows:
+        citers_by_root.setdefault(str(row.root), []).append(row)
 
     total = (
         FENCE_RESERVE_TOKENS
@@ -153,6 +197,42 @@ async def attach(
         chunk.content = "\n".join([chunk.content, *parts])
         chunk.neighbors = [*chunk.neighbors, *merged]
         attached += 1
+
+    # 역방향 - 정방향이 예산을 먼저 쓴 뒤에. 저자가 명시적으로 가리킨 것이
+    # 이 청크를 가리키는 남보다 더 하중을 진다는, 정방향과 같은 판단.
+    for chunk in selected:
+        citers = citers_by_root.get(chunk.chunk_id)
+        if not citers:
+            continue
+        if len(citers) > CITER_HUB_LIMIT:
+            # 허브: 수십 곳이 인용하는 조문에서 하나를 고르는 것은 어떤
+            # 규칙이든 자의적이고, 자의적인 부착은 잡음이다. 붙이지 않는다.
+            continue
+        already = {note.get("chunk_id") for note in chunk.neighbors}
+        citers.sort(key=lambda row: (-row.out_degree, row.chunk_index))
+        for row in citers[:MAX_CITERS_PER_CHUNK]:
+            if str(row.chunk_id) in already or any(
+                other.chunk_id == str(row.chunk_id) for other in selected
+            ):
+                continue
+            body = f"[이 조문을 인용: {row.label}] {row.content}"
+            cost = count_tokens(body) + 1
+            if total + cost > token_budget:
+                continue
+            total += cost
+            chunk.content = "\n".join([chunk.content, body])
+            chunk.neighbors = [
+                *chunk.neighbors,
+                {
+                    "chunk_id": str(row.chunk_id),
+                    "chunk_index": row.chunk_index,
+                    "offset": 0,
+                    "page": row.page,
+                    "reason": f"cited-by:{row.label}",
+                    "tokens": count_tokens(body),
+                },
+            ]
+            attached += 1
 
     if attached:
         logger.debug("attached references to %d of %d chunks", attached, len(selected))

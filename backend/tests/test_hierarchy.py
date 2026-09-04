@@ -742,3 +742,119 @@ async def test_a_document_with_no_edges_is_left_alone(db, collection, tmp_path):
 
     assert [item.content for item in items] == before
     assert all(item.neighbors == [] for item in items)
+
+
+# --- 법명 스코프와 문서 간 해소 ----------------------------------------------
+
+
+def test_citations_after_a_bracketed_law_name_belong_to_that_law():
+    """"「특허법」 제3조부터 제7조까지, 제28조의 규정을 준용한다" - 낫표 뒤의 조문
+    인용은 전부 그 법의 것이다. 실용신안법 제3조의 실제 문형이고, 이 귀속이
+    없으면 준용 선언은 영원히 자기 문서 안에서만 해소를 시도한다."""
+    text = "실용신안에 관하여는 「특허법」 제3조부터 제7조까지, 제28조의 규정을 준용한다."
+
+    cites = {c.label: c for c in find_citations(text, SCHEME)}
+
+    assert cites["「특허법」 제3조"].law == "특허법"
+    assert cites["「특허법」 제7조"].law == "특허법"
+    assert cites["「특허법」 제28조"].law == "특허법"
+    assert all(not c.relative for c in cites.values())
+
+
+def test_the_law_scope_ends_at_이_법():
+    """"…「특허법」 제64조에 따라 출원공개되거나 이 법 제21조제3항에 따라…" -
+    실측 문장. "이 법"이 스코프를 되돌리지 않으면 제21조가 특허법 것으로 붙고,
+    잘못된 조문은 없는 조문보다 나쁘다."""
+    text = "「특허법」 제64조에 따라 출원공개되거나 이 법 제21조제3항에 따라 등록공고된 것"
+
+    cites = {tuple(c.path): c for c in find_citations(text, SCHEME)}
+
+    assert cites[(("조", "64"),)].law == "특허법"
+    assert cites[(("조", "21"), ("항", "3"))].law == ""
+
+
+def test_a_relative_reference_inside_a_law_scope_stays_relative():
+    """조 없는 제N항은 낯선 법에 결정론적으로 붙을 자리가 없다 - 스코프가
+    열려 있어도 상대참조는 자기 문서의 조에 대고 해소된다."""
+    text = "「특허법」 제64조를 준용한다. 제1항의 요건을 갖추어야 한다."
+
+    relative = next(c for c in find_citations(text, SCHEME) if c.relative)
+
+    assert relative.law == ""
+
+
+PATENT_ACT = "\n".join(
+    [
+        "제1장 총칙",
+        "제64조(출원공개) ① 지식재산처장은 출원일부터 1년 6개월이 지나면 출원공개를 하여야 한다.",
+        "제65조(보상금청구권) ① 출원인은 경고 후 보상금을 청구할 수 있다.",
+    ]
+)
+
+UM_ACT = "\n".join(
+    [
+        "제1장 총칙",
+        "제20조(「특허법」의 준용) 실용신안의 출원공개에 관하여는 「특허법」 제64조를 준용한다.",
+        "제21조(등록공고) 지식재산처장은 등록공고를 하여야 한다.",
+    ]
+)
+
+
+@pytest_asyncio.fixture
+async def two_statutes(db, collection, tmp_path):
+    # 픽스처가 판정 최소 블록 수보다 작으므로 성격을 명시한다 - 검사 대상은
+    # 판정이 아니라 문서 간 해소다.
+    override = {"override": "reference_dependent"}
+    patent = await _upload(db, collection, tmp_path, PATENT_ACT, "특허법.txt", structure=override)
+    await _process(db, patent, RecordingFixed(chunk_size=200, overlap=20))
+    um = await _upload(db, collection, tmp_path, UM_ACT, "실용신안법.txt", structure=override)
+    await _process(db, um, RecordingFixed(chunk_size=200, overlap=20))
+    return {
+        "patent": {"document": patent, "chunks": await _chunks(db, patent)},
+        "um": {"document": um, "chunks": await _chunks(db, um)},
+    }
+
+
+async def test_a_citation_naming_a_law_in_the_corpus_crosses_documents(db, two_statutes):
+    """문서↔법령 동일성은 추측이 아니라 파일명이다: "특허법.txt"가 코퍼스에
+    있으므로 「특허법」 제64조는 그 문서의 조64를 여는 청크에 잇는다. 이 간선이
+    생기기 전에는 코퍼스의 문서 간 해소 간선이 정확히 0개였다."""
+    declaring = next(c for c in two_statutes["um"]["chunks"] if "준용한다" in c.content)
+    target = next(c for c in two_statutes["patent"]["chunks"] if "출원공개를 하여야" in c.content)
+
+    edge = (
+        await db.execute(
+            select(ChunkEdge).where(
+                ChunkEdge.src_chunk_id == declaring.id,
+                ChunkEdge.label == "「특허법」 제64조",
+            )
+        )
+    ).scalar_one()
+
+    assert edge.kind == "ref"
+    assert edge.dst_chunk_id == target.id
+
+
+async def test_a_provision_arrives_with_the_declaration_that_준용s_it(db, two_statutes):
+    """역방향. 준용 선언("「특허법」 제64조를 준용한다")은 조문 번호 나열이라
+    질문과 겹치는 어휘가 없어 검색으로 도달하지 못한다 - 특허법 조문이 선택되면
+    그것을 인용하는 다른 법의 선언이 함께 도착해야 실용신안 질문에 그 조문을
+    쓸 수 있다는 사실이 모델에게 전해진다."""
+    target = next(c for c in two_statutes["patent"]["chunks"] if "출원공개를 하여야" in c.content)
+    declaring = next(c for c in two_statutes["um"]["chunks"] if "준용한다" in c.content)
+    item = RetrievedChunk(
+        chunk_id=str(target.id),
+        document_id=str(target.document_id),
+        filename="특허법.txt",
+        content=target.content,
+        page=target.page,
+        section=target.section,
+        chunk_index=target.chunk_index,
+    )
+
+    await attach(db, [item], token_budget=WIDE_BUDGET, query="실용신안 출원공개")
+
+    assert "[이 조문을 인용: 「특허법」 제64조]" in item.content
+    assert "준용한다" in item.content
+    reverse = [n for n in item.neighbors if str(n["reason"]).startswith("cited-by:")]
+    assert [n["chunk_id"] for n in reverse] == [str(declaring.id)]

@@ -165,6 +165,14 @@ PRESETS: dict[str, dict] = {
             # comma list is taken.
             r"\[(?P<law>[가-힣]{2,12})\s*(?P<조>\d+(?:의\d+)?)" r"(?:\s*\(\s*(?P<항>\d+)\s*\))?\]?",
         ],
+        # LAW SCOPE. 법령이 다른 법을 인용할 때는 법명을 낫표에 넣고
+        # ("「특허법」 제3조부터 제7조까지 … 준용한다") 그 뒤의 조문 인용들이
+        # 전부 그 법의 것이다. 스코프는 다음 낫표 제목이나 "이 법"에서 끝난다 -
+        # "…「특허법」 제64조에 따라 출원공개되거나 이 법 제21조제3항에 따라…"
+        # 에서 제21조는 자기 법으로 돌아온다. 실측 문장이고, 이 리셋이 없으면
+        # 제21조가 특허법 것으로 붙는다. 잘못된 조문은 없는 조문보다 나쁘다.
+        "law_scope": r"「([^」]{2,40})」",
+        "law_scope_reset": r"이\s*법(?![가-힣])",
         # How the ancestor line reads. `{path}` is the joined ancestors.
         "ancestor_template": "{path}",
         "separator": " > ",
@@ -244,6 +252,9 @@ class Scheme:
     separator: str = " > "
     ancestor_template: str = "{path}"
     preset: str = ""
+    # 법명 스코프: 그룹 1이 법명이다. None이면 이 번호체계에 그런 관습이 없다.
+    law_scope: re.Pattern[str] | None = None
+    law_scope_reset: re.Pattern[str] | None = None
 
     def index(self, name: str) -> int:
         return next(i for i, level in enumerate(self.levels) if level.name == name)
@@ -313,7 +324,13 @@ def resolve_scheme(config: dict | None) -> Scheme | None:
         raise ValueError(f"`break_level` {break_level!r} is not one of {names}")
 
     citations = tuple(_compile(str(pattern), "citation") for pattern in (merged.get("citations") or []))
+    law_scope = merged.get("law_scope")
+    law_scope_reset = merged.get("law_scope_reset")
     return Scheme(
+        law_scope=_compile(str(law_scope), "law_scope") if law_scope else None,
+        law_scope_reset=(
+            _compile(str(law_scope_reset), "law_scope_reset") if law_scope_reset else None
+        ),
         levels=tuple(levels),
         addressable=addressable,
         break_index=names.index(break_level),
@@ -503,6 +520,26 @@ def find_citations(text: str, scheme: Scheme) -> list[Citation]:
     A citation's DEPTH is whatever groups it filled - that is the whole reason
     there is no depth setting. `제12조` fills the 조 group and stops; `제1조제1항` fills 조 and 항.
     """
+    # 법명 스코프. "「특허법」 제3조부터 제7조까지 … 준용한다"의 제3조·제7조는
+    # 특허법의 것이고, 스코프는 다음 낫표 제목 또는 "이 법"에서 끝난다.
+    # 이벤트 목록(위치, 법명)을 만들어 두고 각 인용의 시작 위치로 조회한다.
+    scope_events: list[tuple[int, str]] = []
+    if scheme.law_scope is not None:
+        for scope in scheme.law_scope.finditer(text):
+            scope_events.append((scope.end(), re.sub(r"\s+", "", scope.group(1))))
+        if scheme.law_scope_reset is not None:
+            for reset in scheme.law_scope_reset.finditer(text):
+                scope_events.append((reset.end(), ""))
+        scope_events.sort()
+
+    def law_at(position: int) -> str:
+        current = ""
+        for end, name in scope_events:
+            if end > position:
+                break
+            current = name
+        return current
+
     seen: set[tuple] = set()
     out: list[Citation] = []
     spans: list[tuple[int, int]] = []
@@ -529,8 +566,16 @@ def find_citations(text: str, scheme: Scheme) -> list[Citation]:
             if not path:
                 continue
             law = groups.get("law", "")
+            label = match.group(0).strip()
+            # 자기 법명을 안 쓴 인용(제N조…)이 법명 스코프 안에 있으면 그 법의
+            # 것이다. 상대참조(조 없는 제N항)는 제외 - 낯선 법에 항만으로는
+            # 결정론적으로 붙을 자리가 없다.
+            if not law and path[0][0] == scheme.addressable[0]:
+                law = law_at(match.start())
+                if law:
+                    label = f"「{law}」 {label}"
             citation = Citation(
-                label=match.group(0).strip(),
+                label=label,
                 path=path,
                 law=law,
                 relative=not law and path[0][0] != scheme.addressable[0],
