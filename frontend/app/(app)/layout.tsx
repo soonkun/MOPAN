@@ -1,5 +1,4 @@
 import Sidebar from "@/components/layout/Sidebar";
-import ThemeToggle from "@/components/ui/ThemeToggle";
 
 // .app-shell is 100dvh with a 100vh fallback, not min-h-screen. The sidebar is a full-height column with a
 // scrolling history region and a footer pinned under it, and `main`'s
@@ -11,7 +10,6 @@ import ThemeToggle from "@/components/ui/ThemeToggle";
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="app-shell flex">
-      <ThemeToggle />
       <Sidebar />
       {/* pt-12 md:pt-0 reserves the strip the fixed hamburger occupies. It is
           part of the layout, not of each page: without it every page's first
@@ -25,7 +23,14 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           because that state lives in the Sidebar client component and this
           layout is a server component; the id keeps the coupling greppable
           instead of leaving a bare document.querySelector("main"). */}
-      <main id="app-main" className="flex-1 overflow-y-auto pt-12 md:pt-0">
+      {/* `relative`가 이중 스크롤바의 근본 수정이다. sr-only(position:absolute)
+          요소 - DataTable의 caption, 폼의 숨김 label - 는 positioned 조상이
+          없으면 컨테이닝 블록이 뷰포트(html)가 되어 main의 overflow 클리핑을
+          탈출하고, 자기 정적 위치(스크롤 내용 한가운데, 실측 /prompts 1448px ·
+          /settings 1737px)까지 문서 자체를 늘린다. 그러면 창 스크롤바가 main의
+          스크롤바와 이중으로 뜨고 셸 아래가 흰 띠가 된다. main이 positioned가
+          되면 그 요소들은 main 안에 앵커되어 문서를 늘릴 수 없다. */}
+      <main id="app-main" className="relative flex-1 overflow-y-auto pt-12 md:pt-0">
         {children}
       </main>
     </div>

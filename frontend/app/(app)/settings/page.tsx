@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
 import PageShell from "@/components/layout/PageShell";
 import ErrorBanner from "@/components/ui/ErrorBanner";
+import BrandingSection from "@/components/settings/BrandingSection";
 import type { RuntimeSetting, SettingsPayload } from "@/lib/types";
 
 // The API returns a group key, not a heading. The copy belongs on the screen,
@@ -139,6 +140,8 @@ export default function SettingsPage() {
   return (
     <PageShell>
       <h1 className="text-headline font-medium">고급 설정</h1>
+
+      <BrandingSection />
       <ErrorBanner message={loadError} />
 
       {payload === null ? (

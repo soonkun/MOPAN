@@ -194,6 +194,7 @@ async def retrieve(
 # prompt_name="clarify_agent" - which is the only record that says a question was
 # answered with a question.
 CLARIFY_PROMPT_NAME = "clarify_agent"
+SMALLTALK_PROMPT_NAME = "smalltalk_agent"
 
 
 def evidence_is_weak(items: list[Evidence], *, min_rrf_score: float) -> bool:
@@ -450,6 +451,8 @@ async def answer(
     images: list[str] | None = None,
     model: str | None = None,
     prompt_name: str = "answer_agent",
+    intent: str = "search",
+    user_nickname: str | None = None,
 ) -> ChatAnswer:
     """Deliberately knows nothing about where `evidence` came from: no session, no
     vector store, no reranker. That is the whole point of the split - Slice 3 runs
@@ -469,10 +472,29 @@ async def answer(
     #
     # Short-circuit, so CLARIFY_ON_WEAK_EVIDENCE=false costs exactly nothing: the
     # detector is not called and the clarify prompt is never loaded.
-    clarifying = settings.clarify_on_weak_evidence and evidence_is_weak(
-        evidence, min_rrf_score=settings.weak_evidence_rrf_score
-    )
-    template = await get_prompt(CLARIFY_PROMPT_NAME if clarifying else prompt_name)
+    # 의도 게이트가 "chat"으로 판정한 발화 (app/chat/intent.py). 검색이 돌지
+    # 않았으므로 근거가 빈 것이 정상이고, 그 빈 근거를 약한-근거 감지기에
+    # 넣으면 인사말이 되묻기로 샌다 - "안녕?"에 심사기준 인용이 달려 나가던
+    # 실측 실패의 절반이 정확히 그것이었다. 잡담에는 잡담 프롬프트가 답한다.
+    if intent == "chat":
+        template = await get_prompt(SMALLTALK_PROMPT_NAME)
+        # 호칭은 프롬프트 본문이 아니라 여기서 덧붙는다: 저장소의 프롬프트는
+        # 배포 공통이고, 누구에게 말하는지는 요청마다 다르다.
+        if user_nickname:
+            template = PromptTemplate(
+                name=template.name,
+                version=template.version,
+                text=(
+                    f"{template.text}\n\nThe user's nickname is "
+                    f"{user_nickname!r}; greet and address them by it, with 님."
+                ),
+            )
+        clarifying = False
+    else:
+        clarifying = settings.clarify_on_weak_evidence and evidence_is_weak(
+            evidence, min_rrf_score=settings.weak_evidence_rrf_score
+        )
+        template = await get_prompt(CLARIFY_PROMPT_NAME if clarifying else prompt_name)
     # THE RELEVANCE FLOOR, applied where it costs nothing. A live trace read
     # "14개 중 14개가 모델에게 전달되었습니다" for a trademark question against a
     # patent corpus: fourteen irrelevant chunks, all sent, and the model

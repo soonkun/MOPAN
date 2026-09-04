@@ -436,6 +436,8 @@ async def test_the_api_key_can_be_neither_read_nor_written(owner, db, app):
         "RETRIEVAL_COLLAPSE",
         # 어휘 빈도표(scripts/build_lexeme_df.py)가 먼저 있어야 켤 수 있는 값.
         "SPARSE_DF_TRIM",
+        # 대화형 발화를 검색 전에 골라내는 판정. 실패는 항상 검색으로 강등.
+        "INTENT_GATE",
         # A model name, and "" means the rerank stage is absent from the call
         # path. It is listed so the screen SAYS the stage exists and is off,
         # rather than leaving the user to infer it from silence.

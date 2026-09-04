@@ -1,6 +1,7 @@
 from app.models.app_setting import AppSetting
 from app.models.attachment import ATTACHMENT_KINDS, Attachment
 from app.models.base import Base
+from app.models.branding import Branding
 from app.models.chunk import EMBEDDING_DIM, Chunk
 from app.models.chunk_edge import EDGE_KINDS, ChunkEdge
 from app.models.collection import Collection
@@ -26,6 +27,7 @@ from app.models.workflow import (
 
 __all__ = [
     "Base",
+    "Branding",
     "User",
     "Workflow",
     "WorkflowVersion",

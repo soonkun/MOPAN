@@ -20,6 +20,7 @@ from app.attachments.service import (
 )
 from app.auth.authorization import get_owned_conversation
 from app.auth.dependencies import get_current_user
+from app.chat.intent import classify_intent
 from app.chat.service import answer, load_history, persist_turn, retrieve
 from app.core.config import MODEL_LABELS, Settings, get_app_settings
 from app.core.db import get_db_session
@@ -203,6 +204,7 @@ async def _complete(
     model: str,
     attachment_ids: list[uuid.UUID],
     workflow: ResolvedWorkflow,
+    user_nickname: str | None = None,
 ) -> AsyncIterator[str]:
     """Everything after the evidence has been gathered: retrieve if there is
     none, answer, persist, emit `citations` and `done`.
@@ -217,6 +219,23 @@ async def _complete(
     """
     retrieval_ms = plan_ms
     fell_back = not plan_evidence
+    # 의도 게이트. 직접 RAG로 떨어지는 발화만 판정한다 - 그래프·플래너가 근거를
+    # 만들었거나(plan_evidence) 사용자가 도구·첨부를 직접 골랐으면(evidence)
+    # 검색 의도는 이미 표명된 것이라 게이트가 물을 것이 없다. "chat"이면 검색
+    # 자체를 건너뛴다: 인사말의 정답 청크는 존재하지 않고, 존재하지 않는 것을
+    # 잘 검색하는 방법도 존재하지 않는다. 모든 실패는 "search"로 강등되므로
+    # (classify_intent 참조) 이 게이트가 최악의 경우 하는 일은 아무것도 바꾸지
+    # 않는 것이다.
+    intent = "search"
+    if fell_back and not evidence and settings.intent_gate:
+        intent = await classify_intent(
+            llm_provider,
+            question,
+            model=settings.query_expansion_model,
+            timeout=settings.query_expansion_timeout_seconds,
+        )
+    if intent == "chat":
+        fell_back = False
     if fell_back:
         # THE FALLBACK. A run that yielded nothing - refused, a graph of just
         # input and answer, every node failed, or the clock ran out before the
@@ -256,7 +275,13 @@ async def _complete(
         images=images,
         model=model,
         prompt_name=workflow.prompt_name,
+        intent=intent,
+        user_nickname=user_nickname,
     )
+    # 추적 화면이 "왜 인용이 없는가"에 답할 수 있게. prompt_name(smalltalk_agent)
+    # 이 이미 기록되지만, 그것이 게이트의 판정이었다는 사실은 여기만 안다.
+    if intent != "search":
+        chat_answer.trace["intent"] = intent
     if plan_trace is not None:
         # THE ACCEPTANCE TEST FOR THIS SLICE IS THAT answer() DID NOT CHANGE, so
         # the plan is merged into the trace `build_trace` already produced rather
@@ -558,6 +583,7 @@ async def chat(
                 model=model,
                 attachment_ids=attachment_ids,
                 workflow=workflow,
+                user_nickname=user.nickname,
             ):
                 yield frame
         except LLMError:
@@ -765,6 +791,7 @@ async def approve(
                 model=model,
                 attachment_ids=attachment_ids,
                 workflow=workflow,
+                user_nickname=user.nickname,
             ):
                 yield frame
         except LLMError:

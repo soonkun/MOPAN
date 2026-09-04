@@ -41,8 +41,21 @@ class UserResponse(BaseModel):
     id: uuid.UUID
     email: str
     role: str
+    nickname: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+class ProfileUpdateRequest(BaseModel):
+    # None = 그대로 두기, "" = 지우기. 프런트는 지금 nickname만 보내지만 PATCH
+    # 의미론을 처음부터 지켜 둔다 - 생략된 키는 건드리지 않는다.
+    nickname: str | None = None
+
+
+class DeleteAccountRequest(BaseModel):
+    # 파괴적 동작은 세션 쿠키만으로 충분하지 않다. 자리를 비운 화면에서 클릭
+    # 몇 번으로 계정이 사라지면 안 되므로 비밀번호를 다시 받는다.
+    password: str
 
 
 class AdminUserResponse(UserResponse):

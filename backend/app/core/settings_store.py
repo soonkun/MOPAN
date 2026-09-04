@@ -260,6 +260,15 @@ ENV_ONLY_SETTINGS: list[EnvOnlySetting] = [
         ),
     ),
     EnvOnlySetting(
+        key="INTENT_GATE",
+        label="의도 게이트",
+        reason=(
+            "켜짐/꺼짐 값이라 이 화면의 숫자 입력 칸으로는 다룰 수 없습니다. 인사말 같은 대화형 "
+            "발화를 검색 전에 골라내 문서 검색 없이 답하게 하는 판정 한 번(값싼 completion)이며, "
+            "판정이 실패하면 항상 검색으로 강등되므로 꺼진 것과 같은 동작이 됩니다."
+        ),
+    ),
+    EnvOnlySetting(
         key="SPARSE_DF_TRIM",
         label="흔한 토큰 잘라내기",
         reason=(

@@ -23,6 +23,10 @@ class User(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 호칭. 새 대화 첫 화면과 잡담 응답이 "OO님"이라고 부를 때 쓰는 값이고,
+    # 본인이 프로필에서 고친다. NULL이면 부르지 않는다 - 이메일 앞부분을
+    # 어림해 부르는 것은 호칭이 아니라 추측이다.
+    nickname: Mapped[str | None] = mapped_column(String(60), nullable=True)
     role: Mapped[str] = mapped_column(
         String(20), nullable=False, default="user", server_default=text("'user'")
     )

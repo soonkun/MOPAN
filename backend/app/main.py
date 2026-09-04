@@ -126,6 +126,7 @@ def create_app() -> FastAPI:
 
     from app.attachments.router import router as attachments_router
     from app.auth.router import router as auth_router
+    from app.branding.router import router as branding_router
     from app.chat.router import router as chat_router
     from app.documents.router import router as documents_router
     from app.mcp.router import router as mcp_router
@@ -136,6 +137,7 @@ def create_app() -> FastAPI:
 
     app.include_router(attachments_router)
     app.include_router(auth_router)
+    app.include_router(branding_router)
     app.include_router(chat_router)
     app.include_router(documents_router)
     app.include_router(mcp_router)

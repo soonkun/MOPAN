@@ -251,7 +251,7 @@ async def test_list_users_returns_the_admin_fields_sorted_by_created_at(admin_cl
     assert body[0]["role"] == "admin"
     assert body[1]["role"] == "user"
     assert all(u["is_active"] is True for u in body)
-    assert set(body[0]) == {"id", "email", "role", "is_active", "created_at"}
+    assert set(body[0]) == {"id", "email", "role", "nickname", "is_active", "created_at"}
 
 
 async def test_user_management_is_admin_only(member_client, admin_client):

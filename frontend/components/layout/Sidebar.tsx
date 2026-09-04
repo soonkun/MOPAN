@@ -5,8 +5,10 @@ import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import AccountMenu from "@/components/layout/AccountMenu";
 import ErrorBanner from "@/components/ui/ErrorBanner";
-import type { Conversation, User } from "@/lib/types";
+import type {
+  Branding, Conversation, User } from "@/lib/types";
 
 // The trap has to enumerate everything focusable inside the drawer, not just
 // what happens to be in it today: with "a, button" the first <input> added to
@@ -17,7 +19,7 @@ const FOCUSABLE =
 
 /** A glyph per function, keyed by the route it stands for.
  *
- * Inline SVG on `currentColor`, exactly the way ThemeToggle.tsx already does
+ * Inline SVG on `currentColor`, for the reasons every icon in this app is
  * it, and deliberately NOT an icon package: a dozen paths do not justify a
  * dependency, a bundle, or a second source of truth for what "워크플로우" looks
  * like. The agent shield is the same path the composer's agent control draws,
@@ -120,6 +122,8 @@ export default function Sidebar() {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [user, setUser] = useState<User | null>(null);
+  const [branding, setBranding] = useState<Branding | null>(null);
+  const [accountOpen, setAccountOpen] = useState(false);
   // null means "not loaded yet", which is not the same as an empty list. With
   // [] as the initial value every page load flashes "아직 대화가 없습니다."
   // for the length of the fetch, including for users who do have conversations.
@@ -160,6 +164,8 @@ export default function Sidebar() {
       apiFetch<Conversation[]>("/api/conversations"),
     ]);
     if (me.status === "fulfilled") setUser(me.value);
+    // 브랜딩은 장식이라 실패해도 화면을 세우지 않는다 - 기본 문구로 그린다.
+    void apiFetch<Branding>("/api/branding").then(setBranding).catch(() => {});
     if (list.status === "fulfilled") setConversations(list.value);
     const failed = [list, me].find(
       (result): result is PromiseRejectedResult => result.status === "rejected",
@@ -348,8 +354,9 @@ export default function Sidebar() {
     >
       {/* §2: the gradient is allowed on the wordmark and nowhere else on this
           screen. */}
-      <div className="mb-4 px-4 pt-2 text-title font-medium">
-        <span className="text-gradient-brand">MOPAN</span>
+      <div className="mb-4 truncate px-4 pt-2 text-title font-medium">
+        {/* 가져다 쓰는 사람의 이름이 먼저다. 브랜딩이 비어 있을 때만 MOPAN. */}
+        <span className="text-gradient-brand">{branding?.app_title || "MOPAN"}</span>
       </div>
       {navLinks.map(navLink)}
 
@@ -364,7 +371,9 @@ export default function Sidebar() {
         </div>
       )}
 
-      <div className="mt-6 flex-1 overflow-y-auto">
+      {/* relative: 이 스크롤 영역 안의 sr-only(absolute) 요소가 뷰포트에 앵커되어
+          문서를 늘리는 것을 막는다 - app-main의 같은 수정과 같은 기전. */}
+      <div className="relative mt-6 flex-1 overflow-y-auto">
         <div className="mb-1 px-4 text-caption tracking-wide text-on-surface-variant">
           대화 기록
         </div>
@@ -503,21 +512,51 @@ export default function Sidebar() {
       {/* The one surviving divider in the sidebar: it separates the account
           block from a scrolling list, where a tonal step alone would read as
           "the list continues". §1 - borders where they carry meaning. */}
-      <div className="mt-3 flex flex-col gap-2 border-t border-outline-variant pt-3">
-        {/* The placeholder is U+00A0, not an ASCII space: a plain space is
-            collapsible, so the line gets no line box and is 0px tall until
-            /api/auth/me lands - at which point it grows 16px and shoves
-            로그아웃 down under the pointer already resting on it. */}
-        <div className="truncate px-4 text-caption text-on-surface-variant">
-          {user ? `${user.email}${user.role === "admin" ? " · 관리자" : ""}` : "\u00a0"}
-        </div>
+      <div className="mt-3 border-t border-outline-variant pt-3">
         {logoutError && <ErrorBanner message={logoutError} />}
-        {/* type="button" on every button in this file: the default is
-            "submit", which is a live bug the moment one of them ends up
-            inside a <form>. */}
-        <button type="button" onClick={() => void handleLogout()} className="btn-tonal w-full gap-2">
-          <NavIcon name="logout" />
-          로그아웃
+        {/* 계정 줄이 곧 버튼이다. 예전에는 이메일 한 줄 + 상시 로그아웃 버튼이
+            바닥을 차지했는데, 로그아웃·테마·프로필은 하루 한 번도 안 만지는
+            컨트롤이라 전부 계정 창(AccountMenu)으로 들어갔고 이 버튼이 그
+            문이다. user가 아직 없어도 뼈대를 그려서 로딩 전후 높이가 같다 -
+            예전 U+00A0 자리표시자와 같은 이유. */}
+        <button
+          type="button"
+          onClick={() => user && setAccountOpen(true)}
+          disabled={!user}
+          className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors duration-150 hover:bg-surface-container"
+        >
+          <span
+            aria-hidden="true"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary-container text-label font-medium text-on-primary-container"
+          >
+            {user ? (user.nickname ?? user.email).slice(0, 1).toUpperCase() : "·"}
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-body text-on-surface">
+              {user ? user.nickname || user.email : " "}
+            </span>
+            <span className="block truncate text-caption text-on-surface-variant">
+              {user
+                ? user.nickname
+                  ? `${user.email}${user.role === "admin" ? " · 관리자" : ""}`
+                  : user.role === "admin"
+                    ? "관리자"
+                    : "사용자"
+                : " "}
+            </span>
+          </span>
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 24 24"
+            className="h-4 w-4 shrink-0 text-on-surface-variant"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="m8 9 4-4 4 4M8 15l4 4 4-4" />
+          </svg>
         </button>
       </div>
     </nav>
@@ -528,6 +567,14 @@ export default function Sidebar() {
       {/* Outside `content`, which is rendered TWICE - once docked, once in the
           drawer. Inside it, one showModal() call would open two dialogs and
           only the second would be reachable. */}
+      {accountOpen && user && (
+        <AccountMenu
+          user={user}
+          onUserChange={setUser}
+          onLogout={handleLogout}
+          onClose={() => setAccountOpen(false)}
+        />
+      )}
       {deleteTarget && (
         <ConfirmDialog
           title="대화 삭제"

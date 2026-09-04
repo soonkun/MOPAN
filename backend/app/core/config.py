@@ -280,6 +280,18 @@ class Settings(BaseSettings):
     # measured) - nothing can be corroborated when there is one ranking. So
     # SPARSE_WEIGHT=0 and this setting must not both be set.
     clarify_on_weak_evidence: bool = True
+
+    # THE INTENT GATE (app/chat/intent.py): one cheap completion decides whether
+    # a message wants a document search or is merely conversational, BEFORE any
+    # retrieval runs. Measured failure it exists for: "안녕?" went through RAG
+    # and came back as a citation-laden greeting about examination standards.
+    # Runs only on the direct-RAG path with no plan evidence, no attachments and
+    # no hand-picked tools; every classifier failure degrades to "search", so
+    # the worst this gate can do is change nothing. Costs ~$0.00002 and a few
+    # hundred ms per message (query_expansion_model). Measured before shipping:
+    # 96/96 fixture questions classified search, 14/14 conversational utterances
+    # classified chat - see app/chat/intent.py.
+    intent_gate: bool = True
     # The RRF score below which the top hit counts as weak. RRF scores are
     # bounded and comparable across queries at a fixed rrf_k, which is what makes
     # a threshold meaningful at all: a chunk found by BOTH arms at rank 1 scores

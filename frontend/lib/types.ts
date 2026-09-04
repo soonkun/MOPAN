@@ -2,6 +2,19 @@ export interface User {
   id: string;
   email: string;
   role: "admin" | "user";
+  /** 호칭. 새 대화 첫 화면과 잡담 응답이 "OO님"이라고 부르는 값. null이면
+   * 부르지 않는다 - 이메일 앞부분으로 어림해 부르는 것은 추측이다. */
+  nickname: string | null;
+}
+
+/** GET /api/branding - 이 배포가 화면에서 자기를 뭐라고 부르는가. null은
+ * "코드의 기본값을 쓴다"는 뜻이라, 프런트가 기본 문구의 원본이다. */
+export interface Branding {
+  app_title: string | null;
+  tagline_primary: string | null;
+  tagline_secondary: string | null;
+  suggested_questions: string[];
+  has_custom_mascot: boolean;
 }
 
 /** GET /api/users and PATCH /api/users/{id} - the backend's AdminUserResponse.

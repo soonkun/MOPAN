@@ -194,6 +194,10 @@ def test_answer_takes_no_session_and_no_retrieval_collaborator():
         "images",
         "model",
         "prompt_name",
+        # 의도 게이트의 판정과 호칭. 둘 다 데이터다 - 세션도 검색 협력자도
+        # 아니고, 이 테스트가 지키는 성질은 그대로다.
+        "intent",
+        "user_nickname",
     ]
 
 

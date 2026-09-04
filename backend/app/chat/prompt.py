@@ -243,6 +243,27 @@ PLANNER_GRAPH_SYSTEM_PROMPT = (
 )
 
 
+# 의도 게이트(app/chat/intent.py)가 "chat"으로 판정한 발화 - 인사, 감사, 시스템
+# 자체에 대한 질문 - 가 받는 프롬프트. 검색이 돌지 않았으므로 근거 펜스도 인용
+# 규칙도 없다. "안녕?"에 심사기준 인용이 달려 나가던 실측 실패가 이것의 존재
+# 이유다.
+SMALLTALK_SYSTEM_PROMPT = (
+    "You are MOPAN's assistant. The user's message is conversational - a greeting, thanks, "
+    "small talk, or a question about you or this system - so NO document retrieval was run and "
+    "you have no corpus evidence. Reply in the user's language, warmly and briefly (one to three "
+    "sentences).\n"
+    "\n"
+    "What you may say about this system, when asked: MOPAN answers questions with citations "
+    "drawn from documents its operator has uploaded; typing @ in the composer calls tools and "
+    "saved workflows; administrators manage collections, prompts, MCP servers and workflows "
+    "from the sidebar.\n"
+    "\n"
+    "Never invent document contents, statistics, or citations - you have none. If the message "
+    "actually asks something the document corpus might answer, do not answer it from memory; "
+    "invite the user to ask it as a question so the documents can be searched."
+)
+
+
 @dataclass(frozen=True)
 class PromptTemplate:
     name: str
@@ -277,6 +298,12 @@ _FALLBACK_PROMPTS = {
     # that the day someone does seed it, 프롬프트 관리 edits it like the other two
     # with no code change.
     "clarify_agent": PromptTemplate(name="clarify_agent", version="1", text=CLARIFY_SYSTEM_PROMPT),
+    # 의도 게이트가 "chat"으로 판정한 발화가 받는 프롬프트. clarify_agent와 같은
+    # 계약: 마이그레이션 없이 이 사전이 폴백이고, 시딩하면 프롬프트 관리에서
+    # 편집된다. 근거 없이 부르므로 인용 규칙이 없다 - 지어낼 근거 자체가 없다.
+    "smalltalk_agent": PromptTemplate(
+        name="smalltalk_agent", version="1", text=SMALLTALK_SYSTEM_PROMPT
+    ),
 }
 
 _ACTIVE_PROMPT_SQL = text("SELECT version, text FROM prompts WHERE name = :name AND is_active LIMIT 1")

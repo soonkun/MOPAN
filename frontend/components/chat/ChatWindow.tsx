@@ -11,6 +11,8 @@ import Composer, {
 import MessageBubble from "@/components/chat/MessageBubble";
 import PlanProgress from "@/components/chat/PlanProgress";
 import type {
+  Branding,
+  User,
   CallableTool,
   WorkflowOption,
   AnswerModel,
@@ -90,6 +92,10 @@ export default function ChatWindow({
   // therefore loaded-and-empty.
   const [loaded, setLoaded] = useState(!initialConversationId);
   const [input, setInput] = useState("");
+  // 브랜딩과 내 프로필 - 첫 화면(마스트헤드)이 그리는 값. 장식이라 실패해도
+  // 기본 문구로 그린다.
+  const [branding, setBranding] = useState<Branding | null>(null);
+  const [me, setMe] = useState<User | null>(null);
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [models, setModels] = useState<AnswerModel[]>([]);
   // Every enabled tool on every enabled server. Empty for a deployment with no
@@ -207,6 +213,8 @@ export default function ChatWindow({
     apiFetch<CallableTool[]>("/api/tools")
       .then(setCallables)
       .catch(() => setCallables([]));
+    apiFetch<Branding>("/api/branding").then(setBranding).catch(() => {});
+    apiFetch<User>("/api/auth/me").then(setMe).catch(() => {});
     // Same rule again, and it matters most here: a deployment with no
     // workflows answers with [], the picker disappears, and every send carries
     // no `workflow_id` - which is the app as it was. A failure to load them must
@@ -702,56 +710,74 @@ export default function ChatWindow({
             // wearing a wordmark's clothes.
             <div className="mt-12 flex flex-col items-center text-center">
               {/* See the note at the top of this file for why this is a plain
-                  <img> and why it is decorative. */}
-              <img
-                src="/mascot.png"
+                  <img
+                src={branding?.has_custom_mascot ? "/api/branding/mascot" : "/mascot.png"}
                 alt=""
                 aria-hidden="true"
                 width={720}
                 height={631}
                 className="mb-6 h-auto w-40 md:w-56"
               />
-              {/* h1 because this screen has none otherwise, and the transcript
-                  that replaces it has none either - a page whose only heading
-                  is the sidebar's would announce as unstructured.
-                  Two characters at 36px, so unlike the sentence it replaced
-                  there is nothing here that can wrap at 390px. */}
-              <h1 className="text-display font-medium">
-                <span className="text-gradient-brand">모판</span>
-                {/* The Latin half is deliberately outside the gradient: across
-                    ASCII glyphs at this size it reads as a rendering fault, and
-                    this parenthetical is here to be legible, not decorative. */}
-                <span className="text-on-surface">(MOPAN)</span>
-              </h1>
-              {/* The English reading, with the five letters the name is built
-                  from carried at full contrast so the acronym is legible
-                  without a gloss. 45 Latin characters at 12px is ~270px, which
-                  clears a 390px phone's 358px column on one line - measured. */}
-              <p className="mt-1 text-caption tracking-wide text-on-surface-variant">
-                <b className="font-medium text-on-surface">M</b>odular{" "}
-                <b className="font-medium text-on-surface">O</b>rchestration{" "}
-                <b className="font-medium text-on-surface">P</b>latform for{" "}
-                <b className="font-medium text-on-surface">A</b>gent{" "}
-                <b className="font-medium text-on-surface">N</b>exus
-              </p>
-              {/* The one rule on this screen, and it is doing a masthead's job:
-                  separating the name from what the name means. §1 allows a
-                  border where it carries meaning. w-12 rather than full width -
-                  a full-width rule would read as a section divider. */}
+              {/* 제목·문구는 브랜딩이 먼저다 (GET /api/branding, null = 기본).
+                  MOPAN은 가져다 자기 것으로 만드는 판이고, 첫 화면의 이름이 그
+                  "자기 것"의 첫인상이다. 기본값일 때만 모판(MOPAN) 워드마크와
+                  약어 풀이를 그린다 - 남의 제목 밑에 우리 약어를 깔면 그건
+                  브랜딩이 아니라 워터마크다. */}
+              {branding?.app_title ? (
+                <h1 className="max-w-[32rem] break-keep text-display font-medium">
+                  <span className="text-gradient-brand">{branding.app_title}</span>
+                </h1>
+              ) : (
+                <>
+                  <h1 className="text-display font-medium">
+                    <span className="text-gradient-brand">모판</span>
+                    <span className="text-on-surface">(MOPAN)</span>
+                  </h1>
+                  <p className="mt-1 text-caption tracking-wide text-on-surface-variant">
+                    <b className="font-medium text-on-surface">M</b>odular{" "}
+                    <b className="font-medium text-on-surface">O</b>rchestration{" "}
+                    <b className="font-medium text-on-surface">P</b>latform for{" "}
+                    <b className="font-medium text-on-surface">A</b>gent{" "}
+                    <b className="font-medium text-on-surface">N</b>exus
+                  </p>
+                </>
+              )}
               <hr className="my-5 w-12 border-t border-outline-variant" />
-              {/* break-keep (word-break: keep-all): the browser's default
-                  breaks Korean between syllables, and at 390px that split
-                  words mid-word in the line below. keep-all breaks at spaces
-                  instead, which is how the language reads. */}
+              {/* 호칭. 닉네임은 본인이 계정 창에서 정한 값이라 부를 자격이
+                  있다 - 이메일 앞부분으로 어림하는 것은 호칭이 아니라 추측이다. */}
+              {me?.nickname && (
+                <p className="mb-1 max-w-[32rem] break-keep text-body-lg text-on-surface">
+                  {me.nickname}님, 안녕하세요.
+                </p>
+              )}
               <p className="max-w-[32rem] break-keep text-body-lg text-on-surface">
-                한 판에서 길러 어느 논에나 옮겨 심습니다.
+                {branding?.tagline_primary || "한 판에서 길러 어느 논에나 옮겨 심습니다."}
               </p>
-              {/* 32rem, not 28: at 28 the line below broke after 베이스 and left
-                  시스템입니다. alone on a second line. It is one line on a
-                  desktop column now and two on a phone, where it has to be. */}
               <p className="mt-2 max-w-[32rem] break-keep text-body text-on-surface-variant">
-                RAG · MCP · LLM · 워크플로우를 직접 등록하고 조합하는 베이스 시스템입니다.
+                {branding?.tagline_secondary ||
+                  "RAG · MCP · LLM · 워크플로우를 직접 등록하고 조합하는 베이스 시스템입니다."}
               </p>
+              {/* 추천 질문. 옛 판의 칩은 "누구의 것도 아닌 질문을 어림해서"
+                  지워졌다 - 이 칩들은 다르다: 이 배포의 관리자가 자기 코퍼스를
+                  알고 직접 적은 문장이다. 누르면 입력창에 채워질 뿐 보내지
+                  않는다 - 질문의 주인은 끝까지 사용자다. */}
+              {(branding?.suggested_questions?.length ?? 0) > 0 && (
+                <div className="mt-6 flex max-w-[36rem] flex-wrap justify-center gap-2">
+                  {branding?.suggested_questions.map((question) => (
+                    <button
+                      key={question}
+                      type="button"
+                      onClick={() => {
+                        setInput(question);
+                        textareaRef.current?.focus();
+                      }}
+                      className="max-w-full truncate rounded-full bg-surface-container px-4 py-2 text-label text-on-surface transition-colors duration-150 hover:bg-surface-container-high"
+                    >
+                      {question}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
           {messages.map((m) => (
