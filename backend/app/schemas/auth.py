@@ -52,6 +52,21 @@ class ProfileUpdateRequest(BaseModel):
     nickname: str | None = None
 
 
+class PasswordChangeRequest(BaseModel):
+    # 세션이 살아 있어도 현재 비밀번호를 다시 받는다 - 자리를 비운 화면에서
+    # 비밀번호가 갈아치워지면 그것이 곧 계정 탈취다.
+    current_password: str
+    new_password: str = Field(min_length=MIN_PASSWORD_LENGTH)
+
+    @field_validator("new_password")
+    @classmethod
+    def _within_bcrypt_limit(cls, value: str) -> str:
+        # RegisterRequest와 같은 이유: bcrypt의 한계는 글자가 아니라 바이트다.
+        if len(value.encode("utf-8")) > MAX_PASSWORD_BYTES:
+            raise ValueError(f"password must be at most {MAX_PASSWORD_BYTES} bytes")
+        return value
+
+
 class DeleteAccountRequest(BaseModel):
     # 파괴적 동작은 세션 쿠키만으로 충분하지 않다. 자리를 비운 화면에서 클릭
     # 몇 번으로 계정이 사라지면 안 되므로 비밀번호를 다시 받는다.

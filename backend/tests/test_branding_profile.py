@@ -165,3 +165,33 @@ async def test_delete_me_anonymises_and_locks_out(member, db):
         await db.scalars(select(Conversation).where(Conversation.user_id == user.id))
     ).all()
     assert conversations == []
+
+
+async def test_password_change_requires_current_and_takes_effect(member):
+    refused = await member.post(
+        "/api/auth/me/password",
+        json={"current_password": "wrong", "new_password": "newpw12345"},
+    )
+    assert refused.status_code == 403
+
+    ok = await member.post(
+        "/api/auth/me/password",
+        json={"current_password": "pw123456", "new_password": "newpw12345"},
+    )
+    assert ok.status_code == 204
+
+    # 옛 비밀번호는 죽고 새 것만 산다.
+    await member.post("/api/auth/logout")
+    old = await member.post("/api/auth/login", json={"email": "kim@example.com", "password": "pw123456"})
+    assert old.status_code == 401
+    fresh = await member.post(
+        "/api/auth/login", json={"email": "kim@example.com", "password": "newpw12345"}
+    )
+    assert fresh.status_code == 200
+
+
+async def test_password_change_keeps_register_rules(member):
+    short = await member.post(
+        "/api/auth/me/password", json={"current_password": "pw123456", "new_password": "short"}
+    )
+    assert short.status_code == 422

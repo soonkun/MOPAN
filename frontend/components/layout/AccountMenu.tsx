@@ -7,19 +7,18 @@ import type { User } from "@/lib/types";
 
 /** 계정 창 - 사이드바 아래 계정 줄을 누르면 뜬다.
 
-Claude Desktop의 계정 메뉴와 같은 발상: 프로필(닉네임), 테마, 로그아웃,
-계정 삭제처럼 "나에 관한 것"을 한 자리에 모은다. 예전에는 테마가 화면 오른쪽
-위에 떠 있는 순환 버튼이었고 로그아웃이 사이드바 바닥의 상시 버튼이었다 -
-하루 한 번도 안 누르는 컨트롤 둘이 가장 좋은 자리를 차지하고 있었다.
+소유자 피드백대로 컴팩트하다: 설명 문장은 없고, 테마는 해/달 아이콘 하나가
+번갈아 바뀌며, 로그아웃은 그 옆의 나가기 아이콘이다. 계정 삭제는 첫 화면에
+두지 않는다 - "계정 설정" 안으로 한 번 더 들어가야 맨 아래 나온다. 파괴적
+동작이 클릭 한 번 거리면 그것은 기능이 아니라 함정이다.
 
-네이티브 <dialog> + showModal() - ConfirmDialog와 같은 이유(포커스 트랩,
-Escape, inert 배경이 공짜). 사이드바 content가 도킹·드로어로 두 번 렌더되므로
-이 다이얼로그는 그 밖에서 한 번만 마운트된다. md 이상에서는 계정 줄 근처
-(왼쪽 아래)에 붙고, 폰에서는 가운데 - top-layer의 margin이 곧 위치다.
+네이티브 <dialog> + showModal() (ConfirmDialog와 같은 이유). 창 밖(backdrop)을
+클릭하면 닫힌다 - 닫기 버튼은 없다: dialog 요소 자체가 클릭 대상이면 그것이
+backdrop이다(내용은 안쪽 div가 전부 덮는다). 사이드바 content가 도킹·드로어로
+두 번 렌더되므로 이 다이얼로그는 그 밖에서 한 번만 마운트된다.
 
-테마는 라이트/다크 두 단이다. 예전의 시스템/라이트/다크 순환은 "시스템"을
-잃지 않으려는 설계였지만, 소유자가 두 단을 지시했다: 저장된 값이 없으면
-스위치는 OS 설정을 보여주고, 누르는 순간 명시값이 저장된다. */
+테마는 라이트/다크 두 단: 저장된 값이 없으면 OS 설정을 보여주고, 누르는 순간
+명시값이 저장된다. */
 
 const STORAGE_KEY = "mopan-theme";
 
@@ -31,6 +30,41 @@ function currentTheme(): "light" | "dark" {
     // 프라이빗 모드 - 아래 OS 값이 답이다.
   }
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function IconGlyph({ name }: { name: "sun" | "moon" | "logout" | "back" | "chevron" }) {
+  const paths = {
+    sun: (
+      <>
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+      </>
+    ),
+    moon: <path d="M20 13.5A8 8 0 1 1 10.5 4 6.5 6.5 0 0 0 20 13.5Z" />,
+    logout: (
+      <>
+        <path d="M15 12H4" />
+        <path d="m7.5 8.5-3.5 3.5 3.5 3.5" />
+        <path d="M11 5h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-6" />
+      </>
+    ),
+    back: <path d="m14 6-6 6 6 6" />,
+    chevron: <path d="m10 6 6 6-6 6" />,
+  } as const;
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      className="h-5 w-5"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {paths[name]}
+    </svg>
+  );
 }
 
 export default function AccountMenu({
@@ -46,28 +80,38 @@ export default function AccountMenu({
 }) {
   const router = useRouter();
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const [view, setView] = useState<"main" | "settings">("main");
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [nickname, setNickname] = useState(user.nickname ?? "");
   const [savingNickname, setSavingNickname] = useState(false);
   const [savedNickname, setSavedNickname] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [password, setPassword] = useState("");
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // 비밀번호 변경.
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [newPasswordAgain, setNewPasswordAgain] = useState("");
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [passwordChanged, setPasswordChanged] = useState(false);
+
+  // 계정 삭제 (계정 설정 맨 아래에서만).
+  const [deleting, setDeleting] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     dialogRef.current?.showModal();
     setTheme(currentTheme());
   }, []);
 
-  function applyTheme(value: "light" | "dark") {
-    setTheme(value);
-    document.documentElement.setAttribute("data-theme", value);
+  function toggleTheme() {
+    const next = theme === "light" ? "dark" : "light";
+    setTheme(next);
+    document.documentElement.setAttribute("data-theme", next);
     try {
-      localStorage.setItem(STORAGE_KEY, value);
+      localStorage.setItem(STORAGE_KEY, next);
     } catch {
-      // 이 페이지에는 적용된다. 새로고침을 못 넘길 뿐이고, 아예 안 바뀌는
-      // 것보다 낫다.
+      // 이 페이지에는 적용된다. 새로고침을 못 넘길 뿐.
     }
   }
 
@@ -90,13 +134,37 @@ export default function AccountMenu({
     }
   }
 
+  async function changePassword() {
+    if (newPassword !== newPasswordAgain) {
+      setError("새 비밀번호가 서로 다릅니다.");
+      return;
+    }
+    setChangingPassword(true);
+    setError(null);
+    try {
+      await apiFetch("/api/auth/me/password", {
+        method: "POST",
+        body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+      });
+      setCurrentPassword("");
+      setNewPassword("");
+      setNewPasswordAgain("");
+      setPasswordChanged(true);
+      setTimeout(() => setPasswordChanged(false), 2500);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setChangingPassword(false);
+    }
+  }
+
   async function deleteAccount() {
     setBusy(true);
     setError(null);
     try {
       await apiFetch("/api/auth/me", {
         method: "DELETE",
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ password: deletePassword }),
       });
       router.push("/login");
     } catch (err) {
@@ -112,152 +180,213 @@ export default function AccountMenu({
       ref={dialogRef}
       aria-labelledby="account-menu-title"
       onClose={onClose}
+      // 창 밖 클릭 = 닫기. 내용은 안쪽 div가 전부 덮으므로, 클릭 대상이
+      // dialog 자신이면 그것은 backdrop이다.
+      onClick={(event) => {
+        if (event.target === dialogRef.current) dialogRef.current?.close();
+      }}
       className="m-auto w-full max-w-sm rounded-lg bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim md:mb-20 md:ml-4 md:mr-auto md:mt-auto"
     >
       <div className="p-5">
-        <div className="flex items-center gap-3">
-          <span
-            aria-hidden="true"
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary-container text-title font-medium text-on-primary-container"
-          >
-            {(user.nickname ?? user.email).slice(0, 1).toUpperCase()}
-          </span>
-          <div className="min-w-0">
-            <h2 id="account-menu-title" className="truncate text-title font-medium">
-              {user.nickname ? `${user.nickname}님` : "내 계정"}
-            </h2>
-            <p className="truncate text-caption text-on-surface-variant">
-              {user.email}
-              {user.role === "admin" ? " · 관리자" : ""}
-            </p>
-          </div>
-        </div>
-
-        <div className="mt-4 border-t border-outline-variant pt-4">
-          <label htmlFor="account-nickname" className="text-label font-medium text-on-surface-variant">
-            닉네임
-          </label>
-          <p className="mt-0.5 text-caption text-on-surface-variant">
-            새 대화 화면과 인사가 이 이름으로 부릅니다. 비우면 부르지 않습니다.
-          </p>
-          <div className="mt-2 flex gap-2">
-            <input
-              id="account-nickname"
-              value={nickname}
-              onChange={(event) => setNickname(event.target.value)}
-              maxLength={60}
-              placeholder="예: 순쿤"
-              className="field min-w-0 flex-1"
-            />
-            <button
-              type="button"
-              onClick={() => void saveNickname()}
-              disabled={savingNickname || !nicknameDirty}
-              className="btn-tonal btn-compact shrink-0 self-center"
-            >
-              {savingNickname ? "저장 중..." : savedNickname ? "저장됨" : "저장"}
-            </button>
-          </div>
-        </div>
-
-        <div className="mt-4 border-t border-outline-variant pt-4">
-          <span className="text-label font-medium text-on-surface-variant">화면 테마</span>
-          <div
-            role="group"
-            aria-label="화면 테마"
-            className="mt-2 grid grid-cols-2 gap-1 rounded-full bg-surface-container p-1"
-          >
-            {(["light", "dark"] as const).map((value) => (
-              <button
-                key={value}
-                type="button"
-                onClick={() => applyTheme(value)}
-                aria-pressed={theme === value}
-                className={`h-8 rounded-full text-label transition-colors duration-150 ${
-                  theme === value
-                    ? "bg-primary-container text-on-primary-container"
-                    : "text-on-surface-variant hover:bg-surface-container-high"
-                }`}
+        {view === "main" ? (
+          <>
+            <div className="flex items-center gap-3">
+              <span
+                aria-hidden="true"
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary-container text-title font-medium text-on-primary-container"
               >
-                {value === "light" ? "라이트" : "다크"}
+                {(user.nickname ?? user.email).slice(0, 1).toUpperCase()}
+              </span>
+              <div className="min-w-0 flex-1">
+                <h2 id="account-menu-title" className="truncate text-title font-medium">
+                  {user.nickname ? `${user.nickname}님` : "내 계정"}
+                </h2>
+                <p className="truncate text-caption text-on-surface-variant">
+                  {user.email}
+                  {user.role === "admin" ? " · 관리자" : ""}
+                </p>
+              </div>
+              {/* 컴팩트 아이콘 줄: 해/달 토글, 나가기. 설명은 없다 - 해와 달과
+                  문 그림이 곧 설명이다. */}
+              <button
+                type="button"
+                onClick={toggleTheme}
+                aria-label={theme === "light" ? "다크 모드로" : "라이트 모드로"}
+                className="icon-btn shrink-0"
+              >
+                <IconGlyph name={theme === "light" ? "moon" : "sun"} />
               </button>
-            ))}
-          </div>
-        </div>
+              <button
+                type="button"
+                onClick={() => void onLogout()}
+                aria-label="로그아웃"
+                className="icon-btn shrink-0"
+              >
+                <IconGlyph name="logout" />
+              </button>
+            </div>
 
-        <div className="mt-4 space-y-2 border-t border-outline-variant pt-4">
-          <button
-            type="button"
-            onClick={() => void onLogout()}
-            className="btn-tonal w-full"
-          >
-            로그아웃
-          </button>
-          {!deleting ? (
-            <button
-              type="button"
-              onClick={() => setDeleting(true)}
-              className="w-full rounded-sm px-2 py-2 text-label text-error hover:bg-error-container hover:text-on-error-container"
-            >
-              계정 삭제
-            </button>
-          ) : (
-            <div className="rounded-md bg-error-container p-3">
-              <p className="text-caption text-on-error-container">
-                대화 이력이 지워지고 이 계정으로는 다시 로그인할 수 없습니다. 이 계정이 만든
-                문서·분류·워크플로우는 시스템에 남습니다. 되돌릴 수 없습니다.
-              </p>
-              <label htmlFor="account-delete-password" className="sr-only">
-                비밀번호 확인
+            <div className="mt-4 border-t border-outline-variant pt-4">
+              <label
+                htmlFor="account-nickname"
+                className="text-label font-medium text-on-surface-variant"
+              >
+                닉네임
               </label>
-              <input
-                id="account-delete-password"
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                placeholder="비밀번호를 다시 입력하세요"
-                className="field mt-2 w-full"
-              />
-              <div className="mt-2 flex justify-end gap-2">
+              <div className="mt-2 flex gap-2">
+                <input
+                  id="account-nickname"
+                  value={nickname}
+                  onChange={(event) => setNickname(event.target.value)}
+                  maxLength={60}
+                  className="field min-w-0 flex-1"
+                />
                 <button
                   type="button"
-                  onClick={() => {
-                    setDeleting(false);
-                    setPassword("");
-                    setError(null);
-                  }}
-                  className="btn-tonal btn-compact"
+                  onClick={() => void saveNickname()}
+                  disabled={savingNickname || !nicknameDirty}
+                  className="btn-tonal btn-compact shrink-0 self-center"
                 >
-                  취소
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void deleteAccount()}
-                  disabled={busy || !password}
-                  className="btn-danger btn-compact"
-                >
-                  {busy ? "삭제 중..." : "계정 삭제"}
+                  {savingNickname ? "저장 중..." : savedNickname ? "저장됨" : "저장"}
                 </button>
               </div>
             </div>
-          )}
-        </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                setView("settings");
+                setError(null);
+              }}
+              className="mt-4 flex w-full items-center justify-between rounded-md border-t border-outline-variant px-1 pb-1 pt-4 text-body text-on-surface hover:bg-surface-container"
+            >
+              계정 설정
+              <IconGlyph name="chevron" />
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setView("main");
+                  setDeleting(false);
+                  setDeletePassword("");
+                  setError(null);
+                }}
+                aria-label="뒤로"
+                className="icon-btn h-8 w-8 shrink-0"
+              >
+                <IconGlyph name="back" />
+              </button>
+              <h2 id="account-menu-title" className="text-title font-medium">
+                계정 설정
+              </h2>
+            </div>
+
+            <div className="mt-4 border-t border-outline-variant pt-4">
+              <span className="text-label font-medium text-on-surface-variant">비밀번호 변경</span>
+              <div className="mt-2 space-y-2">
+                <input
+                  type="password"
+                  value={currentPassword}
+                  onChange={(event) => setCurrentPassword(event.target.value)}
+                  placeholder="현재 비밀번호"
+                  autoComplete="current-password"
+                  className="field w-full"
+                  aria-label="현재 비밀번호"
+                />
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(event) => setNewPassword(event.target.value)}
+                  placeholder="새 비밀번호"
+                  autoComplete="new-password"
+                  className="field w-full"
+                  aria-label="새 비밀번호"
+                />
+                <input
+                  type="password"
+                  value={newPasswordAgain}
+                  onChange={(event) => setNewPasswordAgain(event.target.value)}
+                  placeholder="새 비밀번호 확인"
+                  autoComplete="new-password"
+                  className="field w-full"
+                  aria-label="새 비밀번호 확인"
+                />
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void changePassword()}
+                    disabled={changingPassword || !currentPassword || !newPassword}
+                    className="btn-tonal btn-compact"
+                  >
+                    {changingPassword ? "변경 중..." : "변경"}
+                  </button>
+                  {passwordChanged && (
+                    <span className="text-caption text-primary">변경됐습니다.</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* 파괴적 동작은 맨 아래, 한 겹 더 안쪽에. */}
+            <div className="mt-4 border-t border-outline-variant pt-4">
+              {!deleting ? (
+                <button
+                  type="button"
+                  onClick={() => setDeleting(true)}
+                  className="w-full rounded-sm px-2 py-2 text-left text-label text-error hover:bg-error-container hover:text-on-error-container"
+                >
+                  계정 삭제
+                </button>
+              ) : (
+                <div className="rounded-md bg-error-container p-3">
+                  <p className="text-caption text-on-error-container">
+                    대화 이력이 지워지고 이 계정으로는 다시 로그인할 수 없습니다. 이 계정이 만든
+                    문서·분류·워크플로우는 시스템에 남습니다. 되돌릴 수 없습니다.
+                  </p>
+                  <input
+                    type="password"
+                    value={deletePassword}
+                    onChange={(event) => setDeletePassword(event.target.value)}
+                    placeholder="비밀번호를 다시 입력하세요"
+                    aria-label="비밀번호 확인"
+                    className="field mt-2 w-full"
+                  />
+                  <div className="mt-2 flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDeleting(false);
+                        setDeletePassword("");
+                        setError(null);
+                      }}
+                      className="btn-tonal btn-compact"
+                    >
+                      취소
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void deleteAccount()}
+                      disabled={busy || !deletePassword}
+                      className="btn-danger btn-compact"
+                    >
+                      {busy ? "삭제 중..." : "계정 삭제"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        )}
 
         {error && (
           <p className="mt-3 rounded-sm bg-error-container px-3 py-2 text-caption text-on-error-container">
             {error}
           </p>
         )}
-
-        <div className="mt-4 flex justify-end">
-          <button
-            type="button"
-            onClick={() => dialogRef.current?.close()}
-            className="btn-text btn-compact"
-          >
-            닫기
-          </button>
-        </div>
       </div>
     </dialog>
   );

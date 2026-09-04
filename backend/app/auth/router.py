@@ -17,6 +17,7 @@ from app.models.conversation import Conversation
 from app.models.user import User
 from app.schemas.auth import (
     DeleteAccountRequest,
+    PasswordChangeRequest,
     LoginRequest,
     ProfileUpdateRequest,
     RegisterRequest,
@@ -102,6 +103,20 @@ async def update_me(
     await db.commit()
     await db.refresh(user)
     return user
+
+
+@router.post("/me/password", status_code=204)
+async def change_password(
+    payload: PasswordChangeRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """본인 비밀번호 변경. 새 비밀번호의 규칙(길이·바이트 한도)은 가입과 같은
+    스키마가 지킨다 - 두 벌의 규칙은 반드시 어긋난다."""
+    if not verify_password(payload.current_password, user.password_hash):
+        raise HTTPException(status_code=403, detail="현재 비밀번호가 올바르지 않습니다.")
+    user.password_hash = hash_password(payload.new_password)
+    await db.commit()
 
 
 @router.delete("/me", status_code=204)
