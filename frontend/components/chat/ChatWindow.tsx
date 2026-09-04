@@ -709,8 +709,10 @@ export default function ChatWindow({
             // whole sentence in a three-stop gradient is a surface treatment
             // wearing a wordmark's clothes.
             <div className="mt-12 flex flex-col items-center text-center">
-              {/* See the note at the top of this file for why this is a plain
-                  <img
+              {/* 장식용 일반 <img> - 상단 주석 참조. src는 브랜딩을 따른다:
+                  업로드된 마스코트가 있으면 그것, 없으면 기본 마스코트. */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
                 src={branding?.has_custom_mascot ? "/api/branding/mascot" : "/mascot.png"}
                 alt=""
                 aria-hidden="true"
