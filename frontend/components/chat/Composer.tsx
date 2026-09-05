@@ -75,10 +75,14 @@ const SPARK = (
     <path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z" />
   </>
 );
-const SHIELD = (
+// 워크플로우 - 세로 노드 흐름(사이드바 /workflows와 같은 그림). 방패는
+// "왜 방패인지 모르겠다"는 소유자 지적으로 은퇴.
+const FLOW = (
   <>
-    <path d="M12 3 4 7v5c0 4.4 3.2 8.2 8 9 4.8-.8 8-4.6 8-9V7l-8-4Z" />
-    <path d="m9 12 2 2 4-4" />
+    <rect x="9" y="3" width="6" height="5" rx="1.5" />
+    <rect x="3.5" y="16" width="6" height="5" rx="1.5" />
+    <rect x="14.5" y="16" width="6" height="5" rx="1.5" />
+    <path d="M12 8v3M6.5 16v-1.5a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2V16" />
   </>
 );
 // The processor die. The outer rectangle is load-bearing: without it the pins
@@ -580,7 +584,7 @@ export default function Composer({
           )}
           {currentWorkflow && (
             <StateChip
-              icon={SHIELD}
+              icon={FLOW}
               label={currentWorkflow.name}
               active
               onClick={() => setSheet("workflow")}
@@ -830,7 +834,7 @@ export default function Composer({
             )}
             {workflows.length > 0 && (
               <MenuRow
-                icon={SHIELD}
+                icon={FLOW}
                 label="워크플로우"
                 value={currentWorkflow?.name ?? DEFAULT_WORKFLOW_LABEL}
                 onClick={() => setSheet("workflow")}

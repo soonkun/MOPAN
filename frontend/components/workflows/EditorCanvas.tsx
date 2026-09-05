@@ -70,6 +70,7 @@ export default function EditorCanvas({
   callables,
   paletteOpen,
   onPaletteOpenChange,
+  runStates,
 }: {
   graph: WorkflowGraph;
   onChange: (next: WorkflowGraph) => void;
@@ -82,6 +83,9 @@ export default function EditorCanvas({
    * 해서 값은 여전히 캔버스로 들어온다. */
   paletteOpen: boolean;
   onPaletteOpenChange: (open: boolean) => void;
+  /** 실행해보기의 노드별 진행 상태(step 프레임의 id -> state). 실행 중이 아니면
+   * 비어 있고, 그때 캔버스는 이전과 픽셀 단위로 같다. */
+  runStates?: Record<string, string>;
 }) {
   const uid = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -463,6 +467,21 @@ export default function EditorCanvas({
           const bad = nodeError(node.id);
           const fixed = node.kind === "input" || node.kind === "answer";
           const active = selectedNode === node.id;
+          // 실행해보기 점등: running은 숨쉬는 테두리, done은 켜진 테두리,
+          // 실패 계열은 error 테두리, 분기가 거른 노드(skipped)는 어두워진다 -
+          // "거치지 않은 경로는 켜지지 말고"(소유자). 상태가 없으면 빈 문자열이라
+          // 실행 중이 아닐 때 이 줄은 아무것도 바꾸지 않는다.
+          const run = runStates?.[node.id];
+          const runClass =
+            run === "running"
+              ? "ring-2 ring-primary run-glow"
+              : run === "done"
+                ? "ring-2 ring-primary"
+                : run === "failed" || run === "timeout"
+                  ? "ring-2 ring-error"
+                  : run === "skipped"
+                    ? "opacity-40"
+                    : "";
           return (
             <div
               key={node.id}
@@ -470,13 +489,13 @@ export default function EditorCanvas({
               style={{ left: node.x, top: node.y, width: CARD_WIDTH }}
             >
               <div
-                className={`relative flex items-start gap-1 rounded-md p-2 transition-colors duration-150 ${
+                className={`relative flex items-start gap-1 rounded-md p-2 transition-all duration-150 ${
                   bad
                     ? "bg-error-container text-on-error-container"
                     : active
                       ? "bg-primary-container text-on-primary-container ring-2 ring-primary"
                       : "bg-surface-container text-on-surface hover:bg-surface-container-high"
-                }`}
+                } ${runClass}`}
                 style={{ minHeight: CARD_HEIGHT }}
               >
                 <button

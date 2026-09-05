@@ -23,9 +23,15 @@ const STATUS_LABEL: Record<string, string> = {
 export default function TestRun({
   workflowId,
   onClose,
+  onRunStart,
+  onStep,
 }: {
   workflowId: string;
   onClose: () => void;
+  /** 새 실행이 시작될 때 - 페이지가 캔버스의 이전 점등을 지우는 데 쓴다. */
+  onRunStart?: () => void;
+  /** step 프레임마다 (노드 id, 상태). 캔버스가 해당 노드의 테두리를 켠다. */
+  onStep?: (id: string, state: string) => void;
 }) {
   const [question, setQuestion] = useState("");
   const [running, setRunning] = useState(false);
@@ -42,6 +48,7 @@ export default function TestRun({
     setAnswer(null);
     setCitations(0);
     setError(null);
+    onRunStart?.();
     const controller = new AbortController();
     abortRef.current = controller;
     let conversationId: string | null = null;
@@ -55,6 +62,7 @@ export default function TestRun({
           } else if (event.type === "step") {
             // 그래프 실행의 단계 프레임: running/done을 그대로 시간순으로.
             setSteps((prev) => [...prev, `${event.label || event.id} — ${event.state}`]);
+            onStep?.(event.id, event.state);
           } else if (event.type === "done") {
             conversationId = event.conversation_id;
             setAnswer(event.content);

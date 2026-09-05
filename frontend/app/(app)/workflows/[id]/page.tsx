@@ -109,11 +109,26 @@ export default function WorkflowEditorPage() {
     () => typeof window === "undefined" || window.innerWidth >= 640,
   );
   const [testing, setTesting] = useState(false);
+  // 실행해보기의 노드별 진행 상태(id -> running/done/skipped/…). 캔버스가 이걸로
+  // 테두리를 켠다. 새 실행이 시작되거나 패널을 닫으면 비운다 - 실행이 끝난
+  // 직후의 점등은 남겨서 어떤 경로로 답이 나왔는지 읽을 수 있게 한다.
+  const [runStates, setRunStates] = useState<Record<string, string>>({});
+  const [versionToDelete, setVersionToDelete] = useState<number | null>(null);
   const [leaving, setLeaving] = useState(false);
 
   const settingsDirty = JSON.stringify(draft) !== JSON.stringify(baseline);
   const graphDirty = JSON.stringify(graph) !== JSON.stringify(graphBaseline);
   const dirty = settingsDirty || graphDirty;
+  // 실행해보기는 저장된 그래프를 돌리므로, 막아야 하는 것은 "저장본과 다르게
+  // 동작할 변경"뿐이다. 노드를 몇 픽셀 옮긴 것은 동작이 같은데도 실행을 막던
+  // 부당함(소유자 지적) - 좌표(x, y)를 뺀 나머지로만 비교한다. 저장 버튼과
+  // 나가기 확인은 여전히 dirty(좌표 포함)를 본다: 배치도 저장할 가치가 있다.
+  const functionalOf = (g: typeof graph) =>
+    JSON.stringify({
+      nodes: g.nodes.map(({ x: _x, y: _y, ...rest }) => rest),
+      edges: g.edges,
+    });
+  const functionalDirty = settingsDirty || functionalOf(graph) !== functionalOf(graphBaseline);
 
   const loadVersions = useCallback(async (id: string) => {
     try {
@@ -245,6 +260,19 @@ export default function WorkflowEditorPage() {
     }
   }
 
+  async function deleteVersion(version: number) {
+    setSaveError(null);
+    try {
+      await apiFetch(`/api/workflows/${editingId}/versions/${version}`, { method: "DELETE" });
+      if (editingId) void loadVersions(editingId);
+    } catch (err) {
+      // 활성 버전을 지우려던 경우의 409 문구가 그대로 온다.
+      setSaveError(errorMessage(err));
+    } finally {
+      setVersionToDelete(null);
+    }
+  }
+
   if (loadError) {
     return (
       <div className="p-6">
@@ -292,13 +320,13 @@ export default function WorkflowEditorPage() {
           <button
             type="button"
             onClick={() => setTesting((open) => !open)}
-            disabled={!editingId || dirty}
+            disabled={!editingId || functionalDirty}
             aria-label="실행해보기"
             title={
               !editingId
                 ? "먼저 만들기로 저장해야 실행할 수 있습니다."
-                : dirty
-                  ? "저장하지 않은 변경이 있습니다. 저장 후 실행해 주세요."
+                : functionalDirty
+                  ? "동작이 바뀌는 저장하지 않은 변경이 있습니다. 저장 후 실행해 주세요."
                   : "저장된 그래프를 채팅과 같은 경로로 실행합니다."
             }
             className="btn-tonal btn-compact gap-1.5 px-2.5 sm:px-4"
@@ -354,6 +382,7 @@ export default function WorkflowEditorPage() {
             callables={callables}
             paletteOpen={paletteOpen}
             onPaletteOpenChange={setPaletteOpen}
+            runStates={runStates}
           />
 
           {/* 왼쪽 레일: 워크플로우 설정 · 도구 · 노드 순(소유자 지정). 패널은
@@ -445,15 +474,34 @@ export default function WorkflowEditorPage() {
                 onNote={setNote}
                 versions={versions}
                 onRollBack={(v) => void rollBack(v)}
+                onDeleteVersion={setVersionToDelete}
               />
             </div>
           )}
 
           {testing && editingId && (
-            <TestRun workflowId={editingId} onClose={() => setTesting(false)} />
+            <TestRun
+              workflowId={editingId}
+              onClose={() => {
+                setTesting(false);
+                setRunStates({});
+              }}
+              onRunStart={() => setRunStates({})}
+              onStep={(id, state) => setRunStates((prev) => ({ ...prev, [id]: state }))}
+            />
           )}
         </div>
       </div>
+
+      {versionToDelete !== null && (
+        <ConfirmDialog
+          title="버전 삭제"
+          message={`v${versionToDelete}을(를) 기록에서 지웁니다. 되돌릴 수 없습니다.`}
+          confirmLabel="삭제"
+          onConfirm={() => deleteVersion(versionToDelete)}
+          onClose={() => setVersionToDelete(null)}
+        />
+      )}
 
       {leaving && (
         <ConfirmDialog

@@ -67,11 +67,15 @@ const NAV_ICON: Record<string, React.ReactNode> = {
       <path d="M8.5 10.5h7M8.5 14h4" />
     </>
   ),
-  // 워크플로우 - the shield-check the composer's workflow control uses.
+  // 워크플로우 - 편집기 캔버스 그대로의 세로 노드 흐름: 위 노드가 두 갈래로
+  // 갈라진다. 방패였던 것을 소유자가 "왜 방패인지 모르겠다"고 짚어 바꿨다 -
+  // Composer의 워크플로우 칩/메뉴 행(FLOW)과 같은 그림이다.
   "/workflows": (
     <>
-      <path d="M12 3 4 7v5c0 4.4 3.2 8.2 8 9 4.8-.8 8-4.6 8-9V7l-8-4Z" />
-      <path d="m9 12 2 2 4-4" />
+      <rect x="9" y="3" width="6" height="5" rx="1.5" />
+      <rect x="3.5" y="16" width="6" height="5" rx="1.5" />
+      <rect x="14.5" y="16" width="6" height="5" rx="1.5" />
+      <path d="M12 8v3M6.5 16v-1.5a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2V16" />
     </>
   ),
   // MCP 서버 관리 - a two-unit server rack with its status lamps.

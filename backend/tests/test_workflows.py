@@ -829,6 +829,37 @@ async def test_activating_a_version_that_does_not_exist_is_a_404(admin_client, c
     assert "버전" in refused.json()["detail"]
 
 
+async def test_deleting_a_version_removes_it_but_never_the_active_one(admin_client, corpus, db):
+    """버전 정리(소유자 요청). 비활성 버전은 지워지고, 활성 버전은 409로
+    거부된다 - 다음 질문이 실행할 그래프를 지울 수는 없고, 덕분에 버전이
+    최소 한 줄 남는 것이 공짜 불변식이다."""
+    workflow = await create_workflow(admin_client, name="버전 정리")
+    await admin_client.post(
+        f"/api/workflows/{workflow['id']}/versions",
+        json={
+            "graph": graph_of(
+                [
+                    {"id": "input", "kind": "input"},
+                    rag_node(query="바뀐 검색어"),
+                    {"id": "answer", "kind": "answer"},
+                ],
+                [("input", "search"), ("search", "answer")],
+            )
+        },
+    )
+
+    refused = await admin_client.delete(f"/api/workflows/{workflow['id']}/versions/2")
+    assert refused.status_code == 409
+    assert "사용 중인 버전" in refused.json()["detail"]
+
+    deleted = await admin_client.delete(f"/api/workflows/{workflow['id']}/versions/1")
+    assert deleted.status_code == 204
+    assert (await db.scalar(text("SELECT count(*) FROM workflow_versions"))) == 1
+
+    missing = await admin_client.delete(f"/api/workflows/{workflow['id']}/versions/1")
+    assert missing.status_code == 404
+
+
 async def test_node_coordinates_survive_a_save_and_a_reload(admin_client, corpus):
     """The coordinates are why `workflow_versions.graph` exists at all: a person
     ARRANGED these boxes, and reopening the canvas has to show the same picture.

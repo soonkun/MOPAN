@@ -332,6 +332,25 @@ body {
   animation: sparkle-pulse 1.2s cubic-bezier(0.2, 0, 0, 1) infinite;
 }
 
+/* 실행해보기 - 캔버스 노드 점등(소유자 요청: 완료된 노드는 테두리에 불이
+   들어오고, 분기가 거른 경로는 켜지지 않는다). running은 테두리가 숨쉬듯
+   퍼지고, done은 켜진 채 남는다. reduce에서는 위의 전역 무효화(§7)로 애니메이션
+   없이 상태만 남는다. 토큰이 hex라 알파는 color-mix로 만든다(유틸리티 알파
+   접미사 /80이 무시되던 함정 - 주석에 별표 슬래시를 쓰면 주석이 여기서 끝나는
+   함정도 방금 밟았다). */
+@keyframes run-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 55%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 10px color-mix(in srgb, var(--primary) 0%, transparent);
+  }
+}
+.run-glow {
+  animation: run-glow 1.3s ease-out infinite;
+}
+
 /* §7 Motion is feedback, not decoration. Under `reduce` the app keeps every
    state change - only the tweening between states goes. Written as one global
    override rather than wrapping each transition in a no-preference query: same

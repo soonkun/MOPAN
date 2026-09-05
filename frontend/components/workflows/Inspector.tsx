@@ -412,6 +412,7 @@ function WorkflowPanel({
   onNote,
   versions,
   onRollBack,
+  onDeleteVersion,
 }: {
   draft: Draft;
   onChangeDraft: (next: Draft) => void;
@@ -421,6 +422,7 @@ function WorkflowPanel({
   onNote: (next: string) => void;
   versions: WorkflowVersion[];
   onRollBack: (version: number) => void;
+  onDeleteVersion: (version: number) => void;
 }) {
   const uid = useId();
   const prompt = catalog.prompts.find((p) => p.name === draft.prompt_name);
@@ -604,13 +606,27 @@ function WorkflowPanel({
                   </span>
                 </span>
                 {!version.is_active && (
-                  <button
-                    type="button"
-                    onClick={() => onRollBack(version.version)}
-                    className="btn-tonal btn-compact shrink-0"
-                  >
-                    되돌리기
-                  </button>
+                  <span className="flex shrink-0 items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => onRollBack(version.version)}
+                      className="btn-tonal btn-compact"
+                    >
+                      되돌리기
+                    </button>
+                    {/* 활성 버전은 서버도 409로 거부한다 - 다음 질문이 실행할
+                        그래프를 지울 수는 없다. 그래서 버튼도 비활성 버전에만. */}
+                    <button
+                      type="button"
+                      onClick={() => onDeleteVersion(version.version)}
+                      aria-label={`v${version.version} 삭제`}
+                      className="icon-btn h-7 w-7 text-on-surface-variant hover:text-error"
+                    >
+                      <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                      </svg>
+                    </button>
+                  </span>
                 )}
               </li>
             ))}
@@ -637,6 +653,7 @@ export default function Inspector({
   onNote,
   versions,
   onRollBack,
+  onDeleteVersion,
 }: {
   graph: WorkflowGraph;
   onChangeGraph: (next: WorkflowGraph) => void;
@@ -653,6 +670,7 @@ export default function Inspector({
   onNote: (next: string) => void;
   versions: WorkflowVersion[];
   onRollBack: (version: number) => void;
+  onDeleteVersion: (version: number) => void;
 }) {
   const node =
     selection && "node" in selection ? graph.nodes.find((n) => n.id === selection.node) : null;
@@ -691,6 +709,7 @@ export default function Inspector({
           onNote={onNote}
           versions={versions}
           onRollBack={onRollBack}
+          onDeleteVersion={onDeleteVersion}
         />
       )}
     </aside>

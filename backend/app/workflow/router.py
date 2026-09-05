@@ -49,6 +49,9 @@ router = APIRouter(prefix="/api", tags=["workflows"])
 
 WORKFLOW_NOT_FOUND_MESSAGE = "워크플로우를 찾을 수 없습니다."
 VERSION_NOT_FOUND_MESSAGE = "해당 버전을 찾을 수 없습니다."
+ACTIVE_VERSION_DELETE_MESSAGE = (
+    "지금 사용 중인 버전은 삭제할 수 없습니다. 다른 버전으로 되돌린 뒤 삭제해 주세요."
+)
 DUPLICATE_NAME_MESSAGE = "같은 이름의 워크플로우가 이미 있습니다."
 UNKNOWN_PROMPT_MESSAGE = "등록되지 않은 프롬프트입니다: {name}"
 UNKNOWN_MODEL_MESSAGE = "사용할 수 없는 답변 모델입니다: {name}"
@@ -591,4 +594,37 @@ async def activate_version(
         note=target.note,
         created_by_email=email,
         created_at=target.created_at,
+    )
+
+
+@router.delete("/workflows/{workflow_id}/versions/{version}", status_code=204)
+async def delete_version(
+    workflow_id: uuid.UUID,
+    version: int,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """버전 정리(소유자 요청). 활성 버전만은 지울 수 없다 - 이 워크플로우로
+    들어오는 다음 질문이 실행할 그래프가 사라지므로, 먼저 다른 버전으로
+    되돌린 뒤 지우게 한다. 덕분에 "버전이 최소 한 줄은 남는다"가 공짜 불변식이
+    된다. 메시지는 버전 행을 가리키지 않고 값(workflow_name/version)을 복사해
+    두므로(app/models/message.py), 지난 답변의 기록은 삭제와 무관하게 남는다."""
+    await _get(db, workflow_id)
+    target = await db.scalar(
+        select(WorkflowVersion).where(
+            WorkflowVersion.workflow_id == workflow_id, WorkflowVersion.version == version
+        )
+    )
+    if target is None:
+        raise HTTPException(status_code=404, detail=VERSION_NOT_FOUND_MESSAGE)
+    if target.is_active:
+        raise HTTPException(status_code=409, detail=ACTIVE_VERSION_DELETE_MESSAGE)
+    await db.delete(target)
+    await db.commit()
+    log_event(
+        logger,
+        "workflow_version_deleted",
+        workflow_id=str(workflow_id),
+        version=version,
+        admin_id=str(admin.id),
     )
