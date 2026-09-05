@@ -149,6 +149,23 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
 
+  # 외부 공개 터널. 세션이 띄운 프로세스는 메모리 압박 때 회수되던 실사고가
+  # 있어(2026-09-05), Docker가 직접 관리하는 서비스로 둔다 - 죽으면 자동
+  # 재기동, 부팅 시(Docker Desktop 자동 시작이면) 같이 올라온다.
+  #
+  # Quick Tunnel이라 (재)시작할 때마다 URL이 바뀐다. 주소는:
+  #   docker compose logs tunnel | grep trycloudflare
+  # 고정 주소가 필요하면 Cloudflare 대시보드에서 Named Tunnel을 만들고 아래
+  # command를 ["tunnel", "run", "--token", "<토큰>"] 으로 바꾼다.
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    # --protocol http2: 컨테이너망에서 QUIC(UDP 7844) dial이 실패한다(실측
+    # "failed to dial to edge with quic"). TCP 443만 쓰는 http2로 고정.
+    command: ["tunnel", "--no-autoupdate", "--protocol", "http2", "--url", "http://frontend:3000"]
+    depends_on:
+      - frontend
+
 volumes:
   pgdata:
   redisdata:
