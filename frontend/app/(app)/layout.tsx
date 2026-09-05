@@ -11,9 +11,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="app-shell flex">
       <Sidebar />
-      {/* pt-12 md:pt-0 reserves the strip the fixed hamburger occupies. It is
-          part of the layout, not of each page: without it every page's first
-          element sits under the toggle at (8,8)-(39,38).
+      {/* pt-12가 예약하던 상단 띠는 소유자 지적으로 없앴다("햄버거 마크만 떠
+          있으면 되는 거 아닌가?" - 모바일 화면 3rem이 흰 띠로 죽어 있었다).
+          햄버거는 반투명+블러의 떠 있는 버튼이고, 내용이 그 밑으로 흐른다 -
+          겹치는 것은 좌상단 모서리의 몇 글자뿐이고 스크롤하면 지나간다.
           overflow-y-auto is load-bearing twice over. It bounds the scroll, and
           it makes the computed overflow-x `auto` too, which zeroes this flex
           item's automatic minimum size - that is what stops Task 23's wide
@@ -30,7 +31,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           /settings 1737px)까지 문서 자체를 늘린다. 그러면 창 스크롤바가 main의
           스크롤바와 이중으로 뜨고 셸 아래가 흰 띠가 된다. main이 positioned가
           되면 그 요소들은 main 안에 앵커되어 문서를 늘릴 수 없다. */}
-      <main id="app-main" className="relative flex-1 overflow-y-auto pt-12 md:pt-0">
+      <main id="app-main" className="relative flex-1 overflow-y-auto">
         {children}
       </main>
     </div>

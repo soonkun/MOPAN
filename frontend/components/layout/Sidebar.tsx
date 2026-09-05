@@ -594,7 +594,10 @@ export default function Sidebar() {
           type="button"
           aria-label="메뉴 열기"
           aria-controls="sidebar-drawer"
-          className="icon-btn fixed left-2 top-2 z-20 bg-surface-container text-title md:hidden"
+          // 상단 예약 띠(pt-12)를 없앤 대가로 내용이 이 밑을 지나간다 - 그림자
+          // 한 겹이 버튼을 지나가는 글자와 갈라 준다. (토큰 색은 alpha 변형이
+          // 없어 /80 같은 투명도 수식은 조용히 무시된다 - 쓰지 말 것.)
+          className="icon-btn fixed left-2 top-2 z-20 bg-surface-container text-title shadow-md md:hidden"
           onClick={() => setOpen(true)}
         >
           ☰
