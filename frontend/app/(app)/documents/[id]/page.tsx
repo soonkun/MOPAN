@@ -1,6 +1,7 @@
 "use client";
 
 import { use, useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { apiFetch, downloadDocument, errorMessage } from "@/lib/api";
 import ChunkViewer from "@/components/documents/ChunkViewer";
 import { TERMINAL } from "@/components/documents/DocumentTable";
@@ -92,19 +93,38 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
 
   return (
     <PageShell>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="min-w-0 break-all pl-12 text-headline font-medium md:pl-0">{doc?.filename ?? "문서"}</h1>
+      <div className="flex flex-wrap items-center gap-2">
+        {/* 목록으로 - 워크플로우 편집기의 ‹와 같은 규칙. 모바일에서는 떠 있는
+            햄버거 옆에 서도록 pl-12가 자리를 비켜 준다. */}
+        <Link
+          href="/documents"
+          aria-label="문서 목록으로"
+          className="icon-btn ml-12 h-9 w-9 shrink-0 md:ml-0"
+        >
+          <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="m15 6-6 6 6 6" />
+          </svg>
+        </Link>
+        <h1 className="min-w-0 flex-1 break-all text-headline font-medium">{doc?.filename ?? "문서"}</h1>
         {doc && (
           // The accessible name carries the filename: "다운로드" alone would be
-          // the same name this control has on every other document.
+          // the same name this control has on every other document. 모바일은
+          // 아이콘만, 데스크톱은 글자까지(헤더 버튼 공통 규칙).
           <button
             type="button"
             onClick={download}
             disabled={downloading}
             aria-label={`${doc.filename} 원본 파일 다운로드`}
-            className="btn-tonal shrink-0"
+            className="btn-tonal btn-compact shrink-0 gap-1.5 px-2.5 sm:px-4"
           >
-            {downloading ? "내려받는 중..." : "원본 다운로드"}
+            <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 3v12" />
+              <path d="m7 10 5 5 5-5" />
+              <path d="M5 21h14" />
+            </svg>
+            <span className="hidden sm:inline">
+              {downloading ? "내려받는 중..." : "원본 다운로드"}
+            </span>
           </button>
         )}
       </div>
