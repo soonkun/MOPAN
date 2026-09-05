@@ -417,3 +417,141 @@ async def kipris_mcp(request: Request) -> Response:
             "error": {"code": -32601, "message": f"unknown method: {method}"},
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# 상품분류 조회 MCP - 세 번째 서버, /goods/mcp. 키가 필요 없다.
+#
+# "상표분류 코드가 뭐냐"에 답하는 실체는 외부 API가 아니라 이미 코퍼스에 있는
+# 분류표다(예: 유사상품 심사기준의 9천여 행 - 문서가 곧 데이터라는 모판 철학).
+# 이 도구는 그 행들을 정확 부분일치로 조회해 류·유사군코드를 결정적으로
+# 돌려준다. 애매한 물음("소셜네트워크 어플")은 모델이 후보 상품명 여러 개로
+# 바꿔 여러 번 조회해 종합한다 - 그 조합이 자동 사용 숙고의 일이다.
+#
+# 특허 전용 하드코딩이 아니다: "[코드/코드] 명칭…" 브래킷 마커 절(분류표
+# 구조로 청킹된 모든 문서의 산출물)을 읽으므로, 다른 도메인의 분류표를
+# 올려도 같은 도구가 동작한다.
+
+import os
+
+from sqlalchemy import text as sql_text
+from sqlalchemy.ext.asyncio import create_async_engine
+
+_goods_engine = None
+
+
+def _engine():
+    global _goods_engine
+    if _goods_engine is None:
+        url = os.environ.get("DATABASE_URL")
+        if not url:
+            raise RuntimeError("DATABASE_URL이 설정되지 않았습니다(compose의 mcp-examples 참조).")
+        _goods_engine = create_async_engine(url, pool_size=2, pool_pre_ping=True)
+    return _goods_engine
+
+
+GOODS_TOOLS = [
+    {
+        "name": "goods_classification",
+        "description": (
+            "Look up the trademark (NICE) class and similar-group code for a goods/service name "
+            "in the classification tables indexed in this deployment (e.g. 유사상품 심사기준 "
+            "고시명칭). Exact substring match on the official names - for a vague product idea, "
+            "call this several times with candidate official-style names (e.g. for a social "
+            "networking app: '소셜네트워크', 'SNS', '애플리케이션 소프트웨어') and combine the "
+            "results. Returns matching rows as 류/유사군코드 plus the matched name in context."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "상품/서비스 명칭 (부분일치, 2자 이상)"},
+                "limit": {"type": "integer", "description": "최대 결과 수 (기본 8, 최대 20)"},
+            },
+            "required": ["name"],
+        },
+    },
+]
+
+_GOODS_SQL = sql_text(
+    r"""
+    SELECT DISTINCT ON (marker) marker, content, filename FROM (
+      SELECT split_part(c.section, ']', 1) || ']' AS marker, c.content, d.filename
+      FROM chunks c JOIN documents d ON d.id = c.document_id
+      WHERE c.section ~ '^\[[^]]+/[^]]+\]' AND c.content ILIKE '%' || :q || '%'
+    ) rows ORDER BY marker LIMIT :n
+    """
+)
+
+
+async def goods_classification(arguments: dict) -> str:
+    name = str(arguments.get("name", "")).strip()
+    if len(name) < 2:
+        raise ValueError("name은 2자 이상의 상품/서비스 명칭이어야 합니다.")
+    limit = min(max(int(arguments.get("limit") or 8), 1), 20)
+    async with _engine().connect() as conn:
+        rows = (await conn.execute(_GOODS_SQL, {"q": name, "n": limit})).all()
+    if not rows:
+        return (
+            f"'{name}'과 일치하는 고시명칭이 분류표에 없습니다. 더 공식적인 명칭"
+            f"(예: '~업', '~용 소프트웨어')이나 다른 표현으로 다시 조회해 보세요."
+        )
+    lines = [f"'{name}' 일치 {len(rows)}건 (마커 = [류/유사군코드]):"]
+    for marker, content, filename in rows:
+        at = content.lower().find(name.lower())
+        start = max(0, at - 40)
+        window = content[start : at + len(name) + 60].replace("\n", " ")
+        lines.append(f"- {marker} …{window}… ({filename})")
+    return "\n".join(lines)
+
+
+@app.post("/goods/mcp")
+async def goods_mcp(request: Request) -> Response:
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}},
+            status_code=400,
+        )
+    method = payload.get("method")
+    request_id = payload.get("id")
+    if method == "notifications/initialized":
+        return Response(status_code=202)
+    if method == "initialize":
+        return _result(
+            request_id,
+            {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "mopan-goods", "version": "1.0.0"},
+            },
+        )
+    if method == "tools/list":
+        return _result(request_id, {"tools": GOODS_TOOLS})
+    if method == "tools/call":
+        params = payload.get("params") or {}
+        if params.get("name") != "goods_classification":
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32602, "message": f"unknown tool: {params.get('name')}"},
+                }
+            )
+        try:
+            text = await goods_classification(params.get("arguments") or {})
+            is_error = False
+        except Exception as exc:
+            logger.warning("goods tool failed: %s", exc)
+            text = f"도구 실행에 실패했습니다: {exc}"
+            is_error = True
+        return _result(
+            request_id, {"content": [{"type": "text", "text": text}], "isError": is_error}
+        )
+    return JSONResponse(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32601, "message": f"unknown method: {method}"},
+        }
+    )
