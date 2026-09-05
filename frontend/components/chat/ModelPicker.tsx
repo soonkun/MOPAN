@@ -29,6 +29,7 @@ export default function ModelPicker({
   anchorRef,
   reasoningEffort,
   onReasoningEffortChange,
+  onEffortPicked,
 }: {
   models: AnswerModel[];
   value: string;
@@ -39,6 +40,8 @@ export default function ModelPicker({
   /** 추론 모델이 선택된 동안 그 행 밑에 나타나는 즉시/중간/깊이의 현재값. */
   reasoningEffort: string;
   onReasoningEffortChange: (value: "minimal" | "medium" | "high") => void;
+  /** 깊이를 고른 순간 - 시트를 닫고 입력창으로 돌아가는 신호. */
+  onEffortPicked: () => void;
 }) {
   // Selecting and dismissing are deliberately two different events, and this was
   // found by driving it: with `onChange` closing the sheet, the first ArrowDown
@@ -75,7 +78,10 @@ export default function ModelPicker({
               // browsing from choosing. A pointer press reports detail >= 1;
               // every keyboard-synthesised click reports 0.
               onClick={(event) => {
-                if (event.detail > 0) onClose();
+                // 추론 모델은 클릭해도 닫지 않는다: 고르는 순간 바로 밑에
+                // 즉시/중간/깊이가 나타나고, 그것까지 골라야 이 흐름이 끝난다
+                // (데스크톱에서 시트가 즉시 닫혀 깊이를 정할 틈이 없던 실사고).
+                if (event.detail > 0 && !model.reasoning) onClose();
               }}
               // The keyboard half: Space and Enter mean "this one", arrows
               // mean "show me the next one".
@@ -87,7 +93,9 @@ export default function ModelPicker({
               // shut on one keystroke. A keydown belongs to whatever had focus
               // when the key went down, which is the distinction that fixes it.
               onKeyDown={(event) => {
-                if (event.key === " " || event.key === "Enter") onClose();
+                // 같은 규칙의 키보드 절반: 추론 모델은 Enter/Space로 골라도
+                // 열린 채 깊이 선택으로 이어진다.
+                if ((event.key === " " || event.key === "Enter") && !model.reasoning) onClose();
               }}
               className="sr-only"
             />
@@ -117,7 +125,11 @@ export default function ModelPicker({
                 key={effort.id}
                 type="button"
                 aria-pressed={reasoningEffort === effort.id}
-                onClick={() => onReasoningEffortChange(effort.id)}
+                onClick={() => {
+                  onReasoningEffortChange(effort.id);
+                  // 깊이가 이 흐름의 마지막 선택이다: 고르면 닫히고 입력창으로.
+                  onEffortPicked();
+                }}
                 className={`flex-1 rounded-full px-2 py-1.5 text-caption transition-colors duration-150 ${
                   reasoningEffort === effort.id
                     ? "bg-surface font-medium text-on-surface shadow-sm"

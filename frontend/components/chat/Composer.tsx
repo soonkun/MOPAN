@@ -868,6 +868,17 @@ export default function Composer({
         anchorRef={plusRef}
         reasoningEffort={reasoningEffort}
         onReasoningEffortChange={onReasoningEffortChange}
+        onEffortPicked={() => {
+          // 모델 -> 깊이까지 골랐으면 흐름의 끝은 입력창이다(소유자 지시:
+          // "설정하고 프롬프트로"). 터치 기기는 예외 - 여기서 포커스를 주면
+          // 키보드가 올라온다(전송 후 자판 실사고와 같은 분기).
+          setSheet(null);
+          if (window.matchMedia("(pointer: coarse)").matches) {
+            plusRef.current?.focus();
+          } else {
+            textareaRef.current?.focus();
+          }
+        }}
       />
 
       <WorkflowPicker
