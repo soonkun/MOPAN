@@ -262,7 +262,7 @@ export default function WorkflowEditorPage() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* 상단 바 - 이 화면의 유일한 가로 크롬. 나머지는 전부 캔버스다. */}
-      <header className="flex h-14 shrink-0 items-center gap-2 border-b border-outline-variant bg-surface-container-low px-3">
+      <header className="flex h-14 shrink-0 items-center gap-2 border-b border-outline-variant bg-surface-container-low py-0 pl-14 pr-3 md:pl-3">
         <button
           type="button"
           onClick={() => (dirty ? setLeaving(true) : router.push("/workflows"))}
@@ -292,9 +292,15 @@ export default function WorkflowEditorPage() {
             <button
               type="button"
               onClick={() => setDeleting(true)}
-              className="btn-danger btn-compact hidden sm:inline-flex"
+              aria-label="삭제"
+              className="btn-danger btn-compact gap-1.5 px-2.5 sm:px-4"
             >
-              삭제
+              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4 7h16M10 11v6M14 11v6" />
+                <path d="M6 7l1 13a1 1 0 0 0 1 .9h8a1 1 0 0 0 1-.9l1-13" />
+                <path d="M9 7V4h6v3" />
+              </svg>
+              <span className="hidden sm:inline">삭제</span>
             </button>
           )}
           {/* 아이콘+라벨 가변형(소유자 지정): 모바일은 아이콘만, 데스크톱은
