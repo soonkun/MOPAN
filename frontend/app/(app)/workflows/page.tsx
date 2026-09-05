@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { apiFetch, errorMessage } from "@/lib/api";
 import PageShell from "@/components/layout/PageShell";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { Workflow } from "@/lib/types";
 
@@ -26,6 +27,9 @@ export default function WorkflowsPage() {
   // screen here draws so the empty state never flashes.
   const [workflows, setWorkflows] = useState<Workflow[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // 삭제는 여기서 한다(소유자 지정): 편집기는 만드는 곳이고, 목록이 지우는
+  // 곳이다. ConfirmDialog가 실패를 자기 안에 그리므로 별도 오류 상태가 없다.
+  const [deleteTarget, setDeleteTarget] = useState<Workflow | null>(null);
 
   useEffect(() => {
     apiFetch<Workflow[]>("/api/workflows")
@@ -58,7 +62,7 @@ export default function WorkflowsPage() {
       ) : (
         <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {workflows.map((workflow) => (
-            <li key={workflow.id}>
+            <li key={workflow.id} className="relative">
               <Link
                 href={`/workflows/${workflow.id}`}
                 className="block h-full rounded-md bg-surface-container-low p-4 transition-colors duration-150 hover:bg-surface-container"
@@ -80,9 +84,36 @@ export default function WorkflowsPage() {
                 )}
                 <p className="mt-2 text-caption text-on-surface-variant">{summary(workflow)}</p>
               </Link>
+              {/* 카드 밖이 아니라 안 오른쪽 아래 - Link의 자식이면 클릭이 이동을
+                  같이 태우므로, li를 relative로 두고 카드 위에 겹친다. */}
+              <button
+                type="button"
+                onClick={() => setDeleteTarget(workflow)}
+                aria-label={`${workflow.name} 삭제`}
+                className="icon-btn absolute bottom-2 right-2 h-8 w-8 text-on-surface-variant hover:bg-error-container hover:text-on-error-container"
+              >
+                <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M4 7h16M10 11v6M14 11v6" />
+                  <path d="M6 7l1 13a1 1 0 0 0 1 .9h8a1 1 0 0 0 1-.9l1-13" />
+                  <path d="M9 7V4h6v3" />
+                </svg>
+              </button>
             </li>
           ))}
         </ul>
+      )}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          title="워크플로우 삭제"
+          message={`"${deleteTarget.name}" 워크플로우를 삭제합니다. 이 워크플로우로 만들어진 지난 답변은 그대로 남고 추적 화면에도 계속 이름이 표시됩니다. 되돌릴 수 없습니다.`}
+          confirmLabel="삭제"
+          onConfirm={async () => {
+            await apiFetch(`/api/workflows/${deleteTarget.id}`, { method: "DELETE" });
+            setWorkflows((prev) => (prev ?? []).filter((w) => w.id !== deleteTarget.id));
+          }}
+          onClose={() => setDeleteTarget(null)}
+        />
       )}
 
       {workflows !== null && workflows.length > 0 && (

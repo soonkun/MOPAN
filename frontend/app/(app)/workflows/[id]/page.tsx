@@ -110,7 +110,6 @@ export default function WorkflowEditorPage() {
   );
   const [testing, setTesting] = useState(false);
   const [leaving, setLeaving] = useState(false);
-  const [deleting, setDeleting] = useState(false);
 
   const settingsDirty = JSON.stringify(draft) !== JSON.stringify(baseline);
   const graphDirty = JSON.stringify(graph) !== JSON.stringify(graphBaseline);
@@ -288,21 +287,6 @@ export default function WorkflowEditorPage() {
           </span>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-2">
-          {editingId && (
-            <button
-              type="button"
-              onClick={() => setDeleting(true)}
-              aria-label="삭제"
-              className="btn-danger btn-compact gap-1.5 px-2.5 sm:px-4"
-            >
-              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M4 7h16M10 11v6M14 11v6" />
-                <path d="M6 7l1 13a1 1 0 0 0 1 .9h8a1 1 0 0 0 1-.9l1-13" />
-                <path d="M9 7V4h6v3" />
-              </svg>
-              <span className="hidden sm:inline">삭제</span>
-            </button>
-          )}
           {/* 아이콘+라벨 가변형(소유자 지정): 모바일은 아이콘만, 데스크톱은
               글자까지. aria-label이 아이콘만 남는 화면의 이름이다. */}
           <button
@@ -480,19 +464,6 @@ export default function WorkflowEditorPage() {
             router.push("/workflows");
           }}
           onClose={() => setLeaving(false)}
-        />
-      )}
-
-      {deleting && editingId && (
-        <ConfirmDialog
-          title="워크플로우 삭제"
-          message={`"${draft.name}" 워크플로우를 삭제합니다. 이 워크플로우로 만들어진 지난 답변은 그대로 남고 추적 화면에도 계속 이름이 표시됩니다. 되돌릴 수 없습니다.`}
-          confirmLabel="삭제"
-          onConfirm={async () => {
-            await apiFetch(`/api/workflows/${editingId}`, { method: "DELETE" });
-            router.push("/workflows");
-          }}
-          onClose={() => setDeleting(false)}
         />
       )}
     </div>
