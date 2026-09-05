@@ -12,6 +12,7 @@ from app.models.document import Document
 from app.rag.chunking.base import ChunkingStrategy
 from app.rag.chunking.hierarchy import CHARACTERS, Scheme, detect
 from app.rag.parsers import get_parser
+from app.rag.parsers.base import ParseFailure
 from app.rag.references import build_edges, relink_external
 from app.retrieval.vector_store import VectorItem, VectorStore
 
@@ -195,6 +196,18 @@ async def process_document(
             relinked_edges=relinked,
             duration_ms=round((time.perf_counter() - started) * 1000, 2),
         )
+    except ParseFailure as exc:
+        # 파일 자체가 원인이고 사용자가 고칠 수 있는 실패(예: 문자 매핑 없는
+        # PDF). 뭉뚱그린 문구 대신 파서가 적은 이유를 그대로 보여준다 - 재시도
+        # 해도 같은 파일은 같은 이유로 실패하므로 올리지 않고 여기서 끝낸다.
+        await db.rollback()
+        document = await db.get(Document, uuid.UUID(document_id))
+        if document is not None:
+            document.status = "failed"
+            document.error_message = str(exc)
+            await db.commit()
+        log_event(logger, "document_parse_refused", document_id=document_id, reason=str(exc))
+        return
     except Exception:
         # The most likely failure here is a DATABASE error at a commit or a
         # flush, which leaves the session in a pending-rollback state - a bare

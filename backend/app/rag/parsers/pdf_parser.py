@@ -7,7 +7,7 @@ from typing import NamedTuple
 import pdfplumber
 
 from app.rag.blocks import Block, ParsedDocument
-from app.rag.parsers.base import Parser
+from app.rag.parsers.base import Parser, ParseFailure
 
 MAX_HEADING_CHARS = 80
 MAX_HEADING_WORDS = 12
@@ -26,6 +26,27 @@ NUMBERED_HEADING = re.compile(
     r"|^\d+(?:\.\d+)+\s+\S"  # 3.2 Results - multi-level needs no separator
 )
 SENTENCE_ENDINGS = ".!?,;:"
+
+# ToUnicode 매핑이 없는 폰트의 PDF는 글자 대신 (cid:NNNN)이 추출된다. 실사고:
+# "TalkFile_NICE 국제상품분류 해설서.pdf"가 3,289청크 중 3,221청크(98%)를 이
+# 쓰레기로 색인해 검색을 오염시켰다 - 조용히 성공하는 것이 최악이라, 지배적일
+# 때는 파싱 자체를 사용자에게 말이 되는 이유와 함께 거절한다.
+CID_TOKEN = re.compile(r"\(cid:\d+\)")
+CID_GARBAGE_RATIO = 0.2
+CID_MIN_TEXT_CHARS = 1000
+CID_FAILURE_MESSAGE = (
+    "이 PDF는 글자 정보(폰트의 문자 매핑)가 없어 텍스트를 추출할 수 없습니다. "
+    "PDF 뷰어에서 '인쇄 > PDF로 저장'으로 다시 만든 파일이나, 텍스트 복사가 되는 "
+    "원본 PDF를 올려 주세요."
+)
+
+
+def cid_garbage_ratio(text: str) -> float:
+    """추출 텍스트에서 (cid:NNNN) 토큰이 차지하는 문자 비율."""
+    if not text:
+        return 0.0
+    garbage = sum(len(m.group(0)) for m in CID_TOKEN.finditer(text))
+    return garbage / len(text)
 
 # Visual reconstruction. MEASURED on the 854-page Korean government PDF this
 # parser was rewritten for: pypdf's extract_text returns CONTENT-STREAM order,
@@ -384,4 +405,7 @@ class PdfParser(Parser):
 
             _flush(blocks, paragraph, page_number, current_section)
 
+        joined = "\n".join(block.text for block in blocks)
+        if len(joined) >= CID_MIN_TEXT_CHARS and cid_garbage_ratio(joined) > CID_GARBAGE_RATIO:
+            raise ParseFailure(CID_FAILURE_MESSAGE)
         return ParsedDocument(blocks=blocks)

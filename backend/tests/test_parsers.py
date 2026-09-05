@@ -525,3 +525,17 @@ def test_docx_parser_raises_file_not_found_for_a_missing_file(tmp_path):
 def test_get_parser_raises_for_unsupported_type():
     with pytest.raises(ValueError):
         get_parser("exe")
+
+
+def test_cid_garbage_ratio_flags_unmapped_font_pdfs():
+    """(cid:NNNN) 3천 청크가 조용히 색인되던 실사고의 계약: 지배적이면 파싱을
+    거절하고, 정상 본문에 낀 소량은 통과시킨다."""
+    from app.rag.parsers.pdf_parser import CID_GARBAGE_RATIO, cid_garbage_ratio
+
+    garbage = "(cid:20742)(cid:21106)(cid:22426)" * 100
+    assert cid_garbage_ratio(garbage) > CID_GARBAGE_RATIO
+
+    mostly_text = ("정상적인 한국어 본문입니다. " * 200) + "(cid:849)"
+    assert cid_garbage_ratio(mostly_text) < CID_GARBAGE_RATIO
+
+    assert cid_garbage_ratio("") == 0.0
