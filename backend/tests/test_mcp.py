@@ -605,7 +605,10 @@ async def test_an_instruction_in_a_tool_result_does_not_become_an_instruction(
 
     messages = fake_llm.chat.await_args.args[0]
     system = await get_prompt("answer_agent")
-    assert messages[0].role == "system" and messages[0].content == system.text
+    # startswith: 시스템 메시지 끝에는 사용자의 "지금" 한 줄이 덧붙는다
+    # (app/core/localtime.py). 앞부분이 저장 프롬프트 그대로라는 것이 이
+    # 테스트가 지키는 성질이다.
+    assert messages[0].role == "system" and messages[0].content.startswith(system.text)
     assert messages[-1].role == "user" and messages[-1].content == "서울 날씨는?"
     carriers = [m for m in messages if hostile in m.content]
     assert len(carriers) == 1 and "<<EVIDENCE" in carriers[0].content

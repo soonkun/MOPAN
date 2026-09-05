@@ -150,7 +150,11 @@ async def test_trace_shows_every_retrieval_stage_and_the_answer_metadata(owner):
     assert trace["retrieval"]["token_budget"] > 0
     # What the prompt cost and what it was allowed - the pair that answers "did
     # the prompt take my evidence", which the budget alone cannot.
-    assert trace["retrieval"]["prompt_tokens"] == count_tokens(ANSWER_SYSTEM_PROMPT)
+    # >=: 시스템 프롬프트 끝에 사용자의 "지금" 한 줄이 덧붙는다
+    # (app/core/localtime.py). 날짜·시각이라 길이가 조금씩 달라 정확일치는
+    # 시계에 대한 단언이 되고 만다 - 여기가 지키는 것은 "프롬프트 비용이
+    # 기록된다"이다.
+    assert trace["retrieval"]["prompt_tokens"] >= count_tokens(ANSWER_SYSTEM_PROMPT)
     assert trace["retrieval"]["mandatory_allowance"] == MANDATORY_TOKEN_ALLOWANCE
 
     item = trace["evidence"][0]

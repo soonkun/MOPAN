@@ -562,7 +562,8 @@ async def test_an_edit_reaches_the_very_next_question_with_no_restart(admin_clie
     await admin_client.post("/api/chat", json={"message": "첫 질문"})
     first_system = app.state.llm_provider.chat.await_args.args[0][0]
     assert first_system.role == "system"
-    assert first_system.content == ANSWER_SYSTEM_PROMPT
+    # startswith: 끝에는 사용자의 "지금" 한 줄이 덧붙는다(app/core/localtime.py).
+    assert first_system.content.startswith(ANSWER_SYSTEM_PROMPT)
 
     await admin_client.post(
         "/api/prompts/answer_agent/versions",
@@ -602,4 +603,5 @@ async def test_a_missing_prompts_table_does_not_break_a_chat_request(admin_clien
     response = await admin_client.post("/api/chat", json={"message": "질문"})
     assert response.status_code == 200
     system = app.state.llm_provider.chat.await_args.args[0][0]
-    assert system.content == ANSWER_SYSTEM_PROMPT
+    # startswith: 끝에는 사용자의 "지금" 한 줄이 덧붙는다(app/core/localtime.py).
+    assert system.content.startswith(ANSWER_SYSTEM_PROMPT)

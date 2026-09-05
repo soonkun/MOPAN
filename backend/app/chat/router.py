@@ -279,6 +279,16 @@ async def _complete(
             if auto_trace is not None:
                 auto_trace["intent_promoted"] = "chat->search"
             intent = "search"
+        if auto_evidence:
+            # 도구가 근거를 냈으면 직접 RAG는 건너뛴다. 숙고는 "실시간·외부
+            # 데이터가 실제로 필요할 때만" 도구를 부르도록 지시되어 있으므로 그
+            # 판정이 곧 "코퍼스는 이 질문의 근거가 아니다"이다. 실사고: "서울
+            # 날씨"가 search로 분류되어 도구 근거 1개에 무관한 심사기준 14개가
+            # 얹혀 나갔다 - 질문당 약 8천 토큰이 순수 낭비이고, 무관 근거의
+            # 전달은 날조를 부른다(answer()의 관련성 바닥 주석 실측). 도구와
+            # 문서가 둘 다 필요한 질문은 @로 도구를 직접 고르면 된다 - 그
+            # 경로는 검색을 그대로 돈다.
+            fell_back = False
         if auto_ask and not evidence and not plan_evidence:
             # 도구가 답인데 필수 인자가 질문에 없다("오늘 날씨 알려줘"에 지역이
             # 없다). 문서 검색으로 새면 "관련 문서가 없습니다"가 나가는데, 그건
