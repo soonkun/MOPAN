@@ -375,19 +375,20 @@ export default function WorkflowEditorPage() {
                 setPanel((prev) => (prev === "settings" ? null : "settings"));
                 setPaletteOpen(false);
               }}
+              aria-label="워크플로우 설정"
               aria-expanded={panel === "settings"}
-              className={`flex h-10 items-center gap-2 rounded-md px-3 text-label shadow-menu ${
+              className={`flex h-10 items-center gap-2 rounded-md px-2.5 text-label shadow-menu sm:px-3 ${
                 panel === "settings"
                   ? "bg-primary-container text-on-primary-container"
                   : "bg-surface-container text-on-surface hover:bg-surface-container-high"
               }`}
             >
-              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
                 <path d="M4 7h8M18 7h2M4 17h4M14 17h6" />
                 <circle cx="15" cy="7" r="2.2" />
                 <circle cx="11" cy="17" r="2.2" />
               </svg>
-              워크플로우 설정
+              <span className="hidden sm:inline">워크플로우 설정</span>
             </button>
             <button
               type="button"
@@ -395,36 +396,39 @@ export default function WorkflowEditorPage() {
                 if (!paletteOpen) setPanel(null);
                 setPaletteOpen(!paletteOpen);
               }}
+              aria-label="도구"
               aria-expanded={paletteOpen}
-              className={`flex h-10 items-center gap-2 rounded-md px-3 text-label shadow-menu ${
+              className={`flex h-10 items-center gap-2 rounded-md px-2.5 text-label shadow-menu sm:px-3 ${
                 paletteOpen
                   ? "bg-primary-container text-on-primary-container"
                   : "bg-surface-container text-on-surface hover:bg-surface-container-high"
               }`}
             >
-              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="5" width="18" height="14" rx="2" />
-                <path d="M3 10h18" />
+              {/* 공구(스패너) - 서랍 그림보다 "도구"가 한눈에 읽힌다(소유자 지정). */}
+              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14.5 5.5a3.5 3.5 0 0 0 4.6 4.6l-8.9 8.9a2.2 2.2 0 0 1-3.1-3.1z" />
+                <path d="M5 5l3 3" />
               </svg>
-              도구
+              <span className="hidden sm:inline">도구</span>
             </button>
             <button
               type="button"
               onClick={() => setPanel((prev) => (prev === "selection" ? null : "selection"))}
               disabled={!selection}
               title={selection ? undefined : "캔버스에서 노드나 간선을 누르면 열립니다."}
+              aria-label="노드"
               aria-expanded={panel === "selection"}
-              className={`flex h-10 items-center gap-2 rounded-md px-3 text-label shadow-menu disabled:opacity-50 ${
+              className={`flex h-10 items-center gap-2 rounded-md px-2.5 text-label shadow-menu disabled:opacity-50 sm:px-3 ${
                 panel === "selection"
                   ? "bg-primary-container text-on-primary-container"
                   : "bg-surface-container text-on-surface hover:bg-surface-container-high"
               }`}
             >
-              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
                 <rect x="5" y="5" width="14" height="14" rx="2.5" />
                 <rect x="9.5" y="9.5" width="5" height="5" rx="1" />
               </svg>
-              노드
+              <span className="hidden sm:inline">노드</span>
             </button>
           </div>
 
