@@ -429,7 +429,7 @@ function WorkflowPanel({
       <div className="px-4 pt-4">
         <h2 className="text-title font-medium">워크플로우 설정</h2>
         <p className="mt-1 text-caption text-on-surface-variant">
-          노드를 고르면 여기가 그 노드의 설정으로 바뀝니다.
+          노드 설정은 캔버스에서 노드를 누르면 따로 열립니다.
         </p>
       </div>
 

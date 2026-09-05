@@ -39,10 +39,13 @@ export type Selection = { node: string } | { edge: number } | null;
 
 type View = { tx: number; ty: number; scale: number };
 
+// 세로 흐름: 들어오는 포트는 위 가운데, 나가는 포트는 아래 가운데. 가로는
+// "보기에도 별로고 문제가 많다"는 소유자 지적으로 뒤집었다 - 위에서 아래로
+// 읽는 그래프가 좁은 화면에서도 산다.
 function portCenter(node: GraphNode, side: "in" | "out") {
   return {
-    x: node.x + (side === "out" ? CARD_WIDTH : 0),
-    y: node.y + CARD_HEIGHT / 2,
+    x: node.x + CARD_WIDTH / 2,
+    y: node.y + (side === "out" ? CARD_HEIGHT : 0),
   };
 }
 
@@ -65,6 +68,8 @@ export default function EditorCanvas({
   onSelect,
   error,
   callables,
+  paletteOpen,
+  onPaletteOpenChange,
 }: {
   graph: WorkflowGraph;
   onChange: (next: WorkflowGraph) => void;
@@ -73,6 +78,10 @@ export default function EditorCanvas({
   /** placeGraphError가 이미 자리를 정한 서버의 거절. */
   error: { node?: string; edge?: number; text: string } | null;
   callables: CallableTool[];
+  /** 페이지의 왼쪽 레일이 토글한다 - 처음 화면 맞추기가 서랍 폭을 알아야
+   * 해서 값은 여전히 캔버스로 들어온다. */
+  paletteOpen: boolean;
+  onPaletteOpenChange: (open: boolean) => void;
 }) {
   const uid = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -82,9 +91,6 @@ export default function EditorCanvas({
   // 서랍은 캔버스가 들고 있다: 처음 화면 맞추기가 서랍이 가리는 폭을 빼고
   // 계산해야 질문 노드가 서랍 뒤에서 시작하지 않는다. 390px에서는 서랍이
   // 화면 전체를 먹으므로 접힌 채로 시작한다.
-  const [paletteOpen, setPaletteOpen] = useState(
-    () => typeof window === "undefined" || window.innerWidth >= 640,
-  );
   const paletteInset = paletteOpen ? 264 : 0;
   const [status, setStatus] = useState("");
   const [focusId, setFocusId] = useState<string | null>(null);
@@ -377,8 +383,8 @@ export default function EditorCanvas({
             if (!source || !target) return null;
             const a = portCenter(source, "out");
             const b = portCenter(target, "in");
-            const mid = (a.x + b.x) / 2;
-            const path = `M ${a.x} ${a.y} C ${mid} ${a.y}, ${mid} ${b.y}, ${b.x} ${b.y}`;
+            const mid = (a.y + b.y) / 2;
+            const path = `M ${a.x} ${a.y} C ${a.x} ${mid}, ${b.x} ${mid}, ${b.x} ${b.y}`;
             const bad = error?.edge === index;
             const active = selectedEdge === index;
             return (
@@ -411,9 +417,9 @@ export default function EditorCanvas({
                 />
                 {edge.when && (
                   <text
-                    x={mid}
-                    y={(a.y + b.y) / 2 - 8}
-                    textAnchor="middle"
+                    x={(a.x + b.x) / 2 + 12}
+                    y={mid + 4}
+                    textAnchor="start"
                     className="fill-on-surface-variant text-[11px]"
                     style={{ pointerEvents: "none" }}
                   >
@@ -422,8 +428,8 @@ export default function EditorCanvas({
                 )}
                 {bad && (
                   <foreignObject
-                    x={mid - 130}
-                    y={(a.y + b.y) / 2 + 8}
+                    x={(a.x + b.x) / 2 + 12}
+                    y={mid + 12}
                     width={260}
                     height={80}
                     style={{ pointerEvents: "none" }}
@@ -440,8 +446,8 @@ export default function EditorCanvas({
             <path
               d={(() => {
                 const a = portCenter(connectSource, "out");
-                const mid = (a.x + connect.x) / 2;
-                return `M ${a.x} ${a.y} C ${mid} ${a.y}, ${mid} ${connect.y}, ${connect.x} ${connect.y}`;
+                const mid = (a.y + connect.y) / 2;
+                return `M ${a.x} ${a.y} C ${a.x} ${mid}, ${connect.x} ${mid}, ${connect.x} ${connect.y}`;
               })()}
               fill="none"
               stroke="currentColor"
@@ -546,7 +552,7 @@ export default function EditorCanvas({
                 {node.kind !== "input" && (
                   <span
                     aria-hidden="true"
-                    className={`absolute -left-[7px] top-1/2 h-3.5 w-3.5 -translate-y-1/2 rounded-full border-2 border-outline bg-surface ${
+                    className={`absolute -top-[7px] left-1/2 h-3.5 w-3.5 -translate-x-1/2 rounded-full border-2 border-outline bg-surface ${
                       connect && connect.from !== node.id ? "border-primary" : ""
                     }`}
                   />
@@ -556,7 +562,7 @@ export default function EditorCanvas({
                   <button
                     type="button"
                     aria-label={`${node.id}에서 간선 끌기 (키보드는 오른쪽 설정의 간선 절에서)`}
-                    className="absolute -right-[9px] top-1/2 h-[18px] w-[18px] -translate-y-1/2 cursor-crosshair rounded-full border-2 border-outline bg-surface hover:border-primary hover:bg-primary-container"
+                    className="absolute -bottom-[9px] left-1/2 h-[18px] w-[18px] -translate-x-1/2 cursor-crosshair rounded-full border-2 border-outline bg-surface hover:border-primary hover:bg-primary-container"
                     onPointerDown={(event) => {
                       if (event.button !== 0) return;
                       event.stopPropagation();
@@ -603,7 +609,7 @@ export default function EditorCanvas({
         callables={callables}
         onAdd={addFromPalette}
         open={paletteOpen}
-        onOpenChange={setPaletteOpen}
+        onOpenChange={onPaletteOpenChange}
       />
 
       {/* 줌 콘트롤. */}

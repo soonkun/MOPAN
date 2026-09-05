@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { apiFetch, errorMessage } from "@/lib/api";
 import EditorCanvas, { type Selection } from "@/components/workflows/EditorCanvas";
 import Inspector, { type Catalog, type Draft } from "@/components/workflows/Inspector";
+import TestRun from "@/components/workflows/TestRun";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import { placeGraphError, starterGraph } from "@/lib/graph";
 import type {
@@ -100,7 +101,14 @@ export default function WorkflowEditorPage() {
   } | null>(null);
   const [saving, setSaving] = useState(false);
   const [selection, setSelection] = useState<Selection>(null);
-  const [inspectorOpen, setInspectorOpen] = useState(false);
+  // 오른쪽 고정 패널을 없애고 전부 수납했다(소유자 지적: "오른쪽에도 설정으로
+  // 수납"). 왼쪽 레일이 워크플로우 설정·도구·노드 순으로 서고, 패널은 레일
+  // 옆에 떠서 열린다. "selection"은 노드/간선을 고르면 자동으로 열린다.
+  const [panel, setPanel] = useState<null | "settings" | "selection">(null);
+  const [paletteOpen, setPaletteOpen] = useState(
+    () => typeof window === "undefined" || window.innerWidth >= 640,
+  );
+  const [testing, setTesting] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
@@ -212,9 +220,10 @@ export default function WorkflowEditorPage() {
       const placed = placeGraphError(message, graph);
       if (placed.node !== undefined || placed.edge !== undefined) {
         setGraphError(placed);
-        // 거절이 가리키는 것을 화면과 인스펙터가 같이 보여주게.
+        // 거절이 가리키는 것을 화면과 설정 패널이 같이 보여주게.
         if (placed.node !== undefined) setSelection({ node: placed.node });
         else if (placed.edge !== undefined) setSelection({ edge: placed.edge });
+        setPanel("selection");
       } else setSaveError(message);
     } finally {
       setSaving(false);
@@ -290,11 +299,19 @@ export default function WorkflowEditorPage() {
           )}
           <button
             type="button"
-            onClick={() => setInspectorOpen((open) => !open)}
-            className="btn-tonal btn-compact lg:hidden"
-            aria-expanded={inspectorOpen}
+            onClick={() => setTesting((open) => !open)}
+            disabled={!editingId || dirty}
+            title={
+              !editingId
+                ? "먼저 만들기로 저장해야 실행할 수 있습니다."
+                : dirty
+                  ? "저장하지 않은 변경이 있습니다. 저장 후 실행해 주세요."
+                  : "저장된 그래프를 채팅과 같은 경로로 실행합니다."
+            }
+            className="btn-tonal btn-compact"
+            aria-expanded={testing}
           >
-            설정
+            실행해보기
           </button>
           <button
             type="button"
@@ -326,34 +343,106 @@ export default function WorkflowEditorPage() {
             selection={selection}
             onSelect={(next) => {
               setSelection(next);
-              if (next) setInspectorOpen(true);
+              // 노드/간선을 고르면 그 설정이 팝업으로, 빈 바닥을 누르면 닫힌다.
+              setPanel(next ? "selection" : panel === "selection" ? null : panel);
             }}
             error={graphError}
             callables={callables}
+            paletteOpen={paletteOpen}
+            onPaletteOpenChange={setPaletteOpen}
           />
-        </div>
-        <div
-          className={`${
-            inspectorOpen ? "flex" : "hidden"
-          } absolute inset-y-0 right-0 z-20 shadow-menu lg:static lg:flex lg:shadow-none`}
-        >
-          <Inspector
-            graph={graph}
-            onChangeGraph={changeGraph}
-            selection={selection}
-            onSelect={setSelection}
-            callables={callables}
-            mcpTools={tools}
-            error={graphError}
-            draft={draft}
-            onChangeDraft={setDraft}
-            catalog={catalog}
-            editingId={editingId}
-            note={note}
-            onNote={setNote}
-            versions={versions}
-            onRollBack={(v) => void rollBack(v)}
-          />
+
+          {/* 왼쪽 레일: 워크플로우 설정 · 도구 · 노드 순(소유자 지정). 패널은
+              전부 레일 옆에 떠서 열리고, 캔버스는 항상 전체 화면이다. */}
+          <div className="pointer-events-auto absolute left-3 top-3 z-20 flex flex-col items-start gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setPanel((prev) => (prev === "settings" ? null : "settings"));
+                setPaletteOpen(false);
+              }}
+              aria-expanded={panel === "settings"}
+              className={`flex h-10 items-center gap-2 rounded-md px-3 text-label shadow-menu ${
+                panel === "settings"
+                  ? "bg-primary-container text-on-primary-container"
+                  : "bg-surface-container text-on-surface hover:bg-surface-container-high"
+              }`}
+            >
+              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                <path d="M4 7h8M18 7h2M4 17h4M14 17h6" />
+                <circle cx="15" cy="7" r="2.2" />
+                <circle cx="11" cy="17" r="2.2" />
+              </svg>
+              워크플로우 설정
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (!paletteOpen) setPanel(null);
+                setPaletteOpen(!paletteOpen);
+              }}
+              aria-expanded={paletteOpen}
+              className={`flex h-10 items-center gap-2 rounded-md px-3 text-label shadow-menu ${
+                paletteOpen
+                  ? "bg-primary-container text-on-primary-container"
+                  : "bg-surface-container text-on-surface hover:bg-surface-container-high"
+              }`}
+            >
+              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="5" width="18" height="14" rx="2" />
+                <path d="M3 10h18" />
+              </svg>
+              도구
+            </button>
+            <button
+              type="button"
+              onClick={() => setPanel((prev) => (prev === "selection" ? null : "selection"))}
+              disabled={!selection}
+              title={selection ? undefined : "캔버스에서 노드나 간선을 누르면 열립니다."}
+              aria-expanded={panel === "selection"}
+              className={`flex h-10 items-center gap-2 rounded-md px-3 text-label shadow-menu disabled:opacity-50 ${
+                panel === "selection"
+                  ? "bg-primary-container text-on-primary-container"
+                  : "bg-surface-container text-on-surface hover:bg-surface-container-high"
+              }`}
+            >
+              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                <rect x="5" y="5" width="14" height="14" rx="2.5" />
+                <rect x="9.5" y="9.5" width="5" height="5" rx="1" />
+              </svg>
+              노드
+            </button>
+          </div>
+
+          {/* 수납 패널 - 도구 서랍과 같은 자리(레일 옆)에서 열린다. */}
+          {(panel === "settings" || (panel === "selection" && selection)) && (
+            <div className="pointer-events-auto absolute bottom-3 left-3 top-[9.75rem] z-10 flex w-80 max-w-[calc(100%-1.5rem)] overflow-hidden rounded-md shadow-menu">
+              <Inspector
+                graph={graph}
+                onChangeGraph={changeGraph}
+                selection={panel === "settings" ? null : selection}
+                onSelect={(next) => {
+                  setSelection(next);
+                  if (!next) setPanel(null);
+                }}
+                callables={callables}
+                mcpTools={tools}
+                error={graphError}
+                draft={draft}
+                onChangeDraft={setDraft}
+                catalog={catalog}
+                editingId={editingId}
+                note={note}
+                onNote={setNote}
+                versions={versions}
+                onRollBack={(v) => void rollBack(v)}
+              />
+            </div>
+          )}
+
+          {testing && editingId && (
+            <TestRun workflowId={editingId} onClose={() => setTesting(false)} />
+          )}
         </div>
       </div>
 

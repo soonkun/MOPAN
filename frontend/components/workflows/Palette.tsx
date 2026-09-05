@@ -47,27 +47,11 @@ export default function Palette({
       c.ref.toLowerCase().includes(query.trim().toLowerCase()),
   );
 
-  if (!open) {
-    return (
-      <div className="pointer-events-auto absolute left-3 top-3 z-10">
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          className="flex h-10 items-center gap-2 rounded-md bg-surface-container px-3 text-label text-on-surface shadow-menu hover:bg-surface-container-high"
-          aria-expanded="false"
-        >
-          <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="3" y="5" width="18" height="14" rx="2" />
-            <path d="M3 10h18" />
-          </svg>
-          도구
-        </button>
-      </div>
-    );
-  }
+  // 접힌 버튼은 페이지의 왼쪽 레일이 그린다(워크플로우 설정·도구·노드 순).
+  if (!open) return null;
 
   return (
-    <div className="pointer-events-auto absolute bottom-3 left-3 top-3 z-10 flex w-60 flex-col rounded-md bg-surface-container shadow-menu">
+    <div className="pointer-events-auto absolute bottom-3 left-3 top-[9.75rem] z-10 flex w-60 max-w-[calc(100%-1.5rem)] flex-col rounded-md bg-surface-container shadow-menu">
       <div className="flex items-center justify-between gap-2 p-3 pb-2">
         <h2 className="text-label font-medium text-on-surface">도구 서랍</h2>
         <button

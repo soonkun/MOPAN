@@ -34,6 +34,8 @@ export const NODE_FIELDS = ["count", "text", "top.title", "top.text", "top.ref"]
  * canvas would be a workflow that saves and cannot run. */
 export function starterGraph(): WorkflowGraph {
   return {
+    // 세로 흐름: 위에서 아래로 읽는다(소유자 지적 - 가로는 보기에도 별로고
+    // 좁은 화면에서 문제가 많다). 포트도 위/아래에 있다(EditorCanvas).
     nodes: [
       { id: "input", kind: "input", label: "질문", x: 0, y: 0 },
       {
@@ -43,10 +45,10 @@ export function starterGraph(): WorkflowGraph {
         tool: "rag",
         collections: [],
         arguments: { query: "{{input.text}}" },
-        x: 260,
-        y: 0,
+        x: 0,
+        y: 180,
       },
-      { id: "answer", kind: "answer", label: "답변", x: 520, y: 0 },
+      { id: "answer", kind: "answer", label: "답변", x: 0, y: 360 },
     ],
     edges: [
       { from: "input", to: "search" },
