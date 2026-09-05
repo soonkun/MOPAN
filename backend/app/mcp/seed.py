@@ -1,6 +1,6 @@
 """동봉 MCP의 자동 등록.
 
-분류표 조회 MCP(/goods/mcp)는 "문서를 임베딩하면 그 안의 분류표가 곧바로 조회
+RAG 문서 표 조회 MCP(/tables/mcp)는 "문서를 임베딩하면 그 안의 표가 곧바로 조회
 도구가 된다"는 성질이라 예시가 아니라 기본 기능이다. 그래서 관리자가 등록하는
 대신 부팅이 등록한다: backend 기동 시(app/main.py lifespan)와 첫 관리자 계정이
 만들어질 때(app/auth/service.py) 이 함수가 불리고, 두 곳 다 실패해도 앱은 뜬다 -
@@ -26,9 +26,16 @@ from app.models.user import User
 
 logger = logging.getLogger("mopan.mcp")
 
-# "상품분류"가 아니라 "표": 마커 구조로 청킹된 모든 표가 대상이다(examples_mcp
-# 상단 주석 참조). 이름이 특정 표를 가리키면 범용이라는 사실이 화면에서 죽는다.
-BUNDLED_SERVER_NAME = "표 조회"
+# 소유자가 고른 정확한 이름: RAG로 등록(임베딩)된 문서의 표를 읽는다는 사실이
+# 이름에 그대로 있어야 한다. 이전 시드명은 아래 집합으로 따라 개명되지만,
+# 관리자가 직접 지은 이름은 건드리지 않는다.
+BUNDLED_SERVER_NAME = "RAG 문서 표 조회"
+_PRIOR_SEED_NAMES = {"표 조회", "상품분류 조회"}
+
+# 경로 개명(2026-09-05): /goods/mcp -> /tables/mcp. 구주소로 등록된 행은 아래
+# 시딩이 base_url을 새 주소로 따라 붙인다(서버 쪽은 구경로도 별칭으로 응답).
+_CANONICAL_SUFFIX = "/tables/mcp"
+_LEGACY_SUFFIX = "/goods/mcp"
 
 
 async def seed_bundled_servers(db: AsyncSession, settings: Settings) -> None:
@@ -38,6 +45,11 @@ async def seed_bundled_servers(db: AsyncSession, settings: Settings) -> None:
         return
     try:
         server = await db.scalar(select(McpServer).where(McpServer.base_url == url))
+        if server is None and url.endswith(_CANONICAL_SUFFIX):
+            legacy_url = url[: -len(_CANONICAL_SUFFIX)] + _LEGACY_SUFFIX
+            server = await db.scalar(select(McpServer).where(McpServer.base_url == legacy_url))
+            if server is not None:
+                server.base_url = url
         if server is None:
             # created_by는 NOT NULL RESTRICT다(사람이 화면에서 등록한 것과 같은
             # 스키마를 쓴다). 가장 오래된 활성 관리자를 소유자로 적는다 - 아직
@@ -56,8 +68,11 @@ async def seed_bundled_servers(db: AsyncSession, settings: Settings) -> None:
             db.add(server)
             await db.commit()
             log_event(logger, "mcp_server_seeded", server_id=str(server.id), server=server.name)
-        elif not server.builtin:
+        else:
             server.builtin = True
+            if server.name in _PRIOR_SEED_NAMES:
+                server.name = BUNDLED_SERVER_NAME
+            # builtin 승격·구주소 이관·시드명 개명을 한 번에. 다 맞으면 no-op commit.
             await db.commit()
 
         tool_count = (

@@ -420,7 +420,7 @@ async def kipris_mcp(request: Request) -> Response:
 
 
 # ---------------------------------------------------------------------------
-# 표 조회 MCP - 세 번째 서버, /goods/mcp. 키가 필요 없다.
+# 표 조회 MCP - 세 번째 서버, /tables/mcp. 키가 필요 없다.
 #
 # "상표분류 코드가 뭐냐" 같은 물음에 답하는 실체는 외부 API가 아니라 이미
 # 코퍼스에 있는 표다(예: 유사상품 심사기준의 9천여 행 - 문서가 곧 데이터라는
@@ -437,9 +437,9 @@ async def kipris_mcp(request: Request) -> Response:
 #      등록해도 이 도구가 빈 손이 되지 않는 것이 이 폴백의 존재 이유다.
 # 상품분류 전용이 아니라서 이름도 "표 조회"다.
 #
-# 경로가 /goods/mcp인 것은 역사다: 이미 등록된 서버의 base_url이 이 주소라
-# 경로를 바꾸면 기존 등록 행이 죽는다. 이름은 도구·서버명이 밖에 보이는
-# 전부이고, 그 둘은 일반화했다.
+# 정식 경로는 /tables/mcp다(이름 일반화의 마무리 - 소유자가 화면에서 goods를
+# 짚었다). /goods/mcp는 초기 등록 행들이 그 주소를 물고 있어 별칭으로 계속
+# 응답하고, 시딩(app/mcp/seed.py)이 기존 행의 base_url을 새 주소로 따라 붙인다.
 
 import os
 
@@ -541,8 +541,9 @@ async def table_lookup(arguments: dict) -> str:
     return "\n".join(lines)
 
 
-@app.post("/goods/mcp")
-async def goods_mcp(request: Request) -> Response:
+@app.post("/tables/mcp")
+@app.post("/goods/mcp")  # 구경로 별칭 - 위 주석 참조
+async def tables_mcp(request: Request) -> Response:
     try:
         payload = await request.json()
     except Exception:

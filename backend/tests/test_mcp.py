@@ -793,3 +793,25 @@ async def test_the_first_admin_registration_seeds_the_bundled_server(client, app
     server = await db.scalar(select(McpServer).where(McpServer.base_url == PUBLIC_URL))
     assert server is not None
     assert server.builtin is True
+
+
+async def test_seed_migrates_a_legacy_goods_url_and_prior_seed_name(admin_client, db, stub_mcp):
+    """경로 개명(/goods/mcp -> /tables/mcp) 뒤의 배포: 구주소로 등록돼 있던 행은
+    새 주소로 이관되고, 이전 시드명("표 조회")은 현재 시드명으로 따라 바뀐다.
+    관리자가 직접 지은 이름은 위의 adopts 테스트가 지키는 대로 그대로다."""
+    from app.mcp.seed import BUNDLED_SERVER_NAME, seed_bundled_servers
+
+    stub_mcp(StubMCP())
+    created = await register(
+        admin_client, name="표 조회", base_url="http://93.184.216.34/goods/mcp"
+    )
+    await seed_bundled_servers(
+        db, settings_with(bundled_mcp_seed_url="http://93.184.216.34/tables/mcp")
+    )
+
+    row = await db.get(McpServer, uuid.UUID(created["id"]))
+    await db.refresh(row)
+    assert row.base_url == "http://93.184.216.34/tables/mcp"
+    assert row.builtin is True
+    assert row.name == BUNDLED_SERVER_NAME
+    assert (await db.scalar(select(func.count()).select_from(McpServer))) == 1
