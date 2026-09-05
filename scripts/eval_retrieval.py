@@ -1232,7 +1232,9 @@ async def measure_row(
 
             queries = queries + await expansion.expand_query(
                 provider, query, n_retry,
-                model=settings.query_expansion_model,
+                # 제품(app/chat/service.py:retrieve)과 같은 모양: 재시도에만
+                # 별도(대개 추론) 모델을 허용한다.
+                model=settings.query_expansion_retry_model or settings.query_expansion_model,
                 timeout=settings.query_expansion_timeout_seconds,
             )
             cost += expansion.last_cost_usd()

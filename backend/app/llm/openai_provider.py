@@ -173,6 +173,22 @@ class OpenAIProvider(LLMProvider):
         }
         if tools:
             request["tools"] = tools
+        # 추론 계열(gpt-5·o시리즈)은 temperature를 기본값 외에 받지 않고,
+        # reasoning_effort는 그 계열만 받는다. 어느 쪽이든 어기면 원문 400이
+        # 그대로 나가므로 적응은 호출부가 아니라 여기 한 곳에서 한다 -
+        # 비추론 모델에 남은 effort(브라우저에 기억된 값)는 조용히 버린다.
+        from app.core.config import model_supports_reasoning
+
+        if model_supports_reasoning(str(request["model"])):
+            request.pop("temperature", None)
+        else:
+            request.pop("reasoning_effort", None)
+        effort = request.pop("reasoning_effort", None)
+        if effort is not None:
+            # extra_body로: 이 컨테이너의 openai SDK는 reasoning_effort를 명명
+            # 인자로 모른다(실측 TypeError). extra_body는 버전 무관하게 요청
+            # JSON에 병합된다.
+            request["extra_body"] = {**request.get("extra_body", {}), "reasoning_effort": effort}
 
         try:
             response = await self.client.chat.completions.create(**request)

@@ -90,13 +90,29 @@ async def retrieve(
     # caller's already-loaded Conversation survives the commit unexpired.
     scoped = workflow.scope_collections(collection_ids)
     await db.commit()
+    # 사례 서술 -> 용어 질의 재작성 (RETRIEVAL_RECAST, 기본 꺼짐 - 측정 후 켠다).
+    # 검색에만 쓰이고 answer()는 원문을 받는다: 답은 사용자의 질문에 하는 것이지
+    # 우리가 고쳐 쓴 질문에 하는 것이 아니다.
+    question_for_search = question
+    if settings.retrieval_recast:
+        from app.retrieval.recast import recast_query
+
+        recast = await recast_query(
+            llm_provider,
+            question,
+            model=settings.query_expansion_model,
+            timeout=settings.query_expansion_timeout_seconds,
+        )
+        if recast:
+            question_for_search = recast
+            log_event(logger, "query_recast", original_chars=len(question), recast=recast)
     search = partial(
         hybrid_search,
         db,
         vector_store,
         llm_provider,
         reranker,
-        question,
+        question_for_search,
         top_n=settings.retrieval_top_n,
         rrf_k=settings.rrf_k,
         candidate_limit=settings.retrieval_candidate_limit,
@@ -170,7 +186,14 @@ async def retrieve(
         # Without this the connection sits idle-in-transaction across that round
         # trip - the hazard the docstring above spends a paragraph on.
         await db.commit()
-        retried = await search(query_expansion=settings.query_expansion_count)
+        retried = await search(
+            query_expansion=settings.query_expansion_count,
+            # 재시도에만 다른(대개 추론) 모델을 허용한다 - 근거는 config.py의
+            # query_expansion_retry_model 주석의 실측.
+            query_expansion_model=(
+                settings.query_expansion_retry_model or settings.query_expansion_model
+            ),
+        )
         log_event(
             logger,
             "retrieval_retried",
@@ -453,6 +476,7 @@ async def answer(
     prompt_name: str = "answer_agent",
     intent: str = "search",
     user_nickname: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> ChatAnswer:
     """Deliberately knows nothing about where `evidence` came from: no session, no
     vector store, no reranker. That is the whole point of the split - Slice 3 runs
@@ -536,7 +560,14 @@ async def answer(
     # None - the caller wants the provider's own default, and model=None would
     # put a null on the wire. The router resolves it against the allowlist before
     # calling; this function is not the trust boundary and must not be used as one.
-    result = await llm_provider.chat(messages, tools=None, **({"model": model} if model else {}))
+    # reasoning_effort도 model과 같은 이유로 kwargs를 탄다: 프로바이더가 추론
+    # 계열 여부를 한 곳에서 판단하고, 비추론 모델에 온 값은 조용히 버린다.
+    result = await llm_provider.chat(
+        messages,
+        tools=None,
+        **({"model": model} if model else {}),
+        **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),
+    )
     latency_ms = int((time.perf_counter() - started) * 1000)
 
     citations = _citations_from(result.content, used_evidence)

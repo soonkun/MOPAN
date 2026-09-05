@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -40,6 +41,9 @@ class ChatRequest(BaseModel):
     # Field(pattern=...) would freeze at import time, and a 422 would answer in
     # English. None means the default, ANSWER_MODEL.
     model: str | None = Field(default=None, max_length=100)
+    # 추론 모델의 사고 깊이. None이면 프로바이더 기본값이고, 비추론 모델에
+    # 실려 오면(모델을 바꾼 브라우저의 기억) 프로바이더가 조용히 버린다.
+    reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
     # Ids from GET /api/mcp/tools. The count ceiling is
     # MAX_TOOL_CALLS_PER_MESSAGE and is enforced in the router for the same two
     # reasons attachment_ids' is: it is operator configuration, and a
@@ -126,6 +130,10 @@ class AnswerModelResponse(BaseModel):
     id: str
     label: str
     is_default: bool
+    # 이 모델이 추론 수준(reasoning_effort)을 받는가. 화면이 조절 UI를 그릴지
+    # 말지의 근거이고, 실제 강제는 프로바이더가 한다(비추론 모델의 effort는
+    # 조용히 버려진다).
+    reasoning: bool = False
 
 
 class ConversationResponse(BaseModel):

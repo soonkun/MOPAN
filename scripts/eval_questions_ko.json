@@ -1,884 +1,897 @@
 {
-  "_readme": [
-    "Korean retrieval evaluation set. The 47 base/neighbor/tokenizer/proviso questions are about 특허·실용신안 심사기준; the crossref group also draws on 상표심사기준 and 지식재산권 권리회복 심사 가이드라인, so `document_filename` is a LIST and a question names its own document in `document` (absent = the first name). Scoring is per document: a gold page is the pair (document, page), never a bare page number.",
-    "Each entry was written by reading the passage first, then writing the question it answers.",
-    "A GOLD ANSWER IS ADDRESSED BY PAGE OR BY PROVISION, whichever its document has. `gold_pages` are PDF page numbers (chunks.page) and `gold_paths` are hierarchy paths (chunk_metadata.path, written by app/rag/chunking/hierarchy.py) - \"조59/항2\" is 제59조제2항. Neither is a chunk id: chunk ids change on every re-ingestion, page numbers and article numbers do not. The eight statutes have NO pages at all - page is NULL for all 2,669 of their chunks - so scoring them on pages made a statute chunk in the top 8 cost a question its recall by definition, which is why the 특허법 ingest could only ever read as harm. `anchor` is a verbatim substring of the gold passage - if the extractor changes and a page shifts, grep the anchor to re-locate it.",
-    "every re-ingestion, page numbers do not. `anchor` is a verbatim substring of the gold",
-    "passage - if the extractor changes and a page shifts, grep the anchor to re-locate it.",
-    "`group` splits the set. Absent or \"base\" is the original 21 questions. \"neighbor\" is the 8 written FROM measured proviso splits: the rule is in one chunk and the 다만/그러나 that qualifies it is in the NEXT one, so retrieving only the rule chunk yields a confidently wrong answer. Their `anchor` is the proviso sentence, which is what makes them able to detect NEIGHBOR_EXPANSION at all - the base questions cannot, because none of them was chosen for spanning a chunk boundary.",
-    "\"tokenizer\" is 8 questions that probe the known content_tsv bug: content_tsv is to_tsvector('simple', content), which does not segment Korean, so a josa stays glued to the noun and the document token 상표등록출원이나 never matches the query token 상표등록출원. Each was verified with plainto_tsquery('simple', ...) against the live corpus: the form in `query_form` matches ZERO chunks as a lexeme while the form in `doc_form` is what the corpus actually stores. `probe` says which way the mismatch runs - \"bare->inflected\" (question bare, document josa-glued) or \"inflected->bare\" (question josa-glued, document bare). query_form/doc_form are documentation, not scored. These questions can only be won by the dense side or by a tokenizer that segments Korean; a pure sparse run should fail them.",
-    "\"proviso\" is 10 questions where retrieving the main rule WITHOUT its 단서/다만 clause produces a confidently WRONG answer. Each is phrased so the main rule alone answers backwards - the exception case is asked about directly, or the yes/no flips on the proviso - and the `anchor` is the PROVISO sentence, never the main rule, which is what lets the metric see the failure. Includes double-negative (p04, p07) and condition-stacking (p05, p06, p09) phrasings. `why` records what the wrong answer would be on the main rule alone; documentation, not scored.",
-    "\"crossref\" is 25 questions whose answer needs a 준용/참조 hop. It was 5 and read anchor 0.800 for two days across every stage built - sparse bigrams, reranking, query expansion, neighbour expansion, classification-table chunking, hierarchical chunking, citation edges - and 0.800 at n=5 is ONE question, which is why it was enlarged before anything else was built. x01-x05 are the original manual-to-manual pointers: gold_pages lists both hops, pointer page first, and the `anchor` sits on the SECOND hop. x06-x25 were written from the corpus's REAL 준용 occurrences (254 clauses naming a 제N조 target; 128 of those targets exist elsewhere in the same document, 99 name a statute nobody uploaded). x06-x10 are the strongest shape available here and the one the owner's argument is about: the 권리회복 guideline prints 특허법 §16/§67의3/§81의3 in full and then says 실용신안법 §3/§15/§20 준용 them, so a question asked in 실용신안 vocabulary is answered by a sentence that says 특허 throughout and 실용신안 nowhere. Their gold_pages is the TARGET page only, so neither recall nor anchor can be won without the hop. MEASURED: all five are already answered by the deployed pipeline with no 준용 machinery of any kind - the embedding crosses the substitution on its own. The three anchor misses at n=25 are x01 (a 「제8부제2장 3.」 section-TITLE pointer, and its citing chunk sits at fused rank 10 with TOP_N=8), x11 (plain ranking: the whole 659-672 neighbourhood arrived and p.669 did not) and x23 (a 준용 조문 list split across two chunks with different ancestor lines). None is a 준용 failure.",
-    "Run with: python scripts/eval_retrieval.py",
-    "\"statute\" is 14 questions whose answer is IN one of the eight statutes and nowhere else, written the way a person asks - 특허법 6, 상표법 3, 실용신안법 2, 특허법 시행규칙 2, 상표법 시행규칙 1. Without them nothing in this fixture covered the 2,669 statute chunks of the corpus's 19,704, so ingesting 특허법 had no way to show a gain. Each `anchor` was checked against the live corpus and sits in exactly ONE chunk, at the `gold_paths` provision; two of them (s04, s14) have their sentence QUOTED in a manual as well, which is the corpus telling the truth about itself rather than a defect in the question."
-  ],
-  "document_filename": [
-    "특허·실용신안 심사기준.pdf",
-    "상표심사기준.pdf",
-    "지식재산권 권리회복 심사 가이드라인.pdf",
-    "특허법.html",
-    "상표법.html",
-    "실용신안법.html",
-    "특허법 시행령.html",
-    "상표법 시행령.html",
-    "실용신안법 시행령.html",
-    "특허법 시행규칙.html",
-    "상표법 시행규칙.html"
-  ],
-  "questions": [
-    {
-      "id": "q01-공지예외-국내우선권",
-      "question": "출원전 공개를 했는데 공지예외주장은 안 했다. 그 건을 기초로 국내우선권주장해서 출원할 때 공지예외적용주장이 가능한가?",
-      "gold_pages": [
-        297,
-        445,
-        593,
-        601
-      ],
-      "anchor": "국내우선권주장출원에 대해서도 선출원시에 주장한 특허법 제"
-    },
-    {
-      "id": "q02-공지예외-증명서류기한",
-      "question": "공지예외주장을 한 경우 증명서류는 출원일부터 며칠 이내에 제출해야 하나요?",
-      "gold_pages": [
-        444
-      ],
-      "anchor": "증명할 수 있는 서류를 출원일로부터 30일 이내에 제출하였는지"
-    },
-    {
-      "id": "q03-의사에반한공지",
-      "question": "권리자의 의사에 반하여 발명이 공지된 경우에도 신규성 상실의 예외를 인정받을 수 있나요?",
-      "gold_pages": [
-        290,
-        291
-      ],
-      "anchor": "의사에 반하여 발명이 공지된 경우"
-    },
-    {
-      "id": "q04-분할출원-공지예외절차",
-      "question": "분할출원을 하면서 공지예외주장을 하려면 어떤 절차를 밟아야 하나요?",
-      "gold_pages": [
-        554,
-        555,
-        556
-      ],
-      "anchor": "분할출원에 대하여 공지예외주장"
-    },
-    {
-      "id": "q05-변경출원-우선권주장",
-      "question": "실용신안등록출원을 특허출원으로 변경출원할 때 공지예외주장이나 우선권주장도 함께 할 수 있나요?",
-      "gold_pages": [
-        564,
-        565
-      ],
-      "anchor": "변경출원에 대하여 공지예외주장 또는 우선권주장을 하고자 할 때에는"
-    },
-    {
-      "id": "q06-분리출원-공지예외",
-      "question": "원출원에서 공지예외주장을 하지 않았는데 분리출원에서 새로 공지예외주장을 할 수 있나요?",
-      "gold_pages": [
-        609,
-        610
-      ],
-      "anchor": "원출원시 공지예외주장을 하지 않았더라도 분리출원시"
-    },
-    {
-      "id": "q07-미생물기탁시기",
-      "question": "미생물에 관계되는 발명은 언제까지 어느 기관에 기탁해야 하나요?",
-      "gold_pages": [
-        227,
-        228,
-        229,
-        230,
-        231
-      ],
-      "anchor": "특허출원을 하려는 자는 특허출원 전에"
-    },
-    {
-      "id": "q08-미생물-기탁면제",
-      "question": "통상의 기술자가 쉽게 입수할 수 있는 미생물이면 기탁을 생략해도 되나요?",
-      "gold_pages": [
-        229,
-        230,
-        231
-      ],
-      "anchor": "쉽게 입수할 수 있는 경우에는 이를 기탁하지 아니할 수 있다"
-    },
-    {
-      "id": "q09-수탁번호-신규사항",
-      "question": "최초 명세서에 없던 미생물 수탁번호를 보정으로 새로 적으면 신규사항 추가인가요?",
-      "gold_pages": [
-        232
-      ],
-      "anchor": "보정에 의하여 새로이 기재하는 것은 신"
-    },
-    {
-      "id": "q10-의료행위-산업상이용가능성",
-      "question": "의료행위를 단계로 포함하는 방법 발명은 산업상 이용할 수 있는 발명으로 인정되나요?",
-      "gold_pages": [
-        251,
-        252,
-        253,
-        254,
-        255,
-        259
-      ],
-      "anchor": "청구항에 의료행위를 적어도 하나의 단계"
-    },
-    {
-      "id": "q11-인체채취물-처리방법",
-      "question": "혈액이나 소변처럼 인체에서 채취한 것을 처리하는 방법도 의료행위로 보아 거절하나요?",
-      "gold_pages": [
-        254,
-        255
-      ],
-      "anchor": "인간으로부터 자연적으로 배출된 것"
-    },
-    {
-      "id": "q12-최후거절이유-보정범위",
-      "question": "최후거절이유통지에 대한 의견서 제출기간에 할 수 있는 보정의 범위는 어디까지인가요?",
-      "gold_pages": [
-        365,
-        367,
-        368
-      ],
-      "anchor": "후거절이유통지에 대한 의견서 제출기간 이내의 보정"
-    },
-    {
-      "id": "q13-신규사항-비교대상",
-      "question": "보정이 신규사항 추가에 해당하는지 판단할 때 무엇과 비교하나요?",
-      "gold_pages": [
-        371,
-        372
-      ],
-      "anchor": "위한 비교 대상은 출원서에 최초로 첨부된 명세서 또는 도면이다"
-    },
-    {
-      "id": "q14-공서양속",
-      "question": "공공의 질서나 선량한 풍속에 어긋나는 발명은 특허를 받을 수 있나요?",
-      "gold_pages": [
-        354,
-        355,
-        356
-      ],
-      "anchor": "공공의 질서 또는 선량한 풍속에 어긋나거나"
-    },
-    {
-      "id": "q15-마쿠쉬-단일성",
-      "question": "하나의 청구항에 택일적 요소를 마쿠쉬 형식으로 적은 경우 발명의 단일성은 어떻게 판단하나요?",
-      "gold_pages": [
-        193,
-        220,
-        221
-      ],
-      "anchor": "택일적 요소가 마쿠쉬 방식으로 기재된 경우"
-    },
-    {
-      "id": "q16-선택발명-진보성",
-      "question": "선택발명처럼 효과 예측이 어려운 분야에서 진보성은 어떻게 판단하나요?",
-      "gold_pages": [
-        313,
-        314,
-        315
-      ],
-      "anchor": "선택발명이나 화학분야의 발명 등과 같이"
-    },
-    {
-      "id": "q17-조약우선권-증명서류",
-      "question": "조약우선권주장출원의 우선권증명서류는 언제까지 제출해야 하나요?",
-      "gold_pages": [
-        439,
-        440,
-        441
-      ],
-      "anchor": "우선권증명서류는 최선일로부터"
-    },
-    {
-      "id": "q18-국제출원-확대된선출원",
-      "question": "국제특허출원이 확대된 선출원의 타출원이 되는 경우 인용할 수 있는 발명의 범위는 어디까지인가요?",
-      "gold_pages": [
-        338,
-        339,
-        450,
-        451
-      ],
-      "anchor": "확대된 선출원의 타출원"
-    },
-    {
-      "id": "q19-공시송달-효력발생",
-      "question": "공시송달은 언제부터 효력이 발생하나요?",
-      "gold_pages": [
-        101
-      ],
-      "anchor": "공시송달은 특허공보에 게재한 날부터 2주일"
-    },
-    {
-      "id": "q20-우편제출-도달일",
-      "question": "출원서를 우편으로 제출한 경우 지식재산처에 도달한 날은 언제로 보나요?",
-      "gold_pages": [
-        99,
-        100,
-        102
-      ],
-      "anchor": "우편물의 통신일부인에 그 표시된 날"
-    },
-    {
-      "id": "q21-공지예외-국내우선권-사후주장",
-      "question": "출원전 공개를 했는데 공지예외주장은 안했어. 그런데 그 건을 기초로 국내우선권주장해서 출원할때 공지예외적용주장 가능해? 특허야",
-      "gold_pages": [
-        593
-      ],
-      "anchor": "공지예외주장을 하지 않았더라도 국내우선권주장출원시 적법한 절차"
-    },
-    {
-      "id": "q22-무능력자-법정대리인-예외",
-      "group": "neighbor",
-      "question": "미성년자가 특허출원 등 특허에 관한 절차를 밟으려면 어떻게 해야 하나요?",
-      "gold_pages": [
-        49
-      ],
-      "anchor": "미성년자와 피한정후견인이 독립하여 법률행위를 할 수 있는 경우는 그러하지 아니하다"
-    },
-    {
-      "id": "q23-법인격없는사단-당사자능력",
-      "group": "neighbor",
-      "question": "동창회나 종친회 같은 법인격 없는 단체는 특허에 관한 절차에서 어떤 지위를 갖나요?",
-      "gold_pages": [
-        52
-      ],
-      "anchor": "대표자 또는 관리인이 정해져 있는 경우에는 그 사단 또는 재단의 이름으로 출원심사청구"
-    },
-    {
-      "id": "q24-법정대리인-후견인-특별수권",
-      "group": "neighbor",
-      "question": "법정대리인이 본인을 대리하여 특허에 관한 절차를 밟을 때 특별수권이 필요한가요?",
-      "gold_pages": [
-        59
-      ],
-      "anchor": "법정대리인이라 하더라도 친권자와 후견인은 구분하고 있는데"
-    },
-    {
-      "id": "q25-복대리인-법정대리인-책임",
-      "group": "neighbor",
-      "question": "복대리인을 선임한 법정대리인은 복대리인의 행위에 대해 어떤 책임을 지나요?",
-      "gold_pages": [
-        67
-      ],
-      "anchor": "다만, 부득이한 사유가 있는 때는 그 선임감독에 대하여만 책임이 있다"
-    },
-    {
-      "id": "q26-기간계산-초일불산입-예외",
-      "group": "neighbor",
-      "question": "특허법상 기간을 계산할 때 초일은 어떻게 처리하나요?",
-      "gold_pages": [
-        72,
-        73
-      ],
-      "anchor": "그 기간이 오전 영시부터 시작하는 때에는 초일도 산입"
-    },
-    {
-      "id": "q27-전산장애-기간만료-예외",
-      "group": "neighbor",
-      "question": "전산장애로 전자문서가 기한 내에 제출되지 않은 경우 기간은 언제 만료되나요?",
-      "gold_pages": [
-        74
-      ],
-      "anchor": "지식재산처장이 사전에 공지한 경우에는 장애로 보지 않는다"
-    },
-    {
-      "id": "q28-지정기간연장-자동승인-예외",
-      "group": "neighbor",
-      "question": "지정기간 연장신청은 언제 승인된 것으로 보나요?",
-      "gold_pages": [
-        76
-      ],
-      "anchor": "이해관계인의 이익이 부당하게 침해되는 것으로 판단하는 경우에는 필요한 기간만 연장승인"
-    },
-    {
-      "id": "q29-보정기간연장-4월상한-예외",
-      "group": "neighbor",
-      "question": "특허법 제46조에 따른 보정기간의 지정기간연장은 얼마나 연장할 수 있나요?",
-      "gold_pages": [
-        78
-      ],
-      "anchor": "신청인이 책임질 수 없는 사유가 발생하거나 국내단계에 진입하는 국제특허출원 등 지정기간의 추가 연장이 필요하다고 인정되는 경우에는 추가 연장이 가능하다"
-    },
-    {
-      "id": "t01-상표등록출원",
-      "group": "tokenizer",
-      "probe": "bare→inflected",
-      "query_form": "상표등록출원",
-      "doc_form": "상표등록출원이나",
-      "question": "조약우선권주장의 기초가 되는 제1국출원으로 상표등록출원도 인정되나요?",
-      "gold_pages": [
-        573
-      ],
-      "anchor": "상표등록출원이나 서비스마크는 성격상 특허의 우선권주장의 기초 출원으로 인정할 수 없다"
-    },
-    {
-      "id": "t02-등록지연-존속기간연장",
-      "group": "tokenizer",
-      "probe": "bare→inflected",
-      "query_form": "등록지연",
-      "doc_form": "등록지연에",
-      "question": "등록지연 때문에 특허권 존속기간을 연장받으려면 어떤 조건을 충족해야 하나요?",
-      "gold_pages": [
-        641
-      ],
-      "anchor": "특허출원일부터 4년과 출원심사 청구일부터 3년 중 늦은 날보다 지연되어"
-    },
-    {
-      "id": "t03-파라미터발명-신규성",
-      "group": "tokenizer",
-      "probe": "bare→inflected",
-      "query_form": "파라미터발명",
-      "doc_form": "파라미터발명은",
-      "question": "파라미터발명 신규성은 어떻게 판단해?",
-      "gold_pages": [
-        284
-      ],
-      "anchor": "파라미터발명은 파라미터 자체를 청구항의 일부로 하여 신규성을 판단하되"
-    },
-    {
-      "id": "t04-거절결정등본-재심사청구",
-      "group": "tokenizer",
-      "probe": "bare→inflected",
-      "query_form": "거절결정등본",
-      "doc_form": "특허거절결정등본을",
-      "question": "거절결정등본 받고 나서 재심사 청구는 언제까지 할 수 있나요?",
-      "gold_pages": [
-        513
-      ],
-      "anchor": "재심사를 청구할 수 있는 기간은 특허거절결정등본을 송달받은 날부터 3개월"
-    },
-    {
-      "id": "t05-보정각하-청구항삭제",
-      "group": "tokenizer",
-      "probe": "inflected→bare",
-      "query_form": "보정각하가",
-      "doc_form": "보정각하",
-      "question": "청구항을 삭제하는 보정 때문에 새로운 거절이유가 생긴 경우에도 보정각하가 되나요?",
-      "gold_pages": [
-        384
-      ],
-      "anchor": "청구항을 삭제하는 보정에 의해 새로운 거절이유가 발생된 경우는 제외된다"
-    },
-    {
-      "id": "t06-심사보류-재연장",
-      "group": "tokenizer",
-      "probe": "inflected→bare",
-      "query_form": "심사보류를",
-      "doc_form": "심사보류",
-      "question": "심사보류를 한 번 했는데 그 사유가 안 없어지면 또 연장할 수 있나요?",
-      "gold_pages": [
-        495
-      ],
-      "anchor": "2개월 이내에서 심사보류 또는 처리기간의 연장을 다시 할 수 있다"
-    },
-    {
-      "id": "t07-녹색기술-우선심사",
-      "group": "tokenizer",
-      "probe": "inflected→bare",
-      "query_form": "녹색기술은",
-      "doc_form": "녹색기술",
-      "question": "녹색기술은 우선심사 대상이 되려면 어떤 요건을 갖춰야 하나요?",
-      "gold_pages": [
-        691
-      ],
-      "anchor": "우선심사 대상 탄소중립 녹색기술 특허분류가 부여된 특허출원"
-    },
-    {
-      "id": "t08-실시준비-자기실시",
-      "group": "tokenizer",
-      "probe": "inflected→bare",
-      "query_form": "실시준비를",
-      "doc_form": "실시준비",
-      "question": "출원인 말고 실시권자가 실시준비를 하고 있어도 자기실시를 이유로 우선심사 신청이 돼?",
-      "gold_pages": [
-        734
-      ],
-      "anchor": "출원인과 실시자가 다른 경우에는 실시자와 출원인 간에 실시 계약이 있는 경우에 한하여"
-    },
-    {
-      "id": "p01-의료행위-제어방법-예외",
-      "group": "proviso",
-      "question": "심장박동 조절 방법은 의료행위라서 산업상 이용가능성이 없다는데, 그 단계를 심장박동 조절장치의 제어부가 수행하는 제어방법으로 청구해도 마찬가지인가요?",
-      "gold_pages": [
-        252
-      ],
-      "anchor": "심장박동 조절장치의 제어부가 수행하는 제어 방법인 경우에는 산업상 이용 가능성이 인정",
-      "why": "본칙만 검색되면 '의료행위를 단계로 포함하므로 산업상 이용가능성 부정 → 거절'이라고 잘못 답한다."
-    },
-    {
-      "id": "p02-수술방법-미용목적-예외",
-      "group": "proviso",
-      "question": "미용 목적 및 용도로 한정하면 산업상 이용가능성이 인정된다고 하던데, 수술방법도 미용 목적으로 한정하면 인정받을 수 있나요?",
-      "gold_pages": [
-        255
-      ],
-      "anchor": "미용 목적 및 용도로 한정하더라도 산업상 이용 가능한 것으로 인정하지",
-      "why": "본칙(미용 목적으로 한정하면 인정)만 검색되면 '수술방법도 인정된다'고 잘못 답한다."
-    },
-    {
-      "id": "p03-수탁증사본-사후첨부",
-      "group": "proviso",
-      "question": "미생물 출원을 하면서 수탁증 사본을 안 붙였으면 그 출원은 무조건 부적법하게 되는 건가요?",
-      "gold_pages": [
-        232
-      ],
-      "anchor": "심사관의 거절이유통지를 받고 사본을 첨부하는 경우에는 적법한 것으로 보고 수리하여",
-      "why": "본칙만 검색되면 '수탁증 사본 미첨부 = 부적법'이라고 잘못 답한다."
-    },
-    {
-      "id": "p04-실시예결합-인용발명",
-      "group": "proviso",
-      "question": "하나의 간행물에 실린 서로 다른 실시예 둘을 묶어서 하나의 인용발명으로 삼을 수는 없다고 알고 있는데, 그러면 어떤 경우에도 결합하지 못하는 건가요?",
-      "gold_pages": [
-        286
-      ],
-      "anchor": "2 이상의 실시예로부터 하나의 인용발명이 자명하게 도출되는 경우에는 그러하지 아니하다",
-      "why": "본칙만 검색되면 '실시예를 결합해 하나의 인용발명으로 삼는 것은 불가'라고 잘못 답한다."
-    },
-    {
-      "id": "p05-합금-개방형청구항-성분량",
-      "group": "proviso",
-      "question": "조성비를 %로 적었는데 하나의 최소성분량과 나머지 최대성분량의 합이 100%에 미달합니다. \"~를 포함하는\" 개방형으로 쓰면 명확한 기재로 봐주나요? 합금 발명이에요.",
-      "gold_pages": [
-        197,
-        198
-      ],
-      "anchor": "최대성분량의 합이 100%에 미달하는 것을 허용하지 않으므로 발명이 불명확하다",
-      "why": "예외(개방형 청구항이면 미달해도 명확)까지만 검색되면 '명확한 기재로 인정된다'고 잘못 답한다. 합금은 그 예외의 예외다."
-    },
-    {
-      "id": "p06-선원지위-거절확정-협의불성립",
-      "group": "proviso",
-      "question": "거절결정이 확정된 출원은 선출원의 지위를 갖지 않는다고 하는데, 같은 날 출원이라 협의불성립을 이유로 거절이 확정된 경우에도 지위가 없나요?",
-      "gold_pages": [
-        346
-      ],
-      "anchor": "그 이유로 거절결정이나 거절한다는 취지의 심결이 확정된 경우에는 선원의 지위를 갖는다",
-      "why": "본칙만 검색되면 '거절결정이 확정되었으므로 선원의 지위 없음'이라고 잘못 답한다."
-    },
-    {
-      "id": "p07-새로운효과추가-신규사항",
-      "group": "proviso",
-      "question": "최초 명세서에 없던 새로운 효과를 보정으로 추가하면 무조건 신규사항 추가가 되는 거 아닌가요?",
-      "gold_pages": [
-        375
-      ],
-      "anchor": "잘 알려진 사실인 경우에는 신규사항 추가에 해당되지 않는다",
-      "why": "본칙(새로운 효과 추가는 신규사항 추가)만 검색되면 '무조건 신규사항 추가 → 거절'이라고 잘못 답한다."
-    },
-    {
-      "id": "p08-보정각하-직권보정-예외",
-      "group": "proviso",
-      "question": "최후거절이유통지에 대한 보정에서 새로운 거절이유가 발생하면 심사관은 반드시 보정각하를 해야 하나요?",
-      "gold_pages": [
-        383
-      ],
-      "anchor": "새로운 거절이유가 직권보정이 가능한 사항이라면, 심사관은 보정을 승인하고",
-      "why": "본칙만 검색되면 '새로운 거절이유가 발생했으므로 반드시 각하'라고 잘못 답한다."
-    },
-    {
-      "id": "p09-후출원-심사착수보류-예외",
-      "group": "proviso",
-      "question": "동일한 발명에 대한 선출원이 아직 공개도 등록공고도 안 됐는데, 후출원 심사에 바로 착수할 수 있는 경우가 있나요?",
-      "gold_pages": [
-        496
-      ],
-      "anchor": "동일한 이유에 의하여 후출원을 거절할 수 있는 경우에는 심사에 착수할 수 있다",
-      "why": "본칙만 검색되면 '선출원이 처리·공개·공고될 때까지 심사착수를 보류해야 한다'고 잘못 답한다."
-    },
-    {
-      "id": "p10-외국인-외국실시-우선심사",
-      "group": "proviso",
-      "question": "외국인 출원인이 본국에서 그 발명을 실시하고 있는데, 자기실시를 이유로 우선심사를 신청할 수 있나요?",
-      "gold_pages": [
-        700
-      ],
-      "anchor": "출원인이 외국인인 경우의 실시는 우리나라 내에서의 실시를 의미하므로",
-      "why": "본칙(외국인 출원도 내국인과 동일 기준, 자기실시 신청 인정)만 검색되면 '신청할 수 있다'고 잘못 답한다."
-    },
-    {
-      "id": "x01-보정각하-직권보정가능사항",
-      "group": "crossref",
-      "question": "최후거절이유통지에 대한 보정 때문에 도면부호 불일치 같은 새 거절이유가 생겼는데, 이것도 보정각하 대상인가요?",
-      "gold_pages": [
-        384,
-        793
-      ],
-      "anchor": "국어표준 용어 또는 맞춤법상의 단순한 오자, 탈자 또는 도면부호의 불일치"
-    },
-    {
-      "id": "x02-취소환송-심사보류-확인주기",
-      "group": "crossref",
-      "question": "취소환송된 출원의 심사를 보류한 경우 보류 사유가 해소됐는지 얼마나 자주 확인해야 하나요?",
-      "gold_pages": [
-        422,
-        494
-      ],
-      "anchor": "월 1회 이상 심사를 보류한 사유 또는 처리기간을 연장한 사유가 해소되었는지"
-    },
-    {
-      "id": "x03-우선심사-분류정정",
-      "group": "crossref",
-      "question": "우선심사 신청된 출원인데 특허분류가 부적합하고 제가 담당하는 분류도 아니면 어떻게 처리하나요?",
-      "gold_pages": [
-        708,
-        401
-      ],
-      "anchor": "다른 심사관의 담당분류에 속하는 경우에는 심사관 간에 협의하여 해당 출원을 이송하고"
-    },
-    {
-      "id": "x04-신설청구항-거절이유통지종류",
-      "group": "crossref",
-      "question": "삭제됐던 청구항에 정정 형식으로 발명을 새로 적어 넣어 신설로 취급되는 경우, 거절이유는 최초로 통지하나요 최후로 통지하나요?",
-      "gold_pages": [
-        462,
-        472
-      ],
-      "anchor": "발견된 거절이유 모두가 최후거절이유통지 대상인 경우에만 최후거절이유통지로 하고"
-    },
-    {
-      "id": "x05-등록지연연장-심사착수기한",
-      "group": "crossref",
-      "question": "등록지연에 따른 특허권 존속기간 연장등록출원은 심사관에게 이관된 날부터 언제까지 심사에 착수해야 하나요?",
-      "gold_pages": [
-        663,
-        628
-      ],
-      "anchor": "출원서류가 이관된 날로부터 4월 이내에 심사에 착수한다"
-    },
-    {
-      "id": "x06-실용신안-등록료회복-납부액",
-      "group": "crossref",
-      "question": "등록료를 추가납부기간에도 내지 못해 실용신안권이 소멸했는데, 권리를 회복하려면 등록료를 얼마나 내야 하나요?",
-      "document": "지식재산권 권리회복 심사 가이드라인.pdf",
-      "gold_pages": [
-        5
-      ],
-      "anchor": "특허료의 2배를 내고, 그 소멸한 권리의 회복을 신청할 수 있다"
-    },
-    {
-      "id": "x07-실용신안-심사청구기간-회복",
-      "group": "crossref",
-      "question": "정당한 사유로 실용신안등록출원의 심사청구기간을 놓쳐 출원이 취하된 것으로 되었는데 다시 심사청구를 할 수 있나요?",
-      "document": "지식재산권 권리회복 심사 가이드라인.pdf",
-      "gold_pages": [
-        5
-      ],
-      "anchor": "2개월 이내에 출원심사의 청구 또는 재심사의 청구를 할 수 있다"
-    },
-    {
-      "id": "x08-실용신안-절차무효-취소",
-      "group": "crossref",
-      "question": "실용신안에 관한 절차가 보정명령 불이행으로 무효처분됐습니다. 정당한 사유가 있으면 그 무효처분을 취소받을 수 있나요?",
-      "document": "지식재산권 권리회복 심사 가이드라인.pdf",
-      "gold_pages": [
-        5
-      ],
-      "anchor": "보정명령을 받은 자의 청구에 따라 그 무효처분을 취소할 수 있다"
-    },
-    {
-      "id": "x09-실용신안-무효처분취소-제척기간",
-      "group": "crossref",
-      "question": "실용신안 절차가 무효로 된 뒤 무효처분 취소를 청구할 수 있는 마지막 기한은 언제인가요?",
-      "document": "지식재산권 권리회복 심사 가이드라인.pdf",
-      "gold_pages": [
-        5
-      ],
-      "anchor": "지정된 기간의 만료일부터 1년이 지났을 때에는 그러하지 아니하다"
-    },
-    {
-      "id": "x10-실용신안-심사결정-준용범위",
-      "group": "crossref",
-      "question": "실용신안등록출원의 심사와 결정에는 특허법의 어떤 규정들이 준용되나요?",
-      "document": "지식재산권 권리회복 심사 가이드라인.pdf",
-      "gold_pages": [
-        6
-      ],
-      "anchor": "실용신안등록출원의 심사ㆍ결정에 관하여는"
-    },
-    {
-      "id": "x11-연장등록-거절이유통지-의견서기간",
-      "group": "crossref",
-      "question": "등록지연에 따른 특허권 존속기간 연장등록출원을 거절하려고 할 때 의견서 제출기간은 얼마로 지정하나요?",
-      "gold_pages": [
-        669
-      ],
-      "anchor": "의견서 제출기간을 4개월의 범위 이내로 지정하여 통지"
-    },
-    {
-      "id": "x12-연장등록-여부결정-형식",
-      "group": "crossref",
-      "question": "등록지연에 따른 특허권 존속기간의 연장 여부에 대한 결정은 어떤 형식으로 해야 하나요?",
-      "gold_pages": [
-        671
-      ],
-      "anchor": "같은 법 제67조에 따라 서면으로 하여야 한다"
-    },
-    {
-      "id": "x13-연장등록출원-보정시기-제한",
-      "group": "crossref",
-      "question": "특허권 존속기간 연장등록출원에서 거절이유통지를 받은 뒤에도 출원서를 보정할 수 있나요?",
-      "gold_pages": [
-        623,
-        659
-      ],
-      "anchor": "해당 거절이유통지에 따른 의견서 제출기간에만 보정할 수 있다"
-    },
-    {
-      "id": "x14-심사전치-보정각하-사유",
-      "group": "crossref",
-      "question": "거절결정불복심판을 청구하면서 30일 안에 한 보정을 각하해야 하는 경우는 어떤 경우인가요?",
-      "gold_pages": [
-        772
-      ],
-      "anchor": "특허법 제51조를 준용하는 같은 법 제174조에 따라 거절결정불복심판의 청구일로부터 30일 내에 한 보정을 각하하여야 하는 경우"
-    },
-    {
-      "id": "x15-심사전치-거절이유통지-준용63조",
-      "group": "crossref",
-      "question": "심사전치된 출원에 거절이유를 통지해야 하는 경우, 준용되는 규정은 심사관에게 무엇을 요구하나요?",
-      "gold_pages": [
-        775
-      ],
-      "anchor": "(준용된 제63조) 심사관은 제62조의 규정에 의하여 특허거절결정을 하고자"
-    },
-    {
-      "id": "x16-출원인변경신고-협의불성립",
-      "group": "crossref",
-      "question": "같은 날 출원인변경신고가 둘 이상 있어 협의결과 신고를 요구했는데 기간 안에 신고가 없으면 어떻게 처리하나요?",
-      "gold_pages": [
-        142
-      ],
-      "anchor": "그 기간 이내에 신고가 없는 때에는 협의는"
-    },
-    {
-      "id": "x17-서열목록-보정-준용",
-      "group": "crossref",
-      "question": "서열을 포함한 특허출원을 보정할 때 서열목록전자파일은 어떤 방법으로 작성해서 내야 하나요?",
-      "gold_pages": [
-        235
-      ],
-      "anchor": "서열을 포함하는 특허출원의 보정에 관하여는 제1항을 준용한다"
-    },
-    {
-      "id": "x18-재심절차-심판청구료-반환",
-      "group": "crossref",
-      "question": "재심 절차에서 특허거절결정이 취소된 경우에도 이미 낸 심판청구료를 돌려받을 수 있나요?",
-      "gold_pages": [
-        122
-      ],
-      "anchor": "재심의 절차에서 준용되는 경우를 포함하되, 보정이 있는 경우는 제외"
-    },
-    {
-      "id": "x19-선원지위-협의불성립거절",
-      "group": "crossref",
-      "question": "협의가 성립하지 않아 거절결정이 확정된 출원도 나중에 다른 출원에 대해 선출원의 지위를 갖나요?",
-      "gold_pages": [
-        347
-      ],
-      "anchor": "제3항의 규정에 의하여 준용되는 경우를 포함한다)의 규정에 해당하여 그 이유로 거절결정이나 거절한다는 취지의 심결이 확정된 경우에는 선원의 지위를 갖는다"
-    },
-    {
-      "id": "x20-심판관-거절이유통지-지연기간",
-      "group": "crossref",
-      "question": "심판관이 특허법 제63조를 준용해 거절이유를 통지하고 의견서 제출 기회를 준 경우에도 지연기간 계산은 같은가요?",
-      "gold_pages": [
-        654
-      ],
-      "anchor": "심판관이 거절이유를 통지하고 의견서 제출 기회를 준 경우에도 위의 사항이 동일하게 적용된다"
-    },
-    {
-      "id": "x21-확대선원-실용신안-출원공개",
-      "group": "crossref",
-      "question": "확대된 선출원을 적용할 때 먼저 출원된 실용신안등록출원은 어떤 요건을 갖춰야 인용될 수 있나요?",
-      "gold_pages": [
-        331
-      ],
-      "anchor": "「실용신안법」제15조에 따라 준용되는 이 법 제64조에"
-    },
-    {
-      "id": "x22-이의신청-심사관합의체-용어치환",
-      "group": "crossref",
-      "question": "이의신청 심사관합의체에 심판 규정을 준용할 때 ‘특허심판원장’은 누구로 바꿔 읽어야 하나요?",
-      "document": "상표심사기준.pdf",
-      "gold_pages": [
-        387
-      ],
-      "anchor": "이 경우 제130조제2항 중 “특허심판원장”은 “지식재산처장”으로"
-    },
-    {
-      "id": "x23-지정상품추가등록출원-준용조문",
-      "group": "crossref",
-      "question": "지정상품추가등록출원의 심사에는 상표법의 어떤 조문들이 준용되나요?",
-      "document": "상표심사기준.pdf",
-      "gold_pages": [
-        396
-      ],
-      "anchor": "지정상품추가등록출원에 관하여는 제37조, 제38조제1항, 제39조부터 제"
-    },
-    {
-      "id": "x24-분할출원-절차준용",
-      "group": "crossref",
-      "question": "상표등록출원을 분할할 때 분할출원서를 내는 절차는 어느 규정을 따르나요?",
-      "document": "상표심사기준.pdf",
-      "gold_pages": [
-        148
-      ],
-      "anchor": "법 제45조에 따른 출원의 분할에 관하여는 제28조제3항부터 제7항까지의규정을 준용한다"
-    },
-    {
-      "id": "x25-상품분류전환-직권재심사-거절이유통지",
-      "group": "crossref",
-      "question": "상품분류전환등록결정을 직권으로 취소하고 다시 심사한 뒤 이미 통지했던 거절이유로 거절하려면 거절이유를 다시 통지해야 하나요?",
-      "document": "상표심사기준.pdf",
-      "gold_pages": [
-        43
-      ],
-      "anchor": "제212조에 따라 준용되는 제68조의2제1항에 따른 직권 재심사를 하여 취소된 상품분류전환등록결정"
-    },
-    {
-      "id": "s01-특허출원서-첨부서류",
-      "group": "statute",
-      "question": "특허출원서 낼 때 명세서 말고 도면이랑 요약서도 같이 내야 하나요?",
-      "document": "특허법.html",
-      "gold_paths": [
-        "조42/항2"
-      ],
-      "anchor": "발명의 설명ㆍ청구범위를 적은 명세서와 필요한 도면 및 요약서를 첨부하여야 한다"
-    },
-    {
-      "id": "s02-심사청구-기간",
-      "group": "statute",
-      "question": "특허 심사청구는 출원한 날부터 언제까지 해야 하는지 알려주세요",
-      "document": "특허법.html",
-      "gold_paths": [
-        "조59/항2"
-      ],
-      "anchor": "특허출원일부터 3년 이내에 지식재산처장에게 출원심사의 청구를 할 수 있다"
-    },
-    {
-      "id": "s03-출원공개-시점",
-      "group": "statute",
-      "question": "제 특허출원은 언제 공개되나요? 앞당겨서 공개해달라고 할 수도 있나요?",
-      "document": "특허법.html",
-      "gold_paths": [
-        "조64/항1"
-      ],
-      "anchor": "1년 6개월이 지난 후 또는 그 전이라도 특허출원인이 신청한 경우에는"
-    },
-    {
-      "id": "s04-특허료-설정등록",
-      "group": "statute",
-      "question": "특허 설정등록을 받으려면 특허료를 몇 년치나 내야 하나요?",
-      "document": "특허법.html",
-      "gold_paths": [
-        "조79/항1"
-      ],
-      "anchor": "제87조제1항에 따른 특허권의 설정등록을 받으려는 자는 설정등록을 받으려는 날"
-    },
-    {
-      "id": "s05-거절결정불복심판-기간",
-      "group": "statute",
-      "question": "특허 거절결정을 받았는데 불복 심판은 언제까지 청구해야 하나요?",
-      "document": "특허법.html",
-      "gold_paths": [
-        "조132의17"
-      ],
-      "anchor": "특허거절결정 또는 특허권의 존속기간의 연장등록거절결정을 받은 자가 결정에 불복할 때에는"
-    },
-    {
-      "id": "s06-거짓행위의죄",
-      "group": "statute",
-      "question": "거짓으로 특허를 받아낸 경우에는 처벌이 어떻게 되나요?",
-      "document": "특허법.html",
-      "gold_paths": [
-        "조229"
-      ],
-      "anchor": "거짓이나 그 밖의 부정한 행위로 특허, 특허권의 존속기간의 연장등록"
-    },
-    {
-      "id": "s07-상표권-존속기간",
-      "group": "statute",
-      "question": "상표권은 등록하고 나면 몇 년 동안 유지되나요?",
-      "document": "상표법.html",
-      "gold_paths": [
-        "조83/항1"
-      ],
-      "anchor": "상표권의 존속기간은 제82조제1항에 따라 설정등록이 있는 날부터 10년으로 한다"
-    },
-    {
-      "id": "s08-상표등록료-분할납부",
-      "group": "statute",
-      "question": "상표등록료를 한꺼번에 내기 부담스러운데 나눠서 낼 수 있나요?",
-      "document": "상표법.html",
-      "gold_paths": [
-        "조72/항1"
-      ],
-      "anchor": "상표등록료를 2회로 분할하여 낼 수 있다"
-    },
-    {
-      "id": "s09-선사용권",
-      "group": "statute",
-      "question": "남이 상표를 먼저 등록했는데 저는 그 전부터 쓰고 있었어요. 계속 써도 되나요?",
-      "document": "상표법.html",
-      "gold_paths": [
-        "조99/항1"
-      ],
-      "anchor": "부정경쟁의 목적이 없이 타인의 상표등록출원 전부터 국내에서 계속하여 사용하고 있을 것"
-    },
-    {
-      "id": "s10-실용신안권-존속기간",
-      "group": "statute",
-      "question": "실용신안권은 몇 년 동안 보호받을 수 있나요?",
-      "document": "실용신안법.html",
-      "gold_paths": [
-        "조22/항1"
-      ],
-      "anchor": "실용신안등록출원일 후 10년이 되는 날까지로 한다"
-    },
-    {
-      "id": "s11-실용신안-도면첨부",
-      "group": "statute",
-      "question": "실용신안 출원할 때도 도면을 꼭 첨부해야 하나요?",
-      "document": "실용신안법.html",
-      "gold_paths": [
-        "조8/항2"
-      ],
-      "anchor": "고안의 설명, 청구범위를 적은 명세서와 도면 및 요약서를 첨부하여야 한다"
-    },
-    {
-      "id": "s12-우선심사-신청서류",
-      "group": "statute",
-      "question": "특허 우선심사를 신청하려면 어떤 서류를 준비해야 하나요?",
-      "document": "특허법 시행규칙.html",
-      "gold_paths": [
-        "조39"
-      ],
-      "anchor": "별지 제22호서식의 우선심사신청서에 다음 각 호의 서류를 첨부하여 지식재산처장에게 제출해야 한다"
-    },
-    {
-      "id": "s13-특허여부결정-보류",
-      "group": "statute",
-      "question": "특허 여부 결정을 조금 미뤄달라고 신청할 수 있나요? 언제까지 내야 하나요?",
-      "document": "특허법 시행규칙.html",
-      "gold_paths": [
-        "조40의2/항1"
-      ],
-      "anchor": "특허출원일부터 6개월 이내에 별지 제22호의2서식의 결정 보류신청서를"
-    },
-    {
-      "id": "s14-상표우선심사-신청서류",
-      "group": "statute",
-      "question": "상표 우선심사를 신청할 때 함께 내야 하는 서류가 뭔가요?",
-      "document": "상표법 시행규칙.html",
-      "gold_paths": [
-        "조49"
-      ],
-      "anchor": "「특허법 시행규칙」 별지 제22호서식의 우선심사신청서에"
-    }
-  ]
+ "_readme": [
+  "Korean retrieval evaluation set. The 47 base/neighbor/tokenizer/proviso questions are about 특허·실용신안 심사기준; the crossref group also draws on 상표심사기준 and 지식재산권 권리회복 심사 가이드라인, so `document_filename` is a LIST and a question names its own document in `document` (absent = the first name). Scoring is per document: a gold page is the pair (document, page), never a bare page number.",
+  "Each entry was written by reading the passage first, then writing the question it answers.",
+  "A GOLD ANSWER IS ADDRESSED BY PAGE OR BY PROVISION, whichever its document has. `gold_pages` are PDF page numbers (chunks.page) and `gold_paths` are hierarchy paths (chunk_metadata.path, written by app/rag/chunking/hierarchy.py) - \"조59/항2\" is 제59조제2항. Neither is a chunk id: chunk ids change on every re-ingestion, page numbers and article numbers do not. The eight statutes have NO pages at all - page is NULL for all 2,669 of their chunks - so scoring them on pages made a statute chunk in the top 8 cost a question its recall by definition, which is why the 특허법 ingest could only ever read as harm. `anchor` is a verbatim substring of the gold passage - if the extractor changes and a page shifts, grep the anchor to re-locate it.",
+  "every re-ingestion, page numbers do not. `anchor` is a verbatim substring of the gold",
+  "passage - if the extractor changes and a page shifts, grep the anchor to re-locate it.",
+  "`group` splits the set. Absent or \"base\" is the original 21 questions. \"neighbor\" is the 8 written FROM measured proviso splits: the rule is in one chunk and the 다만/그러나 that qualifies it is in the NEXT one, so retrieving only the rule chunk yields a confidently wrong answer. Their `anchor` is the proviso sentence, which is what makes them able to detect NEIGHBOR_EXPANSION at all - the base questions cannot, because none of them was chosen for spanning a chunk boundary.",
+  "\"tokenizer\" is 8 questions that probe the known content_tsv bug: content_tsv is to_tsvector('simple', content), which does not segment Korean, so a josa stays glued to the noun and the document token 상표등록출원이나 never matches the query token 상표등록출원. Each was verified with plainto_tsquery('simple', ...) against the live corpus: the form in `query_form` matches ZERO chunks as a lexeme while the form in `doc_form` is what the corpus actually stores. `probe` says which way the mismatch runs - \"bare->inflected\" (question bare, document josa-glued) or \"inflected->bare\" (question josa-glued, document bare). query_form/doc_form are documentation, not scored. These questions can only be won by the dense side or by a tokenizer that segments Korean; a pure sparse run should fail them.",
+  "\"proviso\" is 10 questions where retrieving the main rule WITHOUT its 단서/다만 clause produces a confidently WRONG answer. Each is phrased so the main rule alone answers backwards - the exception case is asked about directly, or the yes/no flips on the proviso - and the `anchor` is the PROVISO sentence, never the main rule, which is what lets the metric see the failure. Includes double-negative (p04, p07) and condition-stacking (p05, p06, p09) phrasings. `why` records what the wrong answer would be on the main rule alone; documentation, not scored.",
+  "\"crossref\" is 25 questions whose answer needs a 준용/참조 hop. It was 5 and read anchor 0.800 for two days across every stage built - sparse bigrams, reranking, query expansion, neighbour expansion, classification-table chunking, hierarchical chunking, citation edges - and 0.800 at n=5 is ONE question, which is why it was enlarged before anything else was built. x01-x05 are the original manual-to-manual pointers: gold_pages lists both hops, pointer page first, and the `anchor` sits on the SECOND hop. x06-x25 were written from the corpus's REAL 준용 occurrences (254 clauses naming a 제N조 target; 128 of those targets exist elsewhere in the same document, 99 name a statute nobody uploaded). x06-x10 are the strongest shape available here and the one the owner's argument is about: the 권리회복 guideline prints 특허법 §16/§67의3/§81의3 in full and then says 실용신안법 §3/§15/§20 준용 them, so a question asked in 실용신안 vocabulary is answered by a sentence that says 특허 throughout and 실용신안 nowhere. Their gold_pages is the TARGET page only, so neither recall nor anchor can be won without the hop. MEASURED: all five are already answered by the deployed pipeline with no 준용 machinery of any kind - the embedding crosses the substitution on its own. The three anchor misses at n=25 are x01 (a 「제8부제2장 3.」 section-TITLE pointer, and its citing chunk sits at fused rank 10 with TOP_N=8), x11 (plain ranking: the whole 659-672 neighbourhood arrived and p.669 did not) and x23 (a 준용 조문 list split across two chunks with different ancestor lines). None is a 준용 failure.",
+  "Run with: python scripts/eval_retrieval.py",
+  "\"statute\" is 14 questions whose answer is IN one of the eight statutes and nowhere else, written the way a person asks - 특허법 6, 상표법 3, 실용신안법 2, 특허법 시행규칙 2, 상표법 시행규칙 1. Without them nothing in this fixture covered the 2,669 statute chunks of the corpus's 19,704, so ingesting 특허법 had no way to show a gain. Each `anchor` was checked against the live corpus and sits in exactly ONE chunk, at the `gold_paths` provision; two of them (s04, s14) have their sentence QUOTED in a manual as well, which is the corpus telling the truth about itself rather than a defect in the question."
+ ],
+ "document_filename": [
+  "특허·실용신안 심사기준.pdf",
+  "상표심사기준.pdf",
+  "지식재산권 권리회복 심사 가이드라인.pdf",
+  "특허법.html",
+  "상표법.html",
+  "실용신안법.html",
+  "특허법 시행령.html",
+  "상표법 시행령.html",
+  "실용신안법 시행령.html",
+  "특허법 시행규칙.html",
+  "상표법 시행규칙.html"
+ ],
+ "questions": [
+  {
+   "id": "q01-공지예외-국내우선권",
+   "question": "출원전 공개를 했는데 공지예외주장은 안 했다. 그 건을 기초로 국내우선권주장해서 출원할 때 공지예외적용주장이 가능한가?",
+   "gold_pages": [
+    297,
+    445,
+    593,
+    601
+   ],
+   "anchor": "국내우선권주장출원에 대해서도 선출원시에 주장한 특허법 제"
+  },
+  {
+   "id": "q02-공지예외-증명서류기한",
+   "question": "공지예외주장을 한 경우 증명서류는 출원일부터 며칠 이내에 제출해야 하나요?",
+   "gold_pages": [
+    444
+   ],
+   "anchor": "증명할 수 있는 서류를 출원일로부터 30일 이내에 제출하였는지"
+  },
+  {
+   "id": "q03-의사에반한공지",
+   "question": "권리자의 의사에 반하여 발명이 공지된 경우에도 신규성 상실의 예외를 인정받을 수 있나요?",
+   "gold_pages": [
+    290,
+    291
+   ],
+   "anchor": "의사에 반하여 발명이 공지된 경우"
+  },
+  {
+   "id": "q04-분할출원-공지예외절차",
+   "question": "분할출원을 하면서 공지예외주장을 하려면 어떤 절차를 밟아야 하나요?",
+   "gold_pages": [
+    554,
+    555,
+    556
+   ],
+   "anchor": "분할출원에 대하여 공지예외주장"
+  },
+  {
+   "id": "q05-변경출원-우선권주장",
+   "question": "실용신안등록출원을 특허출원으로 변경출원할 때 공지예외주장이나 우선권주장도 함께 할 수 있나요?",
+   "gold_pages": [
+    564,
+    565
+   ],
+   "anchor": "변경출원에 대하여 공지예외주장 또는 우선권주장을 하고자 할 때에는"
+  },
+  {
+   "id": "q06-분리출원-공지예외",
+   "question": "원출원에서 공지예외주장을 하지 않았는데 분리출원에서 새로 공지예외주장을 할 수 있나요?",
+   "gold_pages": [
+    609,
+    610
+   ],
+   "anchor": "원출원시 공지예외주장을 하지 않았더라도 분리출원시"
+  },
+  {
+   "id": "q07-미생물기탁시기",
+   "question": "미생물에 관계되는 발명은 언제까지 어느 기관에 기탁해야 하나요?",
+   "gold_pages": [
+    227,
+    228,
+    229,
+    230,
+    231
+   ],
+   "anchor": "특허출원을 하려는 자는 특허출원 전에"
+  },
+  {
+   "id": "q08-미생물-기탁면제",
+   "question": "통상의 기술자가 쉽게 입수할 수 있는 미생물이면 기탁을 생략해도 되나요?",
+   "gold_pages": [
+    229,
+    230,
+    231
+   ],
+   "anchor": "쉽게 입수할 수 있는 경우에는 이를 기탁하지 아니할 수 있다"
+  },
+  {
+   "id": "q09-수탁번호-신규사항",
+   "question": "최초 명세서에 없던 미생물 수탁번호를 보정으로 새로 적으면 신규사항 추가인가요?",
+   "gold_pages": [
+    232
+   ],
+   "anchor": "보정에 의하여 새로이 기재하는 것은 신"
+  },
+  {
+   "id": "q10-의료행위-산업상이용가능성",
+   "question": "의료행위를 단계로 포함하는 방법 발명은 산업상 이용할 수 있는 발명으로 인정되나요?",
+   "gold_pages": [
+    251,
+    252,
+    253,
+    254,
+    255,
+    259
+   ],
+   "anchor": "청구항에 의료행위를 적어도 하나의 단계"
+  },
+  {
+   "id": "q11-인체채취물-처리방법",
+   "question": "혈액이나 소변처럼 인체에서 채취한 것을 처리하는 방법도 의료행위로 보아 거절하나요?",
+   "gold_pages": [
+    254,
+    255
+   ],
+   "anchor": "인간으로부터 자연적으로 배출된 것"
+  },
+  {
+   "id": "q12-최후거절이유-보정범위",
+   "question": "최후거절이유통지에 대한 의견서 제출기간에 할 수 있는 보정의 범위는 어디까지인가요?",
+   "gold_pages": [
+    365,
+    367,
+    368
+   ],
+   "anchor": "후거절이유통지에 대한 의견서 제출기간 이내의 보정"
+  },
+  {
+   "id": "q13-신규사항-비교대상",
+   "question": "보정이 신규사항 추가에 해당하는지 판단할 때 무엇과 비교하나요?",
+   "gold_pages": [
+    371,
+    372
+   ],
+   "anchor": "위한 비교 대상은 출원서에 최초로 첨부된 명세서 또는 도면이다"
+  },
+  {
+   "id": "q14-공서양속",
+   "question": "공공의 질서나 선량한 풍속에 어긋나는 발명은 특허를 받을 수 있나요?",
+   "gold_pages": [
+    354,
+    355,
+    356
+   ],
+   "anchor": "공공의 질서 또는 선량한 풍속에 어긋나거나"
+  },
+  {
+   "id": "q15-마쿠쉬-단일성",
+   "question": "하나의 청구항에 택일적 요소를 마쿠쉬 형식으로 적은 경우 발명의 단일성은 어떻게 판단하나요?",
+   "gold_pages": [
+    193,
+    220,
+    221
+   ],
+   "anchor": "택일적 요소가 마쿠쉬 방식으로 기재된 경우"
+  },
+  {
+   "id": "q16-선택발명-진보성",
+   "question": "선택발명처럼 효과 예측이 어려운 분야에서 진보성은 어떻게 판단하나요?",
+   "gold_pages": [
+    313,
+    314,
+    315
+   ],
+   "anchor": "선택발명이나 화학분야의 발명 등과 같이"
+  },
+  {
+   "id": "q17-조약우선권-증명서류",
+   "question": "조약우선권주장출원의 우선권증명서류는 언제까지 제출해야 하나요?",
+   "gold_pages": [
+    439,
+    440,
+    441
+   ],
+   "anchor": "우선권증명서류는 최선일로부터"
+  },
+  {
+   "id": "q18-국제출원-확대된선출원",
+   "question": "국제특허출원이 확대된 선출원의 타출원이 되는 경우 인용할 수 있는 발명의 범위는 어디까지인가요?",
+   "gold_pages": [
+    338,
+    339,
+    450,
+    451
+   ],
+   "anchor": "확대된 선출원의 타출원"
+  },
+  {
+   "id": "q19-공시송달-효력발생",
+   "question": "공시송달은 언제부터 효력이 발생하나요?",
+   "gold_pages": [
+    101
+   ],
+   "anchor": "공시송달은 특허공보에 게재한 날부터 2주일"
+  },
+  {
+   "id": "q20-우편제출-도달일",
+   "question": "출원서를 우편으로 제출한 경우 지식재산처에 도달한 날은 언제로 보나요?",
+   "gold_pages": [
+    99,
+    100,
+    102
+   ],
+   "anchor": "우편물의 통신일부인에 그 표시된 날"
+  },
+  {
+   "id": "q21-공지예외-국내우선권-사후주장",
+   "question": "출원전 공개를 했는데 공지예외주장은 안했어. 그런데 그 건을 기초로 국내우선권주장해서 출원할때 공지예외적용주장 가능해? 특허야",
+   "gold_pages": [
+    593
+   ],
+   "anchor": "공지예외주장을 하지 않았더라도 국내우선권주장출원시 적법한 절차"
+  },
+  {
+   "id": "q22-무능력자-법정대리인-예외",
+   "group": "neighbor",
+   "question": "미성년자가 특허출원 등 특허에 관한 절차를 밟으려면 어떻게 해야 하나요?",
+   "gold_pages": [
+    49
+   ],
+   "anchor": "미성년자와 피한정후견인이 독립하여 법률행위를 할 수 있는 경우는 그러하지 아니하다"
+  },
+  {
+   "id": "q23-법인격없는사단-당사자능력",
+   "group": "neighbor",
+   "question": "동창회나 종친회 같은 법인격 없는 단체는 특허에 관한 절차에서 어떤 지위를 갖나요?",
+   "gold_pages": [
+    52
+   ],
+   "anchor": "대표자 또는 관리인이 정해져 있는 경우에는 그 사단 또는 재단의 이름으로 출원심사청구"
+  },
+  {
+   "id": "q24-법정대리인-후견인-특별수권",
+   "group": "neighbor",
+   "question": "법정대리인이 본인을 대리하여 특허에 관한 절차를 밟을 때 특별수권이 필요한가요?",
+   "gold_pages": [
+    59
+   ],
+   "anchor": "법정대리인이라 하더라도 친권자와 후견인은 구분하고 있는데"
+  },
+  {
+   "id": "q25-복대리인-법정대리인-책임",
+   "group": "neighbor",
+   "question": "복대리인을 선임한 법정대리인은 복대리인의 행위에 대해 어떤 책임을 지나요?",
+   "gold_pages": [
+    67
+   ],
+   "anchor": "다만, 부득이한 사유가 있는 때는 그 선임감독에 대하여만 책임이 있다"
+  },
+  {
+   "id": "q26-기간계산-초일불산입-예외",
+   "group": "neighbor",
+   "question": "특허법상 기간을 계산할 때 초일은 어떻게 처리하나요?",
+   "gold_pages": [
+    72,
+    73
+   ],
+   "anchor": "그 기간이 오전 영시부터 시작하는 때에는 초일도 산입"
+  },
+  {
+   "id": "q27-전산장애-기간만료-예외",
+   "group": "neighbor",
+   "question": "전산장애로 전자문서가 기한 내에 제출되지 않은 경우 기간은 언제 만료되나요?",
+   "gold_pages": [
+    74
+   ],
+   "anchor": "지식재산처장이 사전에 공지한 경우에는 장애로 보지 않는다"
+  },
+  {
+   "id": "q28-지정기간연장-자동승인-예외",
+   "group": "neighbor",
+   "question": "지정기간 연장신청은 언제 승인된 것으로 보나요?",
+   "gold_pages": [
+    76
+   ],
+   "anchor": "이해관계인의 이익이 부당하게 침해되는 것으로 판단하는 경우에는 필요한 기간만 연장승인"
+  },
+  {
+   "id": "q29-보정기간연장-4월상한-예외",
+   "group": "neighbor",
+   "question": "특허법 제46조에 따른 보정기간의 지정기간연장은 얼마나 연장할 수 있나요?",
+   "gold_pages": [
+    78
+   ],
+   "anchor": "신청인이 책임질 수 없는 사유가 발생하거나 국내단계에 진입하는 국제특허출원 등 지정기간의 추가 연장이 필요하다고 인정되는 경우에는 추가 연장이 가능하다"
+  },
+  {
+   "id": "t01-상표등록출원",
+   "group": "tokenizer",
+   "probe": "bare→inflected",
+   "query_form": "상표등록출원",
+   "doc_form": "상표등록출원이나",
+   "question": "조약우선권주장의 기초가 되는 제1국출원으로 상표등록출원도 인정되나요?",
+   "gold_pages": [
+    573
+   ],
+   "anchor": "상표등록출원이나 서비스마크는 성격상 특허의 우선권주장의 기초 출원으로 인정할 수 없다"
+  },
+  {
+   "id": "t02-등록지연-존속기간연장",
+   "group": "tokenizer",
+   "probe": "bare→inflected",
+   "query_form": "등록지연",
+   "doc_form": "등록지연에",
+   "question": "등록지연 때문에 특허권 존속기간을 연장받으려면 어떤 조건을 충족해야 하나요?",
+   "gold_pages": [
+    641
+   ],
+   "anchor": "특허출원일부터 4년과 출원심사 청구일부터 3년 중 늦은 날보다 지연되어"
+  },
+  {
+   "id": "t03-파라미터발명-신규성",
+   "group": "tokenizer",
+   "probe": "bare→inflected",
+   "query_form": "파라미터발명",
+   "doc_form": "파라미터발명은",
+   "question": "파라미터발명 신규성은 어떻게 판단해?",
+   "gold_pages": [
+    284
+   ],
+   "anchor": "파라미터발명은 파라미터 자체를 청구항의 일부로 하여 신규성을 판단하되"
+  },
+  {
+   "id": "t04-거절결정등본-재심사청구",
+   "group": "tokenizer",
+   "probe": "bare→inflected",
+   "query_form": "거절결정등본",
+   "doc_form": "특허거절결정등본을",
+   "question": "거절결정등본 받고 나서 재심사 청구는 언제까지 할 수 있나요?",
+   "gold_pages": [
+    513
+   ],
+   "anchor": "재심사를 청구할 수 있는 기간은 특허거절결정등본을 송달받은 날부터 3개월"
+  },
+  {
+   "id": "t05-보정각하-청구항삭제",
+   "group": "tokenizer",
+   "probe": "inflected→bare",
+   "query_form": "보정각하가",
+   "doc_form": "보정각하",
+   "question": "청구항을 삭제하는 보정 때문에 새로운 거절이유가 생긴 경우에도 보정각하가 되나요?",
+   "gold_pages": [
+    384
+   ],
+   "anchor": "청구항을 삭제하는 보정에 의해 새로운 거절이유가 발생된 경우는 제외된다"
+  },
+  {
+   "id": "t06-심사보류-재연장",
+   "group": "tokenizer",
+   "probe": "inflected→bare",
+   "query_form": "심사보류를",
+   "doc_form": "심사보류",
+   "question": "심사보류를 한 번 했는데 그 사유가 안 없어지면 또 연장할 수 있나요?",
+   "gold_pages": [
+    495
+   ],
+   "anchor": "2개월 이내에서 심사보류 또는 처리기간의 연장을 다시 할 수 있다"
+  },
+  {
+   "id": "t07-녹색기술-우선심사",
+   "group": "tokenizer",
+   "probe": "inflected→bare",
+   "query_form": "녹색기술은",
+   "doc_form": "녹색기술",
+   "question": "녹색기술은 우선심사 대상이 되려면 어떤 요건을 갖춰야 하나요?",
+   "gold_pages": [
+    691
+   ],
+   "anchor": "우선심사 대상 탄소중립 녹색기술 특허분류가 부여된 특허출원"
+  },
+  {
+   "id": "t08-실시준비-자기실시",
+   "group": "tokenizer",
+   "probe": "inflected→bare",
+   "query_form": "실시준비를",
+   "doc_form": "실시준비",
+   "question": "출원인 말고 실시권자가 실시준비를 하고 있어도 자기실시를 이유로 우선심사 신청이 돼?",
+   "gold_pages": [
+    734
+   ],
+   "anchor": "출원인과 실시자가 다른 경우에는 실시자와 출원인 간에 실시 계약이 있는 경우에 한하여"
+  },
+  {
+   "id": "p01-의료행위-제어방법-예외",
+   "group": "proviso",
+   "question": "심장박동 조절 방법은 의료행위라서 산업상 이용가능성이 없다는데, 그 단계를 심장박동 조절장치의 제어부가 수행하는 제어방법으로 청구해도 마찬가지인가요?",
+   "gold_pages": [
+    252
+   ],
+   "anchor": "심장박동 조절장치의 제어부가 수행하는 제어 방법인 경우에는 산업상 이용 가능성이 인정",
+   "why": "본칙만 검색되면 '의료행위를 단계로 포함하므로 산업상 이용가능성 부정 → 거절'이라고 잘못 답한다."
+  },
+  {
+   "id": "p02-수술방법-미용목적-예외",
+   "group": "proviso",
+   "question": "미용 목적 및 용도로 한정하면 산업상 이용가능성이 인정된다고 하던데, 수술방법도 미용 목적으로 한정하면 인정받을 수 있나요?",
+   "gold_pages": [
+    255
+   ],
+   "anchor": "미용 목적 및 용도로 한정하더라도 산업상 이용 가능한 것으로 인정하지",
+   "why": "본칙(미용 목적으로 한정하면 인정)만 검색되면 '수술방법도 인정된다'고 잘못 답한다."
+  },
+  {
+   "id": "p03-수탁증사본-사후첨부",
+   "group": "proviso",
+   "question": "미생물 출원을 하면서 수탁증 사본을 안 붙였으면 그 출원은 무조건 부적법하게 되는 건가요?",
+   "gold_pages": [
+    232
+   ],
+   "anchor": "심사관의 거절이유통지를 받고 사본을 첨부하는 경우에는 적법한 것으로 보고 수리하여",
+   "why": "본칙만 검색되면 '수탁증 사본 미첨부 = 부적법'이라고 잘못 답한다."
+  },
+  {
+   "id": "p04-실시예결합-인용발명",
+   "group": "proviso",
+   "question": "하나의 간행물에 실린 서로 다른 실시예 둘을 묶어서 하나의 인용발명으로 삼을 수는 없다고 알고 있는데, 그러면 어떤 경우에도 결합하지 못하는 건가요?",
+   "gold_pages": [
+    286
+   ],
+   "anchor": "2 이상의 실시예로부터 하나의 인용발명이 자명하게 도출되는 경우에는 그러하지 아니하다",
+   "why": "본칙만 검색되면 '실시예를 결합해 하나의 인용발명으로 삼는 것은 불가'라고 잘못 답한다."
+  },
+  {
+   "id": "p05-합금-개방형청구항-성분량",
+   "group": "proviso",
+   "question": "조성비를 %로 적었는데 하나의 최소성분량과 나머지 최대성분량의 합이 100%에 미달합니다. \"~를 포함하는\" 개방형으로 쓰면 명확한 기재로 봐주나요? 합금 발명이에요.",
+   "gold_pages": [
+    197,
+    198
+   ],
+   "anchor": "최대성분량의 합이 100%에 미달하는 것을 허용하지 않으므로 발명이 불명확하다",
+   "why": "예외(개방형 청구항이면 미달해도 명확)까지만 검색되면 '명확한 기재로 인정된다'고 잘못 답한다. 합금은 그 예외의 예외다."
+  },
+  {
+   "id": "p06-선원지위-거절확정-협의불성립",
+   "group": "proviso",
+   "question": "거절결정이 확정된 출원은 선출원의 지위를 갖지 않는다고 하는데, 같은 날 출원이라 협의불성립을 이유로 거절이 확정된 경우에도 지위가 없나요?",
+   "gold_pages": [
+    346
+   ],
+   "anchor": "그 이유로 거절결정이나 거절한다는 취지의 심결이 확정된 경우에는 선원의 지위를 갖는다",
+   "why": "본칙만 검색되면 '거절결정이 확정되었으므로 선원의 지위 없음'이라고 잘못 답한다."
+  },
+  {
+   "id": "p07-새로운효과추가-신규사항",
+   "group": "proviso",
+   "question": "최초 명세서에 없던 새로운 효과를 보정으로 추가하면 무조건 신규사항 추가가 되는 거 아닌가요?",
+   "gold_pages": [
+    375
+   ],
+   "anchor": "잘 알려진 사실인 경우에는 신규사항 추가에 해당되지 않는다",
+   "why": "본칙(새로운 효과 추가는 신규사항 추가)만 검색되면 '무조건 신규사항 추가 → 거절'이라고 잘못 답한다."
+  },
+  {
+   "id": "p08-보정각하-직권보정-예외",
+   "group": "proviso",
+   "question": "최후거절이유통지에 대한 보정에서 새로운 거절이유가 발생하면 심사관은 반드시 보정각하를 해야 하나요?",
+   "gold_pages": [
+    383
+   ],
+   "anchor": "새로운 거절이유가 직권보정이 가능한 사항이라면, 심사관은 보정을 승인하고",
+   "why": "본칙만 검색되면 '새로운 거절이유가 발생했으므로 반드시 각하'라고 잘못 답한다."
+  },
+  {
+   "id": "p09-후출원-심사착수보류-예외",
+   "group": "proviso",
+   "question": "동일한 발명에 대한 선출원이 아직 공개도 등록공고도 안 됐는데, 후출원 심사에 바로 착수할 수 있는 경우가 있나요?",
+   "gold_pages": [
+    496
+   ],
+   "anchor": "동일한 이유에 의하여 후출원을 거절할 수 있는 경우에는 심사에 착수할 수 있다",
+   "why": "본칙만 검색되면 '선출원이 처리·공개·공고될 때까지 심사착수를 보류해야 한다'고 잘못 답한다."
+  },
+  {
+   "id": "p10-외국인-외국실시-우선심사",
+   "group": "proviso",
+   "question": "외국인 출원인이 본국에서 그 발명을 실시하고 있는데, 자기실시를 이유로 우선심사를 신청할 수 있나요?",
+   "gold_pages": [
+    700
+   ],
+   "anchor": "출원인이 외국인인 경우의 실시는 우리나라 내에서의 실시를 의미하므로",
+   "why": "본칙(외국인 출원도 내국인과 동일 기준, 자기실시 신청 인정)만 검색되면 '신청할 수 있다'고 잘못 답한다."
+  },
+  {
+   "id": "x01-보정각하-직권보정가능사항",
+   "group": "crossref",
+   "question": "최후거절이유통지에 대한 보정 때문에 도면부호 불일치 같은 새 거절이유가 생겼는데, 이것도 보정각하 대상인가요?",
+   "gold_pages": [
+    384,
+    793
+   ],
+   "anchor": "국어표준 용어 또는 맞춤법상의 단순한 오자, 탈자 또는 도면부호의 불일치"
+  },
+  {
+   "id": "x02-취소환송-심사보류-확인주기",
+   "group": "crossref",
+   "question": "취소환송된 출원의 심사를 보류한 경우 보류 사유가 해소됐는지 얼마나 자주 확인해야 하나요?",
+   "gold_pages": [
+    422,
+    494
+   ],
+   "anchor": "월 1회 이상 심사를 보류한 사유 또는 처리기간을 연장한 사유가 해소되었는지"
+  },
+  {
+   "id": "x03-우선심사-분류정정",
+   "group": "crossref",
+   "question": "우선심사 신청된 출원인데 특허분류가 부적합하고 제가 담당하는 분류도 아니면 어떻게 처리하나요?",
+   "gold_pages": [
+    708,
+    401
+   ],
+   "anchor": "다른 심사관의 담당분류에 속하는 경우에는 심사관 간에 협의하여 해당 출원을 이송하고"
+  },
+  {
+   "id": "x04-신설청구항-거절이유통지종류",
+   "group": "crossref",
+   "question": "삭제됐던 청구항에 정정 형식으로 발명을 새로 적어 넣어 신설로 취급되는 경우, 거절이유는 최초로 통지하나요 최후로 통지하나요?",
+   "gold_pages": [
+    462,
+    472
+   ],
+   "anchor": "발견된 거절이유 모두가 최후거절이유통지 대상인 경우에만 최후거절이유통지로 하고"
+  },
+  {
+   "id": "x05-등록지연연장-심사착수기한",
+   "group": "crossref",
+   "question": "등록지연에 따른 특허권 존속기간 연장등록출원은 심사관에게 이관된 날부터 언제까지 심사에 착수해야 하나요?",
+   "gold_pages": [
+    663,
+    628
+   ],
+   "anchor": "출원서류가 이관된 날로부터 4월 이내에 심사에 착수한다"
+  },
+  {
+   "id": "x06-실용신안-등록료회복-납부액",
+   "group": "crossref",
+   "question": "등록료를 추가납부기간에도 내지 못해 실용신안권이 소멸했는데, 권리를 회복하려면 등록료를 얼마나 내야 하나요?",
+   "document": "지식재산권 권리회복 심사 가이드라인.pdf",
+   "gold_pages": [
+    5
+   ],
+   "anchor": "특허료의 2배를 내고, 그 소멸한 권리의 회복을 신청할 수 있다"
+  },
+  {
+   "id": "x07-실용신안-심사청구기간-회복",
+   "group": "crossref",
+   "question": "정당한 사유로 실용신안등록출원의 심사청구기간을 놓쳐 출원이 취하된 것으로 되었는데 다시 심사청구를 할 수 있나요?",
+   "document": "지식재산권 권리회복 심사 가이드라인.pdf",
+   "gold_pages": [
+    5
+   ],
+   "anchor": "2개월 이내에 출원심사의 청구 또는 재심사의 청구를 할 수 있다"
+  },
+  {
+   "id": "x08-실용신안-절차무효-취소",
+   "group": "crossref",
+   "question": "실용신안에 관한 절차가 보정명령 불이행으로 무효처분됐습니다. 정당한 사유가 있으면 그 무효처분을 취소받을 수 있나요?",
+   "document": "지식재산권 권리회복 심사 가이드라인.pdf",
+   "gold_pages": [
+    5
+   ],
+   "anchor": "보정명령을 받은 자의 청구에 따라 그 무효처분을 취소할 수 있다"
+  },
+  {
+   "id": "x09-실용신안-무효처분취소-제척기간",
+   "group": "crossref",
+   "question": "실용신안 절차가 무효로 된 뒤 무효처분 취소를 청구할 수 있는 마지막 기한은 언제인가요?",
+   "document": "지식재산권 권리회복 심사 가이드라인.pdf",
+   "gold_pages": [
+    5
+   ],
+   "anchor": "지정된 기간의 만료일부터 1년이 지났을 때에는 그러하지 아니하다"
+  },
+  {
+   "id": "x10-실용신안-심사결정-준용범위",
+   "group": "crossref",
+   "question": "실용신안등록출원의 심사와 결정에는 특허법의 어떤 규정들이 준용되나요?",
+   "document": "지식재산권 권리회복 심사 가이드라인.pdf",
+   "gold_pages": [
+    6
+   ],
+   "anchor": "실용신안등록출원의 심사ㆍ결정에 관하여는"
+  },
+  {
+   "id": "x11-연장등록-거절이유통지-의견서기간",
+   "group": "crossref",
+   "question": "등록지연에 따른 특허권 존속기간 연장등록출원을 거절하려고 할 때 의견서 제출기간은 얼마로 지정하나요?",
+   "gold_pages": [
+    669
+   ],
+   "anchor": "의견서 제출기간을 4개월의 범위 이내로 지정하여 통지"
+  },
+  {
+   "id": "x12-연장등록-여부결정-형식",
+   "group": "crossref",
+   "question": "등록지연에 따른 특허권 존속기간의 연장 여부에 대한 결정은 어떤 형식으로 해야 하나요?",
+   "gold_pages": [
+    671
+   ],
+   "anchor": "같은 법 제67조에 따라 서면으로 하여야 한다"
+  },
+  {
+   "id": "x13-연장등록출원-보정시기-제한",
+   "group": "crossref",
+   "question": "특허권 존속기간 연장등록출원에서 거절이유통지를 받은 뒤에도 출원서를 보정할 수 있나요?",
+   "gold_pages": [
+    623,
+    659
+   ],
+   "anchor": "해당 거절이유통지에 따른 의견서 제출기간에만 보정할 수 있다"
+  },
+  {
+   "id": "x14-심사전치-보정각하-사유",
+   "group": "crossref",
+   "question": "거절결정불복심판을 청구하면서 30일 안에 한 보정을 각하해야 하는 경우는 어떤 경우인가요?",
+   "gold_pages": [
+    772
+   ],
+   "anchor": "특허법 제51조를 준용하는 같은 법 제174조에 따라 거절결정불복심판의 청구일로부터 30일 내에 한 보정을 각하하여야 하는 경우"
+  },
+  {
+   "id": "x15-심사전치-거절이유통지-준용63조",
+   "group": "crossref",
+   "question": "심사전치된 출원에 거절이유를 통지해야 하는 경우, 준용되는 규정은 심사관에게 무엇을 요구하나요?",
+   "gold_pages": [
+    775
+   ],
+   "anchor": "(준용된 제63조) 심사관은 제62조의 규정에 의하여 특허거절결정을 하고자"
+  },
+  {
+   "id": "x16-출원인변경신고-협의불성립",
+   "group": "crossref",
+   "question": "같은 날 출원인변경신고가 둘 이상 있어 협의결과 신고를 요구했는데 기간 안에 신고가 없으면 어떻게 처리하나요?",
+   "gold_pages": [
+    142
+   ],
+   "anchor": "그 기간 이내에 신고가 없는 때에는 협의는"
+  },
+  {
+   "id": "x17-서열목록-보정-준용",
+   "group": "crossref",
+   "question": "서열을 포함한 특허출원을 보정할 때 서열목록전자파일은 어떤 방법으로 작성해서 내야 하나요?",
+   "gold_pages": [
+    235
+   ],
+   "anchor": "서열을 포함하는 특허출원의 보정에 관하여는 제1항을 준용한다"
+  },
+  {
+   "id": "x18-재심절차-심판청구료-반환",
+   "group": "crossref",
+   "question": "재심 절차에서 특허거절결정이 취소된 경우에도 이미 낸 심판청구료를 돌려받을 수 있나요?",
+   "gold_pages": [
+    122
+   ],
+   "anchor": "재심의 절차에서 준용되는 경우를 포함하되, 보정이 있는 경우는 제외"
+  },
+  {
+   "id": "x19-선원지위-협의불성립거절",
+   "group": "crossref",
+   "question": "협의가 성립하지 않아 거절결정이 확정된 출원도 나중에 다른 출원에 대해 선출원의 지위를 갖나요?",
+   "gold_pages": [
+    347
+   ],
+   "anchor": "제3항의 규정에 의하여 준용되는 경우를 포함한다)의 규정에 해당하여 그 이유로 거절결정이나 거절한다는 취지의 심결이 확정된 경우에는 선원의 지위를 갖는다"
+  },
+  {
+   "id": "x20-심판관-거절이유통지-지연기간",
+   "group": "crossref",
+   "question": "심판관이 특허법 제63조를 준용해 거절이유를 통지하고 의견서 제출 기회를 준 경우에도 지연기간 계산은 같은가요?",
+   "gold_pages": [
+    654
+   ],
+   "anchor": "심판관이 거절이유를 통지하고 의견서 제출 기회를 준 경우에도 위의 사항이 동일하게 적용된다"
+  },
+  {
+   "id": "x21-확대선원-실용신안-출원공개",
+   "group": "crossref",
+   "question": "확대된 선출원을 적용할 때 먼저 출원된 실용신안등록출원은 어떤 요건을 갖춰야 인용될 수 있나요?",
+   "gold_pages": [
+    331
+   ],
+   "anchor": "「실용신안법」제15조에 따라 준용되는 이 법 제64조에"
+  },
+  {
+   "id": "x22-이의신청-심사관합의체-용어치환",
+   "group": "crossref",
+   "question": "이의신청 심사관합의체에 심판 규정을 준용할 때 ‘특허심판원장’은 누구로 바꿔 읽어야 하나요?",
+   "document": "상표심사기준.pdf",
+   "gold_pages": [
+    387
+   ],
+   "anchor": "이 경우 제130조제2항 중 “특허심판원장”은 “지식재산처장”으로"
+  },
+  {
+   "id": "x23-지정상품추가등록출원-준용조문",
+   "group": "crossref",
+   "question": "지정상품추가등록출원의 심사에는 상표법의 어떤 조문들이 준용되나요?",
+   "document": "상표심사기준.pdf",
+   "gold_pages": [
+    396
+   ],
+   "anchor": "지정상품추가등록출원에 관하여는 제37조, 제38조제1항, 제39조부터 제"
+  },
+  {
+   "id": "x24-분할출원-절차준용",
+   "group": "crossref",
+   "question": "상표등록출원을 분할할 때 분할출원서를 내는 절차는 어느 규정을 따르나요?",
+   "document": "상표심사기준.pdf",
+   "gold_pages": [
+    148
+   ],
+   "anchor": "법 제45조에 따른 출원의 분할에 관하여는 제28조제3항부터 제7항까지의규정을 준용한다"
+  },
+  {
+   "id": "x25-상품분류전환-직권재심사-거절이유통지",
+   "group": "crossref",
+   "question": "상품분류전환등록결정을 직권으로 취소하고 다시 심사한 뒤 이미 통지했던 거절이유로 거절하려면 거절이유를 다시 통지해야 하나요?",
+   "document": "상표심사기준.pdf",
+   "gold_pages": [
+    43
+   ],
+   "anchor": "제212조에 따라 준용되는 제68조의2제1항에 따른 직권 재심사를 하여 취소된 상품분류전환등록결정"
+  },
+  {
+   "id": "s01-특허출원서-첨부서류",
+   "group": "statute",
+   "question": "특허출원서 낼 때 명세서 말고 도면이랑 요약서도 같이 내야 하나요?",
+   "document": "특허법.html",
+   "gold_paths": [
+    "조42/항2"
+   ],
+   "anchor": "발명의 설명ㆍ청구범위를 적은 명세서와 필요한 도면 및 요약서를 첨부하여야 한다"
+  },
+  {
+   "id": "s02-심사청구-기간",
+   "group": "statute",
+   "question": "특허 심사청구는 출원한 날부터 언제까지 해야 하는지 알려주세요",
+   "document": "특허법.html",
+   "gold_paths": [
+    "조59/항2"
+   ],
+   "anchor": "특허출원일부터 3년 이내에 지식재산처장에게 출원심사의 청구를 할 수 있다"
+  },
+  {
+   "id": "s03-출원공개-시점",
+   "group": "statute",
+   "question": "제 특허출원은 언제 공개되나요? 앞당겨서 공개해달라고 할 수도 있나요?",
+   "document": "특허법.html",
+   "gold_paths": [
+    "조64/항1"
+   ],
+   "anchor": "1년 6개월이 지난 후 또는 그 전이라도 특허출원인이 신청한 경우에는"
+  },
+  {
+   "id": "s04-특허료-설정등록",
+   "group": "statute",
+   "question": "특허 설정등록을 받으려면 특허료를 몇 년치나 내야 하나요?",
+   "document": "특허법.html",
+   "gold_paths": [
+    "조79/항1"
+   ],
+   "anchor": "제87조제1항에 따른 특허권의 설정등록을 받으려는 자는 설정등록을 받으려는 날"
+  },
+  {
+   "id": "s05-거절결정불복심판-기간",
+   "group": "statute",
+   "question": "특허 거절결정을 받았는데 불복 심판은 언제까지 청구해야 하나요?",
+   "document": "특허법.html",
+   "gold_paths": [
+    "조132의17"
+   ],
+   "anchor": "특허거절결정 또는 특허권의 존속기간의 연장등록거절결정을 받은 자가 결정에 불복할 때에는"
+  },
+  {
+   "id": "s06-거짓행위의죄",
+   "group": "statute",
+   "question": "거짓으로 특허를 받아낸 경우에는 처벌이 어떻게 되나요?",
+   "document": "특허법.html",
+   "gold_paths": [
+    "조229"
+   ],
+   "anchor": "거짓이나 그 밖의 부정한 행위로 특허, 특허권의 존속기간의 연장등록"
+  },
+  {
+   "id": "s07-상표권-존속기간",
+   "group": "statute",
+   "question": "상표권은 등록하고 나면 몇 년 동안 유지되나요?",
+   "document": "상표법.html",
+   "gold_paths": [
+    "조83/항1"
+   ],
+   "anchor": "상표권의 존속기간은 제82조제1항에 따라 설정등록이 있는 날부터 10년으로 한다"
+  },
+  {
+   "id": "s08-상표등록료-분할납부",
+   "group": "statute",
+   "question": "상표등록료를 한꺼번에 내기 부담스러운데 나눠서 낼 수 있나요?",
+   "document": "상표법.html",
+   "gold_paths": [
+    "조72/항1"
+   ],
+   "anchor": "상표등록료를 2회로 분할하여 낼 수 있다"
+  },
+  {
+   "id": "s09-선사용권",
+   "group": "statute",
+   "question": "남이 상표를 먼저 등록했는데 저는 그 전부터 쓰고 있었어요. 계속 써도 되나요?",
+   "document": "상표법.html",
+   "gold_paths": [
+    "조99/항1"
+   ],
+   "anchor": "부정경쟁의 목적이 없이 타인의 상표등록출원 전부터 국내에서 계속하여 사용하고 있을 것"
+  },
+  {
+   "id": "s10-실용신안권-존속기간",
+   "group": "statute",
+   "question": "실용신안권은 몇 년 동안 보호받을 수 있나요?",
+   "document": "실용신안법.html",
+   "gold_paths": [
+    "조22/항1"
+   ],
+   "anchor": "실용신안등록출원일 후 10년이 되는 날까지로 한다"
+  },
+  {
+   "id": "s11-실용신안-도면첨부",
+   "group": "statute",
+   "question": "실용신안 출원할 때도 도면을 꼭 첨부해야 하나요?",
+   "document": "실용신안법.html",
+   "gold_paths": [
+    "조8/항2"
+   ],
+   "anchor": "고안의 설명, 청구범위를 적은 명세서와 도면 및 요약서를 첨부하여야 한다"
+  },
+  {
+   "id": "s12-우선심사-신청서류",
+   "group": "statute",
+   "question": "특허 우선심사를 신청하려면 어떤 서류를 준비해야 하나요?",
+   "document": "특허법 시행규칙.html",
+   "gold_paths": [
+    "조39"
+   ],
+   "anchor": "별지 제22호서식의 우선심사신청서에 다음 각 호의 서류를 첨부하여 지식재산처장에게 제출해야 한다"
+  },
+  {
+   "id": "s13-특허여부결정-보류",
+   "group": "statute",
+   "question": "특허 여부 결정을 조금 미뤄달라고 신청할 수 있나요? 언제까지 내야 하나요?",
+   "document": "특허법 시행규칙.html",
+   "gold_paths": [
+    "조40의2/항1"
+   ],
+   "anchor": "특허출원일부터 6개월 이내에 별지 제22호의2서식의 결정 보류신청서를"
+  },
+  {
+   "id": "s14-상표우선심사-신청서류",
+   "group": "statute",
+   "question": "상표 우선심사를 신청할 때 함께 내야 하는 서류가 뭔가요?",
+   "document": "상표법 시행규칙.html",
+   "gold_paths": [
+    "조49"
+   ],
+   "anchor": "「특허법 시행규칙」 별지 제22호서식의 우선심사신청서에"
+  },
+  {
+   "id": "s15-공지예외-학회발표",
+   "group": "statute",
+   "question": "내가 학회가서 발표를 했는데 그 내용을 바탕으로 특허출원을 하려고 해. 근데 문제가 될만한게 있을까?",
+   "document": "특허법.html",
+   "gold_paths": [
+    "조30/항1",
+    "조30/항2",
+    "조30/항3"
+   ],
+   "anchor": "공지 등이 되지 아니한 발명으로 보는 경우",
+   "_note": "2026-09-05 소유자 실사고: 사례 서술이 출원서 기재사항 청크로 새고 제30조에 도달하지 못했다. 사례형 질문의 회귀 검사."
+  }
+ ]
 }

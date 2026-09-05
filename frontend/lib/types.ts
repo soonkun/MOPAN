@@ -369,6 +369,8 @@ export interface AnswerModel {
   id: string;
   label: string;
   is_default: boolean;
+  /** 추론 수준(reasoning_effort)을 받는 모델인가. 조절 UI를 그릴지의 근거. */
+  reasoning: boolean;
 }
 
 export interface Conversation {

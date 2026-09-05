@@ -66,6 +66,12 @@ const WORKFLOW_STORAGE_KEY = "mopan.workflow";
 // 경계라 여기 남은 낡은 이름은 해가 없다.
 const MCP_OFF_STORAGE_KEY = "mopan.mcp-servers-off";
 
+// 추론 모델의 사고 깊이. 모델 선택과 같은 이유로 기억되고, 추론을 받지 않는
+// 모델로 바꾼 뒤 남은 값은 서버가 조용히 버리므로 낡아도 해가 없다.
+const REASONING_STORAGE_KEY = "mopan.reasoning-effort";
+export const REASONING_EFFORTS = ["minimal", "low", "medium", "high"] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
 /** 시간대별 인사. 경계는 체감으로 골랐고 상수가 곧 문서다 - "안녕하세요" 한
  * 문장이 새벽 2시에도 아침 9시에도 똑같이 나가는 것이 어색하다는 소유자
  * 지적에서 왔다. */
@@ -138,6 +144,8 @@ export default function ChatWindow({
   const [orchestrator, setOrchestrator] = useState(false);
   // 자동 사용을 끈 MCP 서버 이름들. 여기 없는 서버는 전부 켜져 있는 것이다.
   const [mcpOff, setMcpOff] = useState<string[]>([]);
+  // 추론 모델의 사고 깊이. 추론을 받는 모델을 골랐을 때만 UI가 뜨고 전송된다.
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
   // Every ENABLED workflow that has a graph. Empty for a deployment with none
   // configured, and the picker then renders nothing at all.
   const [workflows, setWorkflows] = useState<WorkflowOption[]>([]);
@@ -276,6 +284,14 @@ export default function ChatWindow({
       if (Array.isArray(stored)) setMcpOff(stored.filter((n) => typeof n === "string"));
     } catch {
       // Same fallback, and here "the default" means every server ON.
+    }
+    try {
+      const stored = localStorage.getItem(REASONING_STORAGE_KEY);
+      if ((REASONING_EFFORTS as readonly string[]).includes(stored ?? "")) {
+        setReasoningEffort(stored as ReasoningEffort);
+      }
+    } catch {
+      // 기본값 medium 그대로.
     }
   }, []);
 
@@ -592,6 +608,10 @@ export default function ChatWindow({
           // 켜져 있는 서버의 모든 도구 id. 서버가 read 등급만 걸러 쓰므로 여기서
           // 위험도를 가리지 않고, 비어 있으면 아예 싣지 않아 예전 요청 그대로다.
           ...(autoToolIds.length ? { auto_tool_ids: autoToolIds } : {}),
+          // 추론을 받는 모델일 때만 싣는다 - 서버도 버리지만 요청은 정직하게.
+          ...(models.find((m) => m.id === model)?.reasoning
+            ? { reasoning_effort: reasoningEffort }
+            : {}),
           // Omitted, not sent empty, while the list is still loading: the
           // backend reads an absent `model` as ANSWER_MODEL and an unknown one
           // as a 400.
@@ -625,6 +645,24 @@ export default function ChatWindow({
       pendingId,
       (onEvent, signal) => approveChat({ approval_token, approved }, onEvent, signal),
     );
+  }
+
+  const EFFORT_LABEL: Record<ReasoningEffort, string> = {
+    minimal: "최소",
+    low: "낮음",
+    medium: "중간",
+    high: "높음",
+  };
+
+  function chooseReasoningEffort(value: ReasoningEffort) {
+    setReasoningEffort(value);
+    setNotice(`추론 수준을 ${EFFORT_LABEL[value]}(으)로 바꿨습니다.`);
+    try {
+      localStorage.setItem(REASONING_STORAGE_KEY, value);
+    } catch {
+      // The choice still applies to this session; it just will not survive a
+      // reload.
+    }
   }
 
   /** MCP 서버 하나의 자동 사용 스위치. `@`로 직접 부르는 길은 이 값과 무관하게
@@ -745,8 +783,14 @@ export default function ChatWindow({
       )}
       {/* The scroll container is full-bleed; the 768px reading column (§6) is
           the inner div. Putting max-width on the scroller instead would leave
-          the scrollbar floating in the middle of the page. */}
-      <div className="flex-1 overflow-y-auto">
+          the scrollbar floating in the middle of the page.
+
+          `relative`는 이중 스크롤바 수정의 채팅 편이다((app)/layout.tsx의 main
+          주석과 같은 기전): 안의 sr-only(absolute) - 복사 버튼 라벨, 낭독용
+          live region - 는 positioned 조상이 없으면 이 스크롤러의 클리핑을
+          탈출해 정적 위치(대화가 길수록 아래, 실측 top 1095·1184)까지 root를
+          늘리고, 그 넘침을 main이 스크롤로 받아 질문마다 입력창이 위로 밀렸다. */}
+      <div className="relative flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-transcript space-y-8 px-4 py-8 sm:px-6">
           {loaded && !error && messages.length === 0 && !sending && (
             // The masthead. It replaced a one-line invitation - "등록된 문서에
@@ -925,6 +969,9 @@ export default function ChatWindow({
           onToolRemove={() => setToolCall(null)}
           orchestrator={orchestrator}
           onOrchestratorChange={chooseOrchestrator}
+          reasoningEffort={reasoningEffort}
+          reasoningEffortLabel={EFFORT_LABEL[reasoningEffort]}
+          onReasoningEffortChange={chooseReasoningEffort}
           mcpServers={[...new Set(tools.map((t) => t.server_name))].map((name) => ({
             name,
             on: !mcpOff.includes(name),

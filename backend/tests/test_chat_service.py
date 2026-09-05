@@ -198,6 +198,9 @@ def test_answer_takes_no_session_and_no_retrieval_collaborator():
         # 아니고, 이 테스트가 지키는 성질은 그대로다.
         "intent",
         "user_nickname",
+        # 추론 모델의 사고 깊이. model과 같은 모양의 데이터다 - 프로바이더가
+        # kwargs로 받아 계열을 보고 스스로 버리거나 싣는다.
+        "reasoning_effort",
     ]
 
 

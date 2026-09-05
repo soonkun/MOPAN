@@ -44,7 +44,20 @@ MODEL_LABELS = {
     "gpt-4.1": "GPT-4.1",
     "gpt-4.1-mini": "GPT-4.1 mini",
     "gpt-5": "GPT-5",
+    "gpt-5.6-terra": "GPT-5.6 Terra",
+    "gpt-5.6-luna": "GPT-5.6 Luna",
+    "gpt-5.6-sol": "GPT-5.6 Sol",
 }
+
+# reasoning_effort를 받는 계열. VISION과 같은 이유로 조회가 아니라 단언이다 -
+# 다만 방향이 반대다: 여기 없는 모델에 effort를 보내면 원문 400이 나가므로,
+# 거짓 양성이 사고이고 거짓 음성은 조절 못 하는 불편에 그친다. gpt-5 계열의
+# -chat- 변형(gpt-5-chat-latest 등)은 비추론 대화 모델이라 제외한다.
+REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+
+
+def model_supports_reasoning(model: str) -> bool:
+    return model.startswith(REASONING_MODEL_PREFIXES) and "chat" not in model
 
 
 class Settings(BaseSettings):
@@ -151,6 +164,10 @@ class Settings(BaseSettings):
     # (vote pooling, overfetch, article-level folding), lives at the top of
     # app/retrieval/collapse.py. Off means fusion is byte-identical to before.
     retrieval_collapse: bool = True
+    # 첫 검색 전에 사례 서술을 전문 용어 질의로 다시 쓰는 단계
+    # (app/retrieval/recast.py). 약근거 재시도가 못 잡는 사각 - 근거가 강해
+    # "보이는" 오답 - 을 겨눈다. 켜기 전에 eval_retrieval.py로 잰다.
+    retrieval_recast: bool = False
 
     # HOW THE SPARSE ARM TOKENISES, at ingest AND at query time - the two must
     # agree or the index answers a question nobody asked. See
@@ -217,6 +234,13 @@ class Settings(BaseSettings):
     # it must stay a CHEAP model - expansion runs in front of every question and
     # is worth a fraction of a cent, not a frontier completion.
     query_expansion_model: str = "gpt-4o-mini"
+    # 약근거 재시도의 확장에만 쓰는 모델. 비어 있으면 query_expansion_model.
+    # 분리된 이유(실측): "학회 발표 후 출원" 사례 질문에서 mini의 재작성 3개는
+    # 전부 일반어("법적 문제")에 머물렀고, gpt-5.6-luna는 3개 전부 코퍼스의
+    # 용어(신규성 상실·공지예외적용·신청기간)를 만들었다. query_expansion_model
+    # 자체를 추론 모델로 올리면 의도 게이트·자동 도구 숙고까지 그 지연을 내므로,
+    # 이미 느린 길(약근거 재시도)에만 비싼 모델을 쓴다.
+    query_expansion_retry_model: str = ""
     # A rewrite that has not answered by then is worth less than the original
     # question, which is what `expand_query` degrades to. Well under
     # LLM_TIMEOUT_SECONDS on purpose.
@@ -309,7 +333,13 @@ class Settings(BaseSettings):
     # name topics the corpus actually contains. Small on purpose: the branch only
     # runs when retrieval already failed, and 14 chunks of failure is the trace
     # the owner was looking at when they asked why nothing was used.
-    clarify_evidence_items: int = 3
+    #
+    # 3 -> 14 (2026-09-05 실사고): "학회 발표 후 출원" 사례 질문에서 검색은
+    # 전달 14개 안에 특허법 제30조를 담아 왔는데(픽스처 s15 anchor=HIT), 되묻기
+    # 분기가 상위 3개(출원서 기재사항 청크)만 보고 "이 문서는 그 문제를 다루지
+    # 않습니다"라고 답했다. 정답이 4~14위에 있는 약근거가 정확히 이 분기의
+    # 사정권이므로, 되묻기가 보는 폭은 답변보다 넓어야 한다.
+    clarify_evidence_items: int = 14
     # The sparse ranking's weight in RRF. Textbook RRF is 1.0 - every retriever a
     # peer - and that is the value this was measured against, on the real 854-page
     # Korean examination manual with the 20-question set in

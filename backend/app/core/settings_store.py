@@ -288,6 +288,16 @@ ENV_ONLY_SETTINGS: list[EnvOnlySetting] = [
         ),
     ),
     EnvOnlySetting(
+        key="RETRIEVAL_RECAST",
+        label="사례 질의 재작성",
+        reason=(
+            "켜짐/꺼짐 값이라 이 화면의 숫자 입력 칸으로는 다룰 수 없습니다. 자기 상황을 이야기로 "
+            "서술한 질문을 첫 검색 전에 코퍼스의 용어로 다시 쓰는 단계이며, 검색 질문 하나마다 "
+            "값싼 completion 한 번이 붙습니다. scripts/eval_retrieval.py 로 측정한 뒤 환경변수로 "
+            "바꿉니다."
+        ),
+    ),
+    EnvOnlySetting(
         key="RERANK_MODEL",
         label="재순위 모델",
         reason=(

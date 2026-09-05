@@ -22,7 +22,12 @@ from app.auth.authorization import get_owned_conversation
 from app.auth.dependencies import get_current_user
 from app.chat.intent import classify_intent
 from app.chat.service import ChatAnswer, answer, load_history, persist_turn, retrieve
-from app.core.config import MODEL_LABELS, Settings, get_app_settings
+from app.core.config import (
+    MODEL_LABELS,
+    Settings,
+    get_app_settings,
+    model_supports_reasoning,
+)
 from app.core.db import get_db_session
 from app.core.logging import log_event
 from app.core.redis import get_redis
@@ -207,6 +212,7 @@ async def _complete(
     workflow: ResolvedWorkflow,
     user_nickname: str | None = None,
     auto_tool_ids: list[uuid.UUID] | None = None,
+    reasoning_effort: str | None = None,
 ) -> AsyncIterator[str]:
     """Everything after the evidence has been gathered: retrieve if there is
     none, answer, persist, emit `citations` and `done`.
@@ -325,6 +331,7 @@ async def _complete(
             prompt_name=workflow.prompt_name,
             intent=intent,
             user_nickname=user_nickname,
+            reasoning_effort=reasoning_effort,
         )
     # 추적 화면이 "왜 인용이 없는가"에 답할 수 있게. prompt_name(smalltalk_agent)
     # 이 이미 기록되지만, 그것이 게이트의 판정이었다는 사실은 여기만 안다.
@@ -638,6 +645,7 @@ async def chat(
                 workflow=workflow,
                 user_nickname=user.nickname,
                 auto_tool_ids=payload.auto_tool_ids,
+                reasoning_effort=payload.reasoning_effort,
             ):
                 yield frame
         except LLMError:
@@ -916,6 +924,7 @@ async def list_models(
             id=model,
             label=MODEL_LABELS.get(model, model),
             is_default=model == settings.answer_model,
+            reasoning=model_supports_reasoning(model),
         )
         for model in settings.selectable_models
     ]

@@ -195,6 +195,8 @@ export async function streamChat(
     /** 자동 사용이 켜진 도구들(+ 메뉴의 MCP 서버 토글). 모델이 이 중에서
      * 필요할 때 알아서 부른다. 낡은 id는 서버가 조용히 거른다. */
     auto_tool_ids?: string[];
+    /** 추론 모델의 사고 깊이. 비추론 모델에 실려 가도 서버가 조용히 버린다. */
+    reasoning_effort?: "minimal" | "low" | "medium" | "high";
     /** Slice 3's Super Agent, opt-in per question the way `model` is. Off means
      * the Slice 1 direct RAG path, which is still the default. An agent that
      * carries the orchestrator turns it on regardless; there is no way to turn

@@ -106,9 +106,14 @@ CLARIFY_SYSTEM_PROMPT = (
     "\n"
     "Reply in the user's language, in two parts and nothing else.\n"
     "\n"
-    "1. ONE sentence saying why you are asking back. There are exactly two cases.\n"
+    "1. ONE sentence saying why you are asking back. There are exactly three cases.\n"
     "The question is on topic but underspecified - name the ambiguity: \"출원에 관해 구체적으로 "
     "어떤 것이 궁금하신가요?\"\n"
+    "The question describes the user's OWN SITUATION (a personal case: \"내가 ~했는데 ~해도 "
+    "될까?\") and the evidence names conditions that turn on facts they did not give - ask for the "
+    "single most decisive missing fact the way a counselor would, and say why it matters: \"언제 "
+    "발표하셨나요? 공개된 시점에 따라 적용될 수 있는 규정이 달라집니다.\" Never ask for a fact the "
+    "evidence does not actually make decisive.\n"
     "The corpus does not cover the topic at all - say so, AND say what it does cover, taken from "
     "the evidence rather than from what you happen to know: \"이 문서는 특허·실용신안 심사기준이라 "
     "상표 출원 절차는 다루지 않습니다. 다만 상표등록출원이 특허 우선권주장의 기초가 될 수 있는지에 "
@@ -297,7 +302,9 @@ _FALLBACK_PROMPTS = {
     # gap - and it lives in this dict rather than being read as a constant so
     # that the day someone does seed it, 프롬프트 관리 edits it like the other two
     # with no code change.
-    "clarify_agent": PromptTemplate(name="clarify_agent", version="1", text=CLARIFY_SYSTEM_PROMPT),
+    # version 2: 사례 서술(자기 상황)에는 상담사처럼 판단에 결정적인 빠진 사실
+    # 하나를 되묻는다 - "언제 발표하셨나요?" (소유자 지시).
+    "clarify_agent": PromptTemplate(name="clarify_agent", version="2", text=CLARIFY_SYSTEM_PROMPT),
     # 의도 게이트가 "chat"으로 판정한 발화가 받는 프롬프트. clarify_agent와 같은
     # 계약: 마이그레이션 없이 이 사전이 폴백이고, 시딩하면 프롬프트 관리에서
     # 편집된다. 근거 없이 부르므로 인용 규칙이 없다 - 지어낼 근거 자체가 없다.
