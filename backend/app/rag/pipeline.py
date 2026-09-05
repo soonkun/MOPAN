@@ -203,6 +203,12 @@ async def process_document(
         await db.rollback()
         document = await db.get(Document, uuid.UUID(document_id))
         if document is not None:
+            # 남아 있는 색인도 같이 지운다. 이 예외는 "이 파일에서는 쓸 만한
+            # 텍스트가 안 나온다"는 판정이고, 지금 남은 청크도 같은 파일에서
+            # 나온 것이라 같은 쓰레기다 - 실사고: failed로 바뀐 뒤에도 (cid:)
+            # 청크 3,289개가 남아 검색을 계속 오염시켰다. 일반 예외 쪽은 그대로
+            # 둔다: 일시 장애로 멀쩡한 색인을 비우면 안 된다.
+            await vector_store.delete_by_document(document.id)
             document.status = "failed"
             document.error_message = str(exc)
             await db.commit()
