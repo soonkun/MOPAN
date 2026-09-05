@@ -276,3 +276,144 @@ async def mcp(request: Request) -> Response:
             "error": {"code": -32601, "message": f"unknown method: {method}"},
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# KIPRIS 상표분류 MCP - 두 번째 MCP 서버, 같은 컨테이너의 /kipris/mcp.
+#
+# plus.kipris.or.kr의 상표 분류코드·유사군코드 이력 REST(TradeMarkClassification
+# InfoService)를 감싼다. KIPRIS Plus는 가입·활용신청 후 발급되는 accessKey가
+# 필요하고 오퍼레이션 명세도 로그인 뒤의 개발가이드에만 있다 - 그래서 이름을
+# 추측해 굳힌 개별 도구 대신, 가이드의 오퍼레이션명을 그대로 받는 게이트웨이
+# 한 개를 정직하게 둔다(껍데기 금지). accessKey는 MOPAN의 MCP 서버 등록 화면
+# "인증 토큰"에 넣으면 Authorization 헤더로 이 서버에 오고, 여기서 KIPRIS의
+# accessKey 파라미터로 전달된다 - .env를 만질 일이 없다.
+
+import xml.etree.ElementTree as ET
+
+KIPRIS_BASE = "http://plus.kipris.or.kr/openapi/rest/TradeMarkClassificationInfoService"
+
+KIPRIS_TOOLS = [
+    {
+        "name": "kipris_trademark_classification",
+        "description": (
+            "KIPRIS Plus TradeMarkClassificationInfoService gateway. Korean trademark (NICE) "
+            "classification codes and similar-group-code (유사군코드) designated-goods change "
+            "history, per application. `operation` is the operation name from the KIPRIS Plus "
+            "developer guide for this service; `params` are its query parameters, e.g. "
+            "{\"applicationNumber\": \"4020200012345\"} or paging like docsStart/docsCount. "
+            "Responses are KIPRIS XML rendered as readable text."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "description": "KIPRIS operation name, e.g. from the service guide",
+                },
+                "params": {
+                    "type": "object",
+                    "description": "Query parameters for the operation (accessKey는 자동 주입)",
+                },
+            },
+            "required": ["operation"],
+        },
+    },
+]
+
+KIPRIS_KEY_GUIDE = (
+    "KIPRIS accessKey가 없습니다. plus.kipris.or.kr에서 가입 후 이 API의 활용신청으로 "
+    "발급받은 accessKey를, MOPAN의 MCP 서버 등록 화면 '인증 토큰' 칸에 넣어 주세요. "
+    "(월 1,000회 무료)"
+)
+
+
+def _xml_to_text(xml_text: str, limit: int = 4000) -> str:
+    """KIPRIS XML을 '태그: 값' 줄들로 - 모델이 읽을 표 형태의 최소 변환."""
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return xml_text[:limit]
+    lines: list[str] = []
+    for element in root.iter():
+        text = (element.text or "").strip()
+        if text and len(element) == 0:
+            lines.append(f"{element.tag}: {text}")
+    return ("\n".join(lines) or xml_text)[:limit]
+
+
+async def kipris_gateway(arguments: dict, access_key: str | None) -> str:
+    if not access_key:
+        return KIPRIS_KEY_GUIDE
+    operation = str(arguments.get("operation", "")).strip().strip("/")
+    if not operation or not operation.replace("_", "").isalnum():
+        raise ValueError("operation은 KIPRIS 개발가이드의 오퍼레이션 이름 한 단어여야 합니다.")
+    params = arguments.get("params") or {}
+    if not isinstance(params, dict):
+        raise ValueError("params는 객체여야 합니다.")
+    query = {str(k): str(v) for k, v in params.items()}
+    query["accessKey"] = access_key
+    async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
+        response = await client.get(f"{KIPRIS_BASE}/{operation}", params=query)
+    body = response.text
+    if response.status_code != 200 or "code400" in str(response.url):
+        return (
+            f"KIPRIS가 요청을 거절했습니다 (HTTP {response.status_code}, {response.url}). "
+            "오퍼레이션 이름과 accessKey를 확인해 주세요."
+        )
+    return _xml_to_text(body)
+
+
+@app.post("/kipris/mcp")
+async def kipris_mcp(request: Request) -> Response:
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}},
+            status_code=400,
+        )
+    method = payload.get("method")
+    request_id = payload.get("id")
+    if method == "notifications/initialized":
+        return Response(status_code=202)
+    if method == "initialize":
+        return _result(
+            request_id,
+            {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "mopan-kipris", "version": "1.0.0"},
+            },
+        )
+    if method == "tools/list":
+        return _result(request_id, {"tools": KIPRIS_TOOLS})
+    if method == "tools/call":
+        params = payload.get("params") or {}
+        if params.get("name") != "kipris_trademark_classification":
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32602, "message": f"unknown tool: {params.get('name')}"},
+                }
+            )
+        auth = request.headers.get("authorization", "")
+        access_key = auth.removeprefix("Bearer ").strip() or None
+        try:
+            text = await kipris_gateway(params.get("arguments") or {}, access_key)
+            is_error = False
+        except Exception as exc:
+            logger.warning("kipris tool failed: %s", exc)
+            text = f"도구 실행에 실패했습니다: {exc}"
+            is_error = True
+        return _result(
+            request_id, {"content": [{"type": "text", "text": text}], "isError": is_error}
+        )
+    return JSONResponse(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32601, "message": f"unknown method: {method}"},
+        }
+    )
