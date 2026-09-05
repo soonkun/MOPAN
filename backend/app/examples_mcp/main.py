@@ -454,12 +454,14 @@ GOODS_TOOLS = [
     {
         "name": "goods_classification",
         "description": (
-            "Look up the trademark (NICE) class and similar-group code for a goods/service name "
-            "in the classification tables indexed in this deployment (e.g. 유사상품 심사기준 "
-            "고시명칭). Exact substring match on the official names - for a vague product idea, "
-            "call this several times with candidate official-style names (e.g. for a social "
-            "networking app: '소셜네트워크', 'SNS', '애플리케이션 소프트웨어') and combine the "
-            "results. Returns matching rows as 류/유사군코드 plus the matched name in context."
+            "Look up an item's classification codes in ANY classification table indexed in this "
+            "deployment - every document chunked with the 분류표 structure is searchable here the "
+            "moment it is indexed (currently e.g. 유사상품 심사기준: goods name -> 상품류/"
+            "유사군코드; future tables like pesticide or tariff classifications work the same "
+            "way). Exact substring match on the official names - for a vague item, call several "
+            "times with candidate official-style names (e.g. '소셜네트워크', '애플리케이션 "
+            "소프트웨어') and combine. Returns matching rows as [class/code] markers plus the "
+            "matched name in context."
         ),
         "inputSchema": {
             "type": "object",
