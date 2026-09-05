@@ -69,6 +69,10 @@ services:
       # 이 완화가 열어 주는 것은 "관리자가 내부 주소를 등록할 수 있다"까지다.
       # 외부에 공개하는 배포에서 내부망 탐색이 걱정되면 .env에서 false로.
       MCP_ALLOW_PRIVATE_NETWORKS: ${MCP_ALLOW_PRIVATE_NETWORKS:-true}
+      # 동봉된 표 조회 MCP(/goods/mcp)를 부팅 시 기본 제공 서버로 자동 등록한다
+      # (app/mcp/seed.py). compose가 채우는 이유: 이 호스트명은 컨테이너망에서만
+      # 풀린다. 비우면 시딩이 꺼진다.
+      BUNDLED_MCP_SEED_URL: ${BUNDLED_MCP_SEED_URL:-http://mcp-examples:8100/goods/mcp}
     depends_on:
       postgres:
         condition: service_healthy

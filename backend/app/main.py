@@ -56,6 +56,12 @@ async def lifespan(app: FastAPI):
         batch_chars=settings.embedding_batch_chars,
         embedding_dim=settings.embedding_dim,
     )
+    # 동봉 MCP 자동 등록. 실패해도 기동은 계속된다(seed 안에서 삼킨다).
+    from app.mcp.seed import seed_bundled_servers
+
+    async with app.state.sessionmaker() as session:
+        await seed_bundled_servers(session, settings)
+
     try:
         yield
     finally:

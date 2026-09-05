@@ -193,6 +193,13 @@ async def app(test_engine, test_sessionmaker, fake_redis, tmp_path_factory):
             # into connection attempts. The escape-hatch test switches it on
             # deliberately (tests/test_mcp.py).
             "mcp_allow_private_networks": False,
+            # Pinned EMPTY for the same reason: compose sets this so the deployed
+            # backend auto-registers the bundled 표 조회 MCP on first admin
+            # registration, and inheriting it would make every first-register
+            # fixture attempt a (refused) discovery and leave an extra
+            # mcp_servers row under unrelated tests. The seeding tests in
+            # tests/test_mcp.py set it deliberately.
+            "bundled_mcp_seed_url": "",
         }
     )
     application.state.settings = settings

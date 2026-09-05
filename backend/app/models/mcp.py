@@ -65,6 +65,12 @@ class McpServer(Base):
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )
+    # 기본 제공 서버(부팅 시 app/mcp/seed.py가 등록하는 동봉 MCP)는 삭제할 수
+    # 없다 - 삭제해도 다음 재기동이 되살릴 것이므로, 거짓 삭제 대신 거부가
+    # 정직하다. 끄려면 enabled=false: 시딩은 기존 행을 존중한다.
+    builtin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     # RESTRICT and NOT NULL, exactly as collections.created_by and
     # documents.uploaded_by: deleting a user must not silently delete a server
     # every other user's answers may be citing. Accounts are deactivated, never

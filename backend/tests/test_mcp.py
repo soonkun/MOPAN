@@ -22,7 +22,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.chat.prompt import MANDATORY_TOKEN_ALLOWANCE, build_prompt, get_prompt
 from app.core.config import Settings
@@ -708,3 +708,88 @@ async def test_run_tool_calls_needs_no_request_and_no_session(admin_client, stub
     assert evidence[0].ref == "mcp:날씨/current_weather"
     assert evidence[0].content == "맑음"
     assert evidence[0].score is None
+
+
+# --- 동봉 서버의 시딩과 삭제 불가 --------------------------------------------
+# 표 조회 MCP는 예시가 아니라 기본 기능이다: 부팅과 첫 관리자 가입이 등록하고
+# (app/mcp/seed.py), builtin 행은 DELETE가 거부된다 - 지워도 다음 재기동이
+# 되살릴 것이라, 조용한 부활 대신 거부가 정직하다.
+
+
+async def test_seed_registers_the_bundled_server_as_builtin_with_read_tools(
+    admin_client, db, stub_mcp
+):
+    from app.mcp.seed import BUNDLED_SERVER_NAME, seed_bundled_servers
+
+    stub_mcp(StubMCP())
+    settings = settings_with(bundled_mcp_seed_url=PUBLIC_URL)
+    await seed_bundled_servers(db, settings)
+
+    server = await db.scalar(select(McpServer).where(McpServer.base_url == PUBLIC_URL))
+    assert server is not None
+    assert server.builtin is True
+    assert server.name == BUNDLED_SERVER_NAME
+    tools = (await db.scalars(select(McpTool).where(McpTool.server_id == server.id))).all()
+    # read인 것이 시딩의 핵심이다: 자동 숙고(app/mcp/auto.py)는 read만 부른다.
+    assert tools and all(tool.risk_level == "read" for tool in tools)
+
+    # 멱등이고, 관리자의 재분류를 되돌리지 않는다.
+    tools[0].risk_level = "write"
+    await db.commit()
+    await seed_bundled_servers(db, settings)
+    assert (
+        await db.scalar(
+            select(func.count()).select_from(McpServer).where(McpServer.base_url == PUBLIC_URL)
+        )
+    ) == 1
+    await db.refresh(tools[0])
+    assert tools[0].risk_level == "write"
+
+    response = await admin_client.delete(f"/api/mcp/servers/{server.id}")
+    assert response.status_code == 409
+    assert "삭제할 수 없습니다" in response.json()["detail"]
+    assert await db.scalar(select(McpServer).where(McpServer.id == server.id)) is not None
+
+
+async def test_seed_adopts_a_manually_registered_row_instead_of_duplicating(
+    admin_client, db, stub_mcp
+):
+    """이 배포가 실제로 겪는 경로: 관리자가 같은 주소를 먼저 손으로 등록해 두었다.
+    시딩은 새 행을 만들지 않고 그 행을 builtin으로 승격만 한다 - 이름도, 도구
+    설정도 그대로."""
+    from app.mcp.seed import seed_bundled_servers
+
+    stub_mcp(StubMCP())
+    created = await register(admin_client, name="내가 등록한 서버")
+    await seed_bundled_servers(db, settings_with(bundled_mcp_seed_url=PUBLIC_URL))
+
+    rows = (await db.scalars(select(McpServer).where(McpServer.base_url == PUBLIC_URL))).all()
+    assert len(rows) == 1
+    assert rows[0].id == uuid.UUID(created["id"])
+    assert rows[0].builtin is True
+    assert rows[0].name == "내가 등록한 서버"
+
+
+async def test_seed_is_a_noop_without_a_url_or_an_admin(db, stub_mcp):
+    from app.mcp.seed import seed_bundled_servers
+
+    stub_mcp(StubMCP())
+    await seed_bundled_servers(db, settings_with())  # URL이 비어 있으면 꺼진 것
+    await seed_bundled_servers(db, settings_with(bundled_mcp_seed_url=PUBLIC_URL))  # 관리자 없음
+    assert (await db.scalar(select(func.count()).select_from(McpServer))) == 0
+
+
+async def test_the_first_admin_registration_seeds_the_bundled_server(client, app, db, stub_mcp):
+    """docker compose up -> 브라우저에서 첫 가입 -> 표 조회 MCP가 이미 있다.
+    부팅 시딩은 관리자가 없어 물러났으므로, 이 경로가 신선한 설치를 덮는다."""
+    stub_mcp(StubMCP())
+    app.state.settings = app.state.settings.model_copy(
+        update={"bundled_mcp_seed_url": PUBLIC_URL}
+    )
+    response = await client.post(
+        "/api/auth/register", json={"email": "boot@example.com", "password": "pw123456"}
+    )
+    assert response.status_code in (200, 201), response.text
+    server = await db.scalar(select(McpServer).where(McpServer.base_url == PUBLIC_URL))
+    assert server is not None
+    assert server.builtin is True

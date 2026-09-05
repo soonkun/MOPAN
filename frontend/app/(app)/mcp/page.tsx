@@ -218,7 +218,14 @@ export default function McpPage() {
                 <Fragment key={server.id}>
                   <tr className="border-b border-outline-variant align-top">
                     <td className="px-3 py-3">
-                      <div className="font-medium">{server.name}</div>
+                      <div className="flex items-center gap-1.5 font-medium">
+                        {server.name}
+                        {server.builtin && (
+                          <span className="rounded-full bg-surface-container-high px-2 py-0.5 text-caption font-normal text-on-surface-variant">
+                            기본 제공
+                          </span>
+                        )}
+                      </div>
                       <div className="break-all text-caption text-on-surface-variant">
                         {server.base_url}
                       </div>
@@ -272,13 +279,17 @@ export default function McpPage() {
                         >
                           {server.enabled ? "중지" : "사용"}
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => setDeleteTarget(server)}
-                          className="btn-danger btn-compact"
-                        >
-                          삭제
-                        </button>
+                        {/* 기본 제공 서버는 삭제가 거부되므로(재기동 시딩이 되살림)
+                            버튼 자체를 그리지 않는다. 끄는 길은 위의 "중지". */}
+                        {!server.builtin && (
+                          <button
+                            type="button"
+                            onClick={() => setDeleteTarget(server)}
+                            className="btn-danger btn-compact"
+                          >
+                            삭제
+                          </button>
+                        )}
                       </div>
                       {rowError?.id === server.id && <ErrorBanner message={rowError.message} />}
                       {server.discovery_error && rowError?.id !== server.id && (

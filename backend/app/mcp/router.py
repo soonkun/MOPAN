@@ -29,6 +29,9 @@ router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 SERVER_NOT_FOUND_MESSAGE = "MCP 서버를 찾을 수 없습니다."
 TOOL_NOT_FOUND_MESSAGE = "MCP 도구를 찾을 수 없습니다."
 DUPLICATE_NAME_MESSAGE = "같은 이름의 MCP 서버가 이미 있습니다."
+BUILTIN_DELETE_MESSAGE = (
+    "기본 제공 MCP 서버는 삭제할 수 없습니다. 사용하지 않으려면 비활성화해 주세요."
+)
 
 
 def _response(
@@ -43,6 +46,7 @@ def _response(
         # carry the token even if this line were written wrongly.
         has_auth_token=bool(server.auth_token),
         enabled=server.enabled,
+        builtin=server.builtin,
         created_by_email=email,
         created_at=server.created_at,
         updated_at=server.updated_at,
@@ -190,6 +194,10 @@ async def delete_server(
     db: AsyncSession = Depends(get_db_session),
 ):
     server = await _get_server(db, server_id)
+    if server.builtin:
+        # 지워도 다음 재기동의 시딩(app/mcp/seed.py)이 되살린다. 조용한 부활은
+        # 거짓 삭제라, 여기서 거부하고 이유를 말한다. 끄는 길은 enabled=false.
+        raise HTTPException(status_code=409, detail=BUILTIN_DELETE_MESSAGE)
     await db.delete(server)  # tools cascade
     await db.commit()
     log_event(logger, "mcp_server_deleted", server_id=str(server_id), admin_id=str(admin.id))

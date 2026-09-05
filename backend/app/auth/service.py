@@ -53,8 +53,19 @@ async def register_user(db: AsyncSession, settings: Settings, email: str, passwo
         db.add(Collection(name=DEFAULT_COLLECTION_NAME, created_by=user.id))
 
     await db.commit()
-    await db.refresh(user)
     log_event(logger, "user_registered", user_id=str(user.id), role=user.role)
+
+    if is_first_user:
+        # 부팅 시딩(app/main.py lifespan)은 관리자가 없으면 물러난다. 첫 관리자가
+        # 지금 생겼으니 동봉 MCP를 여기서 등록한다 - 실패해도 가입은 성공이다.
+        from app.mcp.seed import seed_bundled_servers
+
+        await seed_bundled_servers(db, settings)
+
+    # refresh는 시딩 뒤에: 시딩이 실패하면 안에서 rollback하는데, 그 rollback이
+    # 방금 커밋된 user를 expire시켜 응답 직렬화가 세션 밖 lazy IO로 터진다
+    # (MissingGreenlet 실사고). 여기서 다시 읽으면 어느 경로든 살아 있는 값이다.
+    await db.refresh(user)
     return user
 
 

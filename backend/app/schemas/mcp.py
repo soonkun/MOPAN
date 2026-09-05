@@ -80,6 +80,8 @@ class McpServerResponse(BaseModel):
     auth_kind: str
     has_auth_token: bool
     enabled: bool
+    # 기본 제공(동봉) 서버. 삭제가 거부되므로 화면은 삭제 버튼 대신 배지를 그린다.
+    builtin: bool = False
     created_by_email: str | None
     created_at: datetime
     updated_at: datetime

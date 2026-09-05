@@ -100,6 +100,8 @@ export interface McpServer {
   auth_kind: "none" | "bearer";
   has_auth_token: boolean;
   enabled: boolean;
+  /** 기본 제공(동봉) 서버. 삭제 API가 거부하므로 화면도 삭제 버튼 대신 배지를 그린다. */
+  builtin: boolean;
   created_by_email: string | null;
   created_at: string;
   updated_at: string;

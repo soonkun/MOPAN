@@ -420,17 +420,26 @@ async def kipris_mcp(request: Request) -> Response:
 
 
 # ---------------------------------------------------------------------------
-# 상품분류 조회 MCP - 세 번째 서버, /goods/mcp. 키가 필요 없다.
+# 표 조회 MCP - 세 번째 서버, /goods/mcp. 키가 필요 없다.
 #
-# "상표분류 코드가 뭐냐"에 답하는 실체는 외부 API가 아니라 이미 코퍼스에 있는
-# 분류표다(예: 유사상품 심사기준의 9천여 행 - 문서가 곧 데이터라는 모판 철학).
-# 이 도구는 그 행들을 정확 부분일치로 조회해 류·유사군코드를 결정적으로
-# 돌려준다. 애매한 물음("소셜네트워크 어플")은 모델이 후보 상품명 여러 개로
-# 바꿔 여러 번 조회해 종합한다 - 그 조합이 자동 사용 숙고의 일이다.
+# "상표분류 코드가 뭐냐" 같은 물음에 답하는 실체는 외부 API가 아니라 이미
+# 코퍼스에 있는 표다(예: 유사상품 심사기준의 9천여 행 - 문서가 곧 데이터라는
+# 모판 철학). 이 도구는 그 행들을 정확 부분일치로 조회해 [코드/코드] 마커를
+# 결정적으로 돌려준다. 애매한 물음("소셜네트워크 어플")은 모델이 후보 명칭
+# 여러 개로 바꿔 여러 번 조회해 종합한다 - 그 조합이 자동 사용 숙고의 일이다.
 #
-# 특허 전용 하드코딩이 아니다: "[코드/코드] 명칭…" 브래킷 마커 절(분류표
-# 구조로 청킹된 모든 문서의 산출물)을 읽으므로, 다른 도메인의 분류표를
-# 올려도 같은 도구가 동작한다.
+# 특정 표의 하드코딩이 아니다. 두 단계다:
+#   1) "[코드/코드] 명칭…" 브래킷 마커 절(그 구조로 청킹된 문서의 산출물)을
+#      먼저 찾는다 - 마커가 곧 코드라 결과가 행 단위로 결정적이다.
+#   2) 마커 일치가 없으면 코퍼스 전체 본문을 같은 정확 부분일치로 조회한다 -
+#      섹션 패턴을 설정하지 않고 문서만 올린 배포에서도 표의 행이 텍스트로
+#      파싱되어 있는 한 잡힌다. 모판을 받은 사람이 아무 설정 없이 RAG 문서만
+#      등록해도 이 도구가 빈 손이 되지 않는 것이 이 폴백의 존재 이유다.
+# 상품분류 전용이 아니라서 이름도 "표 조회"다.
+#
+# 경로가 /goods/mcp인 것은 역사다: 이미 등록된 서버의 base_url이 이 주소라
+# 경로를 바꾸면 기존 등록 행이 죽는다. 이름은 도구·서버명이 밖에 보이는
+# 전부이고, 그 둘은 일반화했다.
 
 import os
 
@@ -450,31 +459,35 @@ def _engine():
     return _goods_engine
 
 
-GOODS_TOOLS = [
+TABLE_TOOLS = [
     {
-        "name": "goods_classification",
+        "name": "table_lookup",
         "description": (
-            "Look up an item's classification codes in ANY classification table indexed in this "
-            "deployment - every document chunked with the 분류표 structure is searchable here the "
-            "moment it is indexed (currently e.g. 유사상품 심사기준: goods name -> 상품류/"
-            "유사군코드; future tables like pesticide or tariff classifications work the same "
-            "way). Exact substring match on the official names - for a vague item, call several "
-            "times with candidate official-style names (e.g. '소셜네트워크', '애플리케이션 "
-            "소프트웨어') and combine. Returns matching rows as [class/code] markers plus the "
-            "matched name in context."
+            "Exact-substring lookup over EVERY document indexed in this deployment - any table "
+            "or text is searchable the moment it is indexed, no configuration needed. Rows from "
+            "documents chunked with [code/code]-style section markers come back first as "
+            "deterministic [class/code] rows (e.g. 유사상품 심사기준: goods name -> 상품류/"
+            "유사군코드); when no marker row matches, the same keyword is searched across all "
+            "chunk text and returned with its surrounding line, so the answer model reads the "
+            "code or value straight out of the row. For a vague item, call several times with "
+            "candidate official-style keywords (e.g. '소셜네트워크', '애플리케이션 소프트웨어') "
+            "and combine."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "상품/서비스 명칭 (부분일치, 2자 이상)"},
+                "keyword": {
+                    "type": "string",
+                    "description": "표에서 찾을 명칭/키워드 (부분일치, 2자 이상)",
+                },
                 "limit": {"type": "integer", "description": "최대 결과 수 (기본 8, 최대 20)"},
             },
-            "required": ["name"],
+            "required": ["keyword"],
         },
     },
 ]
 
-_GOODS_SQL = sql_text(
+_TABLE_SQL = sql_text(
     r"""
     SELECT DISTINCT ON (marker) marker, content, filename FROM (
       SELECT split_part(c.section, ']', 1) || ']' AS marker, c.content, d.filename
@@ -484,25 +497,47 @@ _GOODS_SQL = sql_text(
     """
 )
 
+# 폴백: 마커 구조가 없는 배포를 위한 전(全) 코퍼스 정확 부분일치. 키 컬럼을
+# 추측하지 않는다 - 일치한 행의 주변 텍스트를 그대로 돌려주고, 어떤 값이
+# 코드인지는 답변 모델이 문맥으로 읽는다. 섹션이 있으면 섹션을, 없으면
+# 파일명을 좌표로 붙인다.
+_FALLBACK_SQL = sql_text(
+    """
+    SELECT COALESCE(NULLIF(c.section, ''), d.filename) AS place, c.content, d.filename
+    FROM chunks c JOIN documents d ON d.id = c.document_id
+    WHERE c.content ILIKE '%' || :q || '%'
+    ORDER BY d.filename, c.chunk_index LIMIT :n
+    """
+)
 
-async def goods_classification(arguments: dict) -> str:
-    name = str(arguments.get("name", "")).strip()
-    if len(name) < 2:
-        raise ValueError("name은 2자 이상의 상품/서비스 명칭이어야 합니다.")
+
+async def table_lookup(arguments: dict) -> str:
+    # 구 스키마의 "name"도 받는다: 등록된 도구 설명이 재발견 전까지 옛 것일 수 있다.
+    keyword = str(arguments.get("keyword") or arguments.get("name") or "").strip()
+    if len(keyword) < 2:
+        raise ValueError("keyword는 2자 이상의 명칭/키워드여야 합니다.")
     limit = min(max(int(arguments.get("limit") or 8), 1), 20)
     async with _engine().connect() as conn:
-        rows = (await conn.execute(_GOODS_SQL, {"q": name, "n": limit})).all()
+        rows = (await conn.execute(_TABLE_SQL, {"q": keyword, "n": limit})).all()
+        structured = bool(rows)
+        if not rows:
+            rows = (await conn.execute(_FALLBACK_SQL, {"q": keyword, "n": limit})).all()
     if not rows:
         return (
-            f"'{name}'과 일치하는 고시명칭이 분류표에 없습니다. 더 공식적인 명칭"
+            f"'{keyword}'과 일치하는 텍스트가 코퍼스에 없습니다. 더 공식적인 명칭"
             f"(예: '~업', '~용 소프트웨어')이나 다른 표현으로 다시 조회해 보세요."
         )
-    lines = [f"'{name}' 일치 {len(rows)}건 (마커 = [류/유사군코드]):"]
-    for marker, content, filename in rows:
-        at = content.lower().find(name.lower())
+    head = (
+        f"'{keyword}' 일치 {len(rows)}건 (마커 = [코드/코드]):"
+        if structured
+        else f"'{keyword}' 마커 구조 일치 없음 - 전체 본문 정확일치 {len(rows)}건:"
+    )
+    lines = [head]
+    for place, content, filename in rows:
+        at = content.lower().find(keyword.lower())
         start = max(0, at - 40)
-        window = content[start : at + len(name) + 60].replace("\n", " ")
-        lines.append(f"- {marker} …{window}… ({filename})")
+        window = content[start : at + len(keyword) + 60].replace("\n", " ")
+        lines.append(f"- {place} …{window}… ({filename})")
     return "\n".join(lines)
 
 
@@ -525,14 +560,16 @@ async def goods_mcp(request: Request) -> Response:
             {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "mopan-goods", "version": "1.0.0"},
+                "serverInfo": {"name": "mopan-tables", "version": "1.1.0"},
             },
         )
     if method == "tools/list":
-        return _result(request_id, {"tools": GOODS_TOOLS})
+        return _result(request_id, {"tools": TABLE_TOOLS})
     if method == "tools/call":
         params = payload.get("params") or {}
-        if params.get("name") != "goods_classification":
+        # goods_classification은 구명이다: 재발견 전의 등록 행이 아직 그 이름으로
+        # 부를 수 있어 별칭으로 받는다.
+        if params.get("name") not in ("table_lookup", "goods_classification"):
             return JSONResponse(
                 {
                     "jsonrpc": "2.0",
@@ -541,10 +578,10 @@ async def goods_mcp(request: Request) -> Response:
                 }
             )
         try:
-            text = await goods_classification(params.get("arguments") or {})
+            text = await table_lookup(params.get("arguments") or {})
             is_error = False
         except Exception as exc:
-            logger.warning("goods tool failed: %s", exc)
+            logger.warning("table_lookup failed: %s", exc)
             text = f"도구 실행에 실패했습니다: {exc}"
             is_error = True
         return _result(

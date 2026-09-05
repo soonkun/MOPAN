@@ -484,6 +484,11 @@ class Settings(BaseSettings):
     # A manual turn names its own tools, so this is a bound on one request, not
     # on a planner. Slice 3's orchestrator gets its own ceiling.
     max_tool_calls_per_message: int = 3
+    # 동봉된 분류표 조회 MCP(/goods/mcp)를 부팅 시 기본 제공 서버로 자동 등록하는
+    # 주소. 코드 기본값이 아니라 compose가 채운다: 이 호스트명은 컨테이너망에서만
+    # 풀리므로, 호스트에서 직접 돌리는 개발 서버가 죽은 주소를 시딩하면 안 된다.
+    # 비우면 시딩이 꺼진다. app/mcp/seed.py가 소비자.
+    bundled_mcp_seed_url: str = ""
 
     # --- Super Agent / Orchestrator (Slice 3) --------------------------------
     # OPT-IN per question, exactly the way the answer model is picked. The direct
