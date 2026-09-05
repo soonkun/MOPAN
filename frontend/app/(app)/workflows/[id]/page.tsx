@@ -262,7 +262,7 @@ export default function WorkflowEditorPage() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* 상단 바 - 이 화면의 유일한 가로 크롬. 나머지는 전부 캔버스다. */}
-      <header className="flex h-14 shrink-0 items-center gap-2 border-b border-outline-variant bg-surface-container-low px-3 pr-16">
+      <header className="flex h-14 shrink-0 items-center gap-2 border-b border-outline-variant bg-surface-container-low px-3">
         <button
           type="button"
           onClick={() => (dirty ? setLeaving(true) : router.push("/workflows"))}
@@ -297,10 +297,13 @@ export default function WorkflowEditorPage() {
               삭제
             </button>
           )}
+          {/* 아이콘+라벨 가변형(소유자 지정): 모바일은 아이콘만, 데스크톱은
+              글자까지. aria-label이 아이콘만 남는 화면의 이름이다. */}
           <button
             type="button"
             onClick={() => setTesting((open) => !open)}
             disabled={!editingId || dirty}
+            aria-label="실행해보기"
             title={
               !editingId
                 ? "먼저 만들기로 저장해야 실행할 수 있습니다."
@@ -308,18 +311,29 @@ export default function WorkflowEditorPage() {
                   ? "저장하지 않은 변경이 있습니다. 저장 후 실행해 주세요."
                   : "저장된 그래프를 채팅과 같은 경로로 실행합니다."
             }
-            className="btn-tonal btn-compact"
+            className="btn-tonal btn-compact gap-1.5 px-2.5 sm:px-4"
             aria-expanded={testing}
           >
-            실행해보기
+            <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="currentColor">
+              <path d="M8 5.5v13a1 1 0 0 0 1.5.87l11-6.5a1 1 0 0 0 0-1.74l-11-6.5A1 1 0 0 0 8 5.5Z" />
+            </svg>
+            <span className="hidden sm:inline">실행해보기</span>
           </button>
           <button
             type="button"
             onClick={() => void save()}
             disabled={saving || !draft.name.trim()}
-            className="btn-filled btn-compact"
+            aria-label={editingId ? "저장" : "만들기"}
+            className="btn-filled btn-compact gap-1.5 px-2.5 sm:px-4"
           >
-            {saving ? "저장 중..." : editingId ? "저장" : "만들기"}
+            <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M5 4h11l3 3v12a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z" />
+              <path d="M8 4v5h7V4" />
+              <path d="M8 20v-6h8v6" />
+            </svg>
+            <span className="hidden sm:inline">
+              {saving ? "저장 중..." : editingId ? "저장" : "만들기"}
+            </span>
           </button>
         </div>
       </header>
