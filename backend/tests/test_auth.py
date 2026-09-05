@@ -416,3 +416,43 @@ async def test_admin_cannot_reset_their_own_password_here(admin_client):
 async def test_password_reset_is_admin_only(member_client, admin_client):
     member_id = await _user_id(admin_client, "member@example.com")
     assert (await member_client.post(f"/api/users/{member_id}/password")).status_code == 403
+
+
+# --- 관리자 사용자 추가 (POST /api/users) -------------------------------------
+
+
+async def test_admin_creates_a_user_who_logs_in_with_the_temporary_password(
+    admin_client, app
+):
+    """자가가입이 꺼진 공개 배포(모바일 가입 화면 실사고)에서 계정이 생기는
+    유일한 길: 임시값은 한 번 실리고, 그 값으로 바로 로그인된다."""
+    created = await admin_client.post(
+        "/api/users", json={"email": "  Invited@Example.com ", "role": "user"}
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["email"] == "invited@example.com"  # 가입과 같은 정규화
+    assert body["role"] == "user"
+    assert len(body["temporary_password"]) >= 8
+
+    listing = await admin_client.get("/api/users")
+    assert "invited@example.com" in [u["email"] for u in listing.json()]
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as fresh:
+        login = await fresh.post(
+            "/api/auth/login",
+            json={"email": "invited@example.com", "password": body["temporary_password"]},
+        )
+        assert login.status_code == 200
+
+
+async def test_admin_create_refuses_a_duplicate_email_in_korean(admin_client):
+    refused = await admin_client.post("/api/users", json={"email": "admin@example.com"})
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == "이미 등록된 이메일입니다."
+
+
+async def test_user_creation_is_admin_only(member_client):
+    refused = await member_client.post("/api/users", json={"email": "x@example.com"})
+    assert refused.status_code == 403

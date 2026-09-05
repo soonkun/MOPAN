@@ -32,6 +32,12 @@ export default function UsersPage() {
   const [tempPassword, setTempPassword] = useState<{ id: string; value: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [query, setQuery] = useState("");
+  // 사용자 추가 - 공개 배포에서 자가가입을 꺼 두면 계정이 생기는 유일한 길.
+  const [addOpen, setAddOpen] = useState(false);
+  const [newEmail, setNewEmail] = useState("");
+  const [newRole, setNewRole] = useState<"user" | "admin">("user");
+  const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -77,6 +83,28 @@ export default function UsersPage() {
     }
   }
 
+  async function addUser(event: React.FormEvent) {
+    event.preventDefault();
+    setAdding(true);
+    setAddError(null);
+    try {
+      const created = await apiFetch<ManagedUser & { temporary_password: string }>(
+        "/api/users",
+        { method: "POST", body: JSON.stringify({ email: newEmail, role: newRole }) },
+      );
+      setCopied(false);
+      setTempPassword({ id: created.id, value: created.temporary_password });
+      setNewEmail("");
+      setNewRole("user");
+      setAddOpen(false);
+      await load();
+    } catch (err) {
+      setAddError(errorMessage(err));
+    } finally {
+      setAdding(false);
+    }
+  }
+
   // 클라이언트 필터로 충분한 규모다 - 목록 전체가 이미 한 번에 온다.
   const visible = (users ?? []).filter((u) =>
     `${u.email} ${u.nickname ?? ""}`.toLowerCase().includes(query.trim().toLowerCase()),
@@ -93,18 +121,63 @@ export default function UsersPage() {
             </p>
           )}
         </div>
-        {users !== null && users.length > 0 && (
-          <input
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="이메일·닉네임 검색"
-            aria-label="사용자 검색"
-            className="field h-9 w-64 max-w-full"
-          />
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {users !== null && users.length > 0 && (
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="이메일·닉네임 검색"
+              aria-label="사용자 검색"
+              className="field h-9 w-64 max-w-full"
+            />
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              setAddOpen((open) => !open);
+              setAddError(null);
+            }}
+            className="btn-filled btn-compact"
+          >
+            사용자 추가
+          </button>
+        </div>
       </div>
       <ErrorBanner message={loadError} />
+
+      {addOpen && (
+        // 공개 배포는 자가가입이 꺼져 있어(가입 화면: "회원가입이 비활성화되어
+        // 있습니다") 이 폼이 계정이 생기는 유일한 길이다. 비밀번호는 안 받는다 -
+        // 서버가 임시값을 만들어 한 번 보여주고, 본인이 로그인 뒤 바꾼다.
+        <form
+          onSubmit={(e) => void addUser(e)}
+          className="mt-3 flex flex-wrap items-center gap-2 rounded-md bg-surface-container-low p-3"
+        >
+          <input
+            type="email"
+            required
+            value={newEmail}
+            onChange={(e) => setNewEmail(e.target.value)}
+            placeholder="예) kim@example.com"
+            aria-label="새 사용자 이메일"
+            className="field h-9 w-64 max-w-full"
+          />
+          <select
+            value={newRole}
+            onChange={(e) => setNewRole(e.target.value as "user" | "admin")}
+            aria-label="새 사용자 권한"
+            className="field h-9 px-2 text-caption"
+          >
+            <option value="user">일반</option>
+            <option value="admin">관리자</option>
+          </select>
+          <button type="submit" disabled={adding || !newEmail} className="btn-tonal btn-compact">
+            {adding ? "추가 중..." : "임시 비밀번호로 추가"}
+          </button>
+          {addError && <ErrorBanner message={addError} />}
+        </form>
+      )}
 
       {users === null ? (
         !loadError && <p className="py-8 text-center text-body text-on-surface-variant">불러오는 중...</p>

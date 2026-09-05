@@ -82,6 +82,27 @@ class AdminUserResponse(UserResponse):
     created_at: datetime
 
 
+class AdminUserCreateRequest(BaseModel):
+    """POST /api/users - 관리자가 계정을 만들어 준다. 공개 배포에서 자가가입을
+    꺼 두면(ALLOW_SELF_REGISTRATION=false) 이것이 계정이 생기는 유일한 길이다.
+    비밀번호는 받지 않는다 - 서버가 임시값을 만들어 한 번 보여주고, 사용자가
+    로그인 뒤 계정 설정에서 바꾼다(비밀번호 재설정과 같은 계약)."""
+
+    email: EmailStr
+    role: Literal["admin", "user"] = "user"
+
+    @field_validator("email")
+    @classmethod
+    def _normalise(cls, value: str) -> str:
+        return value.strip().lower()
+
+
+class AdminUserCreateResponse(AdminUserResponse):
+    """생성된 계정 + 임시 비밀번호. 임시값은 여기 한 번 실리고 끝이다."""
+
+    temporary_password: str
+
+
 class AdminPasswordResetResponse(BaseModel):
     """POST /api/users/{id}/password의 응답. 임시 비밀번호는 여기 한 번 실리고
     끝이다 - 서버에는 해시만 남아 다시 보여줄 수 없다."""

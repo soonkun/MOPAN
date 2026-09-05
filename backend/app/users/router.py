@@ -13,7 +13,13 @@ from app.core.logging import log_event
 from app.core.redis import get_redis
 from app.core.security import hash_password, revoke_user_sessions
 from app.models.user import User
-from app.schemas.auth import AdminPasswordResetResponse, AdminUserResponse, UserUpdate
+from app.schemas.auth import (
+    AdminPasswordResetResponse,
+    AdminUserCreateRequest,
+    AdminUserCreateResponse,
+    AdminUserResponse,
+    UserUpdate,
+)
 
 logger = logging.getLogger("mopan.users")
 router = APIRouter(prefix="/api", tags=["users"])
@@ -23,6 +29,45 @@ LAST_ADMIN_MESSAGE = "마지막 관리자입니다. 다른 사용자를 관리�
 SELF_ROLE_MESSAGE = "자신의 권한은 변경할 수 없습니다. 다른 관리자에게 요청해 주세요."
 SELF_DEACTIVATE_MESSAGE = "자신의 계정은 비활성화할 수 없습니다."
 SELF_RESET_MESSAGE = "자신의 비밀번호는 계정 설정에서 변경해 주세요."
+# 가입 화면과 달리 정직하게 말한다: 관리자는 어차피 사용자 목록을 보므로
+# "이미 있다"가 계정 존재를 새로 알려주는 오라클이 아니다.
+DUPLICATE_EMAIL_MESSAGE = "이미 등록된 이메일입니다."
+
+
+@router.post("/users", response_model=AdminUserCreateResponse, status_code=201)
+async def create_user(
+    payload: AdminUserCreateRequest,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """관리자 초대. 공개 터널을 열고 자가가입을 끈 배포(모바일 가입 화면이
+    "회원가입이 비활성화되어 있습니다"로 끝나던 실사고)에서 계정이 생기는
+    유일한 길이다. 임시 비밀번호는 재설정과 같은 계약: 응답에 딱 한 번."""
+    existing = await db.scalar(select(User).where(User.email == payload.email))
+    if existing is not None:
+        raise HTTPException(status_code=409, detail=DUPLICATE_EMAIL_MESSAGE)
+
+    temporary = secrets.token_urlsafe(9)
+    user = User(
+        email=payload.email,
+        password_hash=hash_password(temporary),
+        role=payload.role,
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    log_event(
+        logger, "user_created_by_admin", user_id=str(user.id), by=str(admin.id), role=user.role
+    )
+    return AdminUserCreateResponse(
+        id=user.id,
+        email=user.email,
+        role=user.role,
+        nickname=user.nickname,
+        is_active=user.is_active,
+        created_at=user.created_at,
+        temporary_password=temporary,
+    )
 
 
 @router.get("/users", response_model=list[AdminUserResponse])
