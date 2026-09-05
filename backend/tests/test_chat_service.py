@@ -201,6 +201,8 @@ def test_answer_takes_no_session_and_no_retrieval_collaborator():
         # 추론 모델의 사고 깊이. model과 같은 모양의 데이터다 - 프로바이더가
         # kwargs로 받아 계열을 보고 스스로 버리거나 싣는다.
         "reasoning_effort",
+        # 사용자의 "지금" 한 줄(app/core/localtime.py). 역시 데이터다.
+        "current_time",
     ]
 
 

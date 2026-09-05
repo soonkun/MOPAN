@@ -197,6 +197,8 @@ export async function streamChat(
     auto_tool_ids?: string[];
     /** 추론 모델의 사고 깊이. 비추론 모델에 실려 가도 서버가 조용히 버린다. */
     reasoning_effort?: "minimal" | "low" | "medium" | "high";
+    /** 브라우저의 IANA 시간대. "올해·내일"을 사용자의 시계로 풀기 위한 것. */
+    client_tz?: string;
     /** Slice 3's Super Agent, opt-in per question the way `model` is. Off means
      * the Slice 1 direct RAG path, which is still the default. An agent that
      * carries the orchestrator turns it on regardless; there is no way to turn

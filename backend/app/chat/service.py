@@ -477,6 +477,7 @@ async def answer(
     intent: str = "search",
     user_nickname: str | None = None,
     reasoning_effort: str | None = None,
+    current_time: str | None = None,
 ) -> ChatAnswer:
     """Deliberately knows nothing about where `evidence` came from: no session, no
     vector store, no reranker. That is the whole point of the split - Slice 3 runs
@@ -519,6 +520,15 @@ async def answer(
             evidence, min_rrf_score=settings.weak_evidence_rrf_score
         )
         template = await get_prompt(CLARIFY_PROMPT_NAME if clarifying else prompt_name)
+    if current_time:
+        # 닉네임과 같은 규칙으로 본문이 아니라 여기서 덧붙는다: 저장 프롬프트는
+        # 배포 공통이고 "지금"은 요청마다 다르다. "올해"가 학습 시점의 연도로
+        # 풀리던 실사고의 답변 쪽 절반.
+        template = PromptTemplate(
+            name=template.name,
+            version=template.version,
+            text=f"{template.text}\n\n{current_time}",
+        )
     # THE RELEVANCE FLOOR, applied where it costs nothing. A live trace read
     # "14개 중 14개가 모델에게 전달되었습니다" for a trademark question against a
     # patent corpus: fourteen irrelevant chunks, all sent, and the model

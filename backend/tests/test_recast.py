@@ -41,3 +41,19 @@ def test_reasoning_family_detection():
     assert not model_supports_reasoning("gpt-4o")
     assert not model_supports_reasoning("gpt-4o-mini")
     assert not model_supports_reasoning("gpt-5-chat-latest")
+
+
+def test_now_line_uses_the_client_clock_and_degrades_to_the_default():
+    """"올해"가 학습 시점으로 풀리던 실사고의 계약: 브라우저 시간대가 먼저,
+    이상한 값은 배포 기본값으로 강등, 어느 쪽이든 오늘 날짜가 실린다."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.core.localtime import now_line
+
+    seoul = now_line("Asia/Seoul", "UTC")
+    assert "Asia/Seoul" in seoul
+    assert f"{datetime.now(ZoneInfo('Asia/Seoul')):%Y-%m-%d}" in seoul
+
+    degraded = now_line("Not/AZone", "Asia/Seoul")
+    assert "Asia/Seoul" in degraded

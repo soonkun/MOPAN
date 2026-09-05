@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = 86400
     allow_self_registration: bool | None = None  # None -> enabled outside production
 
+    # 브라우저가 시간대를 안 보냈을 때(구 클라이언트, 프라이빗 모드)의 "지금".
+    # 컨테이너는 UTC라 이것 없이는 한국 사용자의 자정~오전 9시에 날짜가 하루
+    # 어긋난다. 한국어 UI의 배포 기본값이고, 다른 배포는 env로 바꾼다.
+    default_timezone: str = "Asia/Seoul"
+
     openai_api_key: str = ""
     answer_model: str = "gpt-4o"
     # The admin-controlled allowlist a user picks an answer model from. It is a

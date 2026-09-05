@@ -557,6 +557,12 @@ export default function ChatWindow({
     const question = input;
     const sent = attachments.filter((a) => a.attachment !== null).map((a) => a.attachment!);
     const calls = toolCall ? [toolCall] : [];
+    let clientTz: string | null = null;
+    try {
+      clientTz = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+    } catch {
+      // 못 읽으면 서버의 DEFAULT_TIMEZONE이 답한다.
+    }
     const autoToolIds = tools
       .filter((t) => !mcpOff.includes(t.server_name))
       .map((t) => t.id);
@@ -612,6 +618,9 @@ export default function ChatWindow({
           ...(models.find((m) => m.id === model)?.reasoning
             ? { reasoning_effort: reasoningEffort }
             : {}),
+          // 브라우저의 시간대 - "올해 휴일"이 학습 시점의 연도로 답하던 실사고.
+          // 서버가 이 시계로 "지금" 한 줄을 만들어 프롬프트에 싣는다.
+          ...(clientTz ? { client_tz: clientTz } : {}),
           // Omitted, not sent empty, while the list is still loading: the
           // backend reads an absent `model` as ANSWER_MODEL and an unknown one
           // as a 400.

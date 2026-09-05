@@ -44,6 +44,10 @@ class ChatRequest(BaseModel):
     # 추론 모델의 사고 깊이. None이면 프로바이더 기본값이고, 비추론 모델에
     # 실려 오면(모델을 바꾼 브라우저의 기억) 프로바이더가 조용히 버린다.
     reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
+    # 브라우저의 IANA 시간대(Intl.DateTimeFormat). "올해·내일"을 사용자의
+    # 시계로 풀기 위한 것이고, 없거나 이상한 값은 DEFAULT_TIMEZONE으로 강등
+    # (app/core/localtime.py) - 그래서 여기서는 길이만 본다.
+    client_tz: str | None = Field(default=None, max_length=64)
     # Ids from GET /api/mcp/tools. The count ceiling is
     # MAX_TOOL_CALLS_PER_MESSAGE and is enforced in the router for the same two
     # reasons attachment_ids' is: it is operator configuration, and a

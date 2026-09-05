@@ -28,6 +28,7 @@ from app.core.config import (
     get_app_settings,
     model_supports_reasoning,
 )
+from app.core.localtime import now_line
 from app.core.db import get_db_session
 from app.core.logging import log_event
 from app.core.redis import get_redis
@@ -213,6 +214,7 @@ async def _complete(
     user_nickname: str | None = None,
     auto_tool_ids: list[uuid.UUID] | None = None,
     reasoning_effort: str | None = None,
+    client_tz: str | None = None,
 ) -> AsyncIterator[str]:
     """Everything after the evidence has been gathered: retrieve if there is
     none, answer, persist, emit `citations` and `done`.
@@ -251,6 +253,9 @@ async def _complete(
     # 잡담 에이전트가 "날씨는 기상청에서"라고 안내해 버림). 인사말이면 숙고가
     # "pass"를 답해 호출이 없고, 그 한 번의 숙고가 서버를 켜 둔 값이다.
     # 실패는 전부 "추가 근거 없음"으로 강등되므로 답변을 못 막는다.
+    # 사용자의 "지금" - 숙고와 답변 양쪽에 실린다. "올해 휴일"이 2023년으로
+    # 답하던 실사고(모델의 올해는 학습 시점에 고정)의 처방.
+    current_time = now_line(client_tz, settings.default_timezone)
     auto_trace = None
     auto_ask = None
     if auto_tool_ids:
@@ -265,6 +270,7 @@ async def _complete(
                 model=model,
                 workflow=workflow,
                 history=history,
+                current_time=current_time,
             )
         evidence = evidence + auto_evidence
         if auto_evidence and intent == "chat":
@@ -332,6 +338,7 @@ async def _complete(
             intent=intent,
             user_nickname=user_nickname,
             reasoning_effort=reasoning_effort,
+            current_time=current_time,
         )
     # 추적 화면이 "왜 인용이 없는가"에 답할 수 있게. prompt_name(smalltalk_agent)
     # 이 이미 기록되지만, 그것이 게이트의 판정이었다는 사실은 여기만 안다.
@@ -646,6 +653,7 @@ async def chat(
                 user_nickname=user.nickname,
                 auto_tool_ids=payload.auto_tool_ids,
                 reasoning_effort=payload.reasoning_effort,
+                client_tz=payload.client_tz,
             ):
                 yield frame
         except LLMError:

@@ -81,6 +81,7 @@ async def deliberate_and_run(
     model: str,
     workflow: ResolvedWorkflow = DEFAULT_WORKFLOW,
     history: list[dict] | None = None,
+    current_time: str | None = None,
 ) -> tuple[list[Evidence], dict | None, str | None]:
     """켜진 도구를 모델에게 보여주고, 부르겠다는 것을 실행해 Evidence로.
 
@@ -132,7 +133,10 @@ async def deliberate_and_run(
         )
 
     trace: dict = {"offered": len(specs), "called": []}
-    messages = [ChatMessage(role="system", content=_SYSTEM)]
+    # "올해 휴일"이 학습 시점의 연도로 호출되던 실사고 - 도구 인자(year, date)를
+    # 사용자의 시계로 만들려면 숙고가 지금을 알아야 한다.
+    system = _SYSTEM if not current_time else f"{_SYSTEM}\n\n{current_time}"
+    messages = [ChatMessage(role="system", content=system)]
     # 되묻기 왕복이 해석되려면 직전 대화가 보여야 한다: "어떤 지역...?"에 대한
     # "대전"은 이 맥락 없이는 도시 이름이 아니라 소음이다. 한 턴은 짧게 자른다 -
     # 여기 실리는 것은 인자 추론의 실마리지 본문이 아니다.
