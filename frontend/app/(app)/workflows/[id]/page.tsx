@@ -404,10 +404,11 @@ export default function WorkflowEditorPage() {
                   : "bg-surface-container text-on-surface hover:bg-surface-container-high"
               }`}
             >
-              {/* 공구(스패너) - 서랍 그림보다 "도구"가 한눈에 읽힌다(소유자 지정). */}
+              {/* 렌치(🔧) - 직접 그린 스패너는 안 읽혔다(소유자 지적). Lucide
+                  wrench 경로: 고리 머리 + 대각 손잡이가 이 크기에서도 렌치로
+                  읽히는 검증된 모양이다. */}
               <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M14.5 5.5a3.5 3.5 0 0 0 4.6 4.6l-8.9 8.9a2.2 2.2 0 0 1-3.1-3.1z" />
-                <path d="M5 5l3 3" />
+                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
               </svg>
               <span className="hidden sm:inline">도구</span>
             </button>

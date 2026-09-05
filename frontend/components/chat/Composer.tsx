@@ -92,7 +92,7 @@ const CHIP = (
   </>
 );
 const CLIP = <path d="M17 8.5 9.4 16a2.5 2.5 0 0 0 3.6 3.6l7.1-7.1a4.5 4.5 0 0 0-6.4-6.4l-7 7a6.5 6.5 0 0 0 9.2 9.2l5.6-5.6" />;
-// 플러그 - MCP 서버 행. 렌치(수동 도구 호출)와 구분되는 "연결"의 은유.
+// 플러그 - MCP 서버 행. "연결"의 은유.
 const PLUG = (
   <>
     <path d="M9 2v5M15 2v5" />
@@ -100,6 +100,8 @@ const PLUG = (
     <path d="M12 16v6" />
   </>
 );
+// 렌치(🔧) - 도구 설정 행. Lucide wrench: 직접 그린 것들은 안 읽혔다(소유자 지적).
+const WRENCH = <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />;
 
 function Glyph({ children, className = "h-5 w-5 shrink-0" }: { children: React.ReactNode; className?: string }) {
   return (
@@ -849,7 +851,7 @@ export default function Composer({
                 메뉴가 자란다(소유자 지적). 값은 켜진 개수 요약. */}
             {mcpServers.length > 0 && (
               <MenuRow
-                icon={PLUG}
+                icon={WRENCH}
                 label="도구 설정"
                 value={`${mcpServers.filter((s) => s.on).length}/${mcpServers.length} 켬`}
                 onClick={() => setSheet("mcp")}
