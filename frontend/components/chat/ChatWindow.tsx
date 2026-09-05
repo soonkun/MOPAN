@@ -208,8 +208,12 @@ export default function ChatWindow({
   // 죽는다 - 다음 질문을 치려면 창을 다시 클릭해야 했다(소유자 지적). 마운트와
   // 대화 전환마다 되돌려 두면 전송 직후에도, 옛 대화를 열어도 바로 이어 칠 수
   // 있다.
+  //
+  // 단, 터치 기기는 반대다: 포커스가 곧 화면 절반을 덮는 키보드라서, 여기서
+  // 포커스를 주면 페이지를 열 때마다 키보드부터 올라온다. pointer: coarse가
+  // 그 분기다 - 물리 키보드가 있는 데스크톱만 받아쓸 준비를 해 둔다.
   useEffect(() => {
-    textareaRef.current?.focus();
+    if (!window.matchMedia("(pointer: coarse)").matches) textareaRef.current?.focus();
   }, [initialConversationId]);
 
   useEffect(() => {
@@ -573,9 +577,15 @@ export default function ChatWindow({
       .map((t) => t.id);
     const pendingId = `temp-${Date.now()}`;
     setInput("");
-    // 마우스로 전송을 누르면 포커스가 버튼에 남는다. 다음 질문은 언제나 바로
-    // 이어서 온다는 것이 이 화면의 전제이므로, 여기서 입력창으로 되돌린다.
-    textareaRef.current?.focus();
+    // 데스크톱: 마우스로 전송을 누르면 포커스가 버튼에 남는다. 다음 질문은
+    // 바로 이어서 온다는 것이 이 화면의 전제이므로 입력창으로 되돌린다.
+    // 터치 기기: 정반대다 - 질문이 끝났으면 자판은 내려가야 한다(아이폰 실사고:
+    // 전송 후에도 키보드가 화면 절반을 덮고 있었다). blur가 그 내리기다.
+    if (window.matchMedia("(pointer: coarse)").matches) {
+      textareaRef.current?.blur();
+    } else {
+      textareaRef.current?.focus();
+    }
     // Cleared here rather than on `done`: these rows are claimed by the send,
     // so leaving the chips up would offer a 삭제 that now answers 409
     // 이미 전송된 첨부파일은 삭제할 수 없습니다.
