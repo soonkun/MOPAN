@@ -613,13 +613,13 @@ export default function Sidebar() {
           aria-label="메뉴"
           className="fixed inset-0 z-30 flex md:hidden"
         >
-          <div className="relative">{content}</div>
+          <div className="motion-drawer relative">{content}</div>
           {/* A button, not a div: this overlay is the only way to close the
               drawer, and as a div it is unreachable without a pointer. */}
           <button
             type="button"
             aria-label="메뉴 닫기"
-            className="flex-1 bg-scrim"
+            className="motion-scrim flex-1 bg-scrim"
             onClick={() => setOpen(false)}
           />
         </div>

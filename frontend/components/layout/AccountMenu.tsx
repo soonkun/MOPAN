@@ -202,7 +202,7 @@ export default function AccountMenu({
       onClick={(event) => {
         if (event.target === dialogRef.current) dialogRef.current?.close();
       }}
-      className="m-auto w-[calc(100vw-2rem)] max-w-[18rem] rounded-lg border border-outline-variant bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim md:mb-20 md:ml-4 md:mr-auto md:mt-auto"
+      className="motion-pop m-auto w-[calc(100vw-2rem)] max-w-[18rem] rounded-lg border border-outline-variant bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim md:mb-20 md:ml-4 md:mr-auto md:mt-auto"
     >
       <div ref={panelRef} tabIndex={-1} className="p-2 focus:outline-none">
         {view === "main" ? (

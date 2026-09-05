@@ -57,7 +57,7 @@ export default function ConfirmDialog({
       onClose={onClose}
       // §4: a dialog is one of exactly two things in this app allowed a
       // box-shadow, because it genuinely floats above the page.
-      className="w-full max-w-md rounded-lg bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim"
+      className="motion-pop w-full max-w-md rounded-lg bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim"
     >
       <div className="p-6">
         <h2 id="confirm-title" className="text-title font-medium">

@@ -173,6 +173,10 @@ class Settings(BaseSettings):
     # (app/retrieval/recast.py). 약근거 재시도가 못 잡는 사각 - 근거가 강해
     # "보이는" 오답 - 을 겨눈다. 켜기 전에 eval_retrieval.py로 잰다.
     retrieval_recast: bool = False
+    # 이력이 있는 검색 턴에서 마지막 발화를 자립형 질문으로 압축해 검색한다
+    # (app/chat/condense.py). 되묻기의 답("소셜네트워크용이야")이 그 여섯 글자
+    # 로만 검색되어 근거 0개 답이 나가던 실사고. 값싼 completion 한 번/후속 턴.
+    followup_condense: bool = True
 
     # HOW THE SPARSE ARM TOKENISES, at ingest AND at query time - the two must
     # agree or the index answers a question nobody asked. See

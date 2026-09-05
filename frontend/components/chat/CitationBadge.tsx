@@ -75,7 +75,7 @@ export default function CitationBadge({ citation }: { citation: Citation }) {
             onClick={(e) => {
               if (e.target === dialogRef.current) dialogRef.current?.close();
             }}
-            className="max-h-[80vh] w-full max-w-2xl overflow-y-auto rounded-lg bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim"
+            className="motion-pop max-h-[80vh] w-full max-w-2xl overflow-y-auto rounded-lg bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim"
           >
             <div className="p-6">
               <div className="mb-3 flex items-start justify-between gap-4">

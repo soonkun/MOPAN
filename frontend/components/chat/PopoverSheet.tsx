@@ -108,7 +108,7 @@ export default function PopoverSheet({
       // Mobile: a bottom sheet pinned to the bottom edge, full width, rounded
       // on top only. Desktop: 288px anchored above the trigger by the effect,
       // and no scrim - it is a menu, not a modal, whatever showModal() calls it.
-      className="fixed inset-x-0 bottom-0 top-auto m-0 w-full max-w-none rounded-t-lg bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim sm:w-72 sm:rounded-md sm:shadow-menu sm:backdrop:bg-transparent"
+      className="motion-pop motion-sheet fixed inset-x-0 bottom-0 top-auto m-0 w-full max-w-none rounded-t-lg bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim sm:w-72 sm:rounded-md sm:shadow-menu sm:backdrop:bg-transparent"
     >
       {children}
     </dialog>

@@ -208,7 +208,7 @@ export default function TraceDialog({
       ref={dialogRef}
       aria-labelledby="trace-title"
       onClose={onClose}
-      className="w-full max-w-4xl rounded-lg bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim"
+      className="motion-pop w-full max-w-4xl rounded-lg bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim"
     >
       <div className="max-h-[80vh] overflow-y-auto p-6">
         <div className="flex items-start justify-between gap-4">

@@ -57,3 +57,40 @@ def test_now_line_uses_the_client_clock_and_degrades_to_the_default():
 
     degraded = now_line("Not/AZone", "Asia/Seoul")
     assert "Asia/Seoul" in degraded
+
+
+async def test_a_followup_reply_becomes_a_self_contained_search_question():
+    """"소셜네트워크용이야"의 실사고: 되묻기의 답 여섯 글자로 검색이 나가
+    분류표에 닿지 못하고 근거 0개 답이 나갔다. 압축은 이력을 읽는다."""
+    from app.chat.condense import condense_followup
+
+    p = provider_saying("소셜네트워크용 어플 이름의 상표 등록은 몇 류로 출원하나요?")
+    out = await condense_followup(
+        p,
+        [
+            {"role": "user", "content": "어플 이름을 상표로 등록하려는데 몇 류인가요?"},
+            {"role": "assistant", "content": "어플이 어떤 용도로 사용되는지 알려주세요."},
+        ],
+        "소셜네트워크용이야.",
+        model="m",
+        timeout=5,
+    )
+    assert out == "소셜네트워크용 어플 이름의 상표 등록은 몇 류로 출원하나요?"
+    # 이력이 모델에게 실제로 실렸는가.
+    sent = p.chat.call_args.args[0]
+    assert [m.role for m in sent] == ["system", "user", "assistant", "user"]
+
+
+async def test_condense_degrades_to_the_question_as_asked():
+    from app.chat.condense import condense_followup
+
+    history = [{"role": "user", "content": "질문"}]
+    assert await condense_followup(provider_saying("pass"), history, "자립형 질문", model="m", timeout=5) is None
+    assert await condense_followup(provider_saying("두 줄\n설명"), history, "q", model="m", timeout=5) is None
+    broken = AsyncMock()
+    broken.chat = AsyncMock(side_effect=RuntimeError("down"))
+    assert await condense_followup(broken, history, "q", model="m", timeout=5) is None
+    # 첫 턴(이력 없음)은 모델 호출 자체가 없다 - 비용 0.
+    fresh = provider_saying("무엇이든")
+    assert await condense_followup(fresh, [], "q", model="m", timeout=5) is None
+    fresh.chat.assert_not_called()

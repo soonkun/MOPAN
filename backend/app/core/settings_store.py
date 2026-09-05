@@ -298,6 +298,16 @@ ENV_ONLY_SETTINGS: list[EnvOnlySetting] = [
         ),
     ),
     EnvOnlySetting(
+        key="FOLLOWUP_CONDENSE",
+        label="후속 질문 압축",
+        reason=(
+            "켜짐/꺼짐 값이라 이 화면의 숫자 입력 칸으로는 다룰 수 없습니다. 되묻기에 대한 답처럼 "
+            "혼자서는 검색어가 못 되는 후속 발화를 직전 대화에 비추어 자립형 질문으로 다시 써서 "
+            "검색합니다. 이력이 있는 검색 턴마다 값싼 completion 한 번이 붙고, 실패하면 원문 "
+            "그대로 검색하므로 꺼진 것과 같은 동작이 됩니다."
+        ),
+    ),
+    EnvOnlySetting(
         key="RERANK_MODEL",
         label="재순위 모델",
         reason=(

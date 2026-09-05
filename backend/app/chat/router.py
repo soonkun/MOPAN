@@ -21,6 +21,7 @@ from app.attachments.service import (
 from app.auth.authorization import get_owned_conversation
 from app.auth.dependencies import get_current_user
 from app.chat.intent import classify_intent
+from app.chat.condense import condense_followup
 from app.chat.service import ChatAnswer, answer, load_history, persist_turn, retrieve
 from app.core.config import (
     MODEL_LABELS,
@@ -237,7 +238,25 @@ async def _complete(
     # (classify_intent 참조) 이 게이트가 최악의 경우 하는 일은 아무것도 바꾸지
     # 않는 것이다.
     intent = "search"
-    if fell_back and not evidence and settings.intent_gate:
+    # 후속 턴 압축이 게이트보다 먼저다. "소셜네트워크용이야"는 홀로 보면
+    # 잡담이라 게이트가 chat으로 넘겼고, smalltalk이 분류표 대신 자기 지식으로
+    # 근거 0개 답을 냈다(실사고). 이력에 비추어 자립형 검색 질문이 만들어지면
+    # 그것이 곧 검색 의도의 표명이므로 게이트를 부르지 않는다. 압축이 "pass"
+    # (이미 자립형이거나 진짜 잡담)면 원문이 게이트로 간다 - 첫 턴은 이력이
+    # 없어 이 단계 자체가 없고, 계약은 전부 원문 강등이다(condense.py).
+    question_for_retrieval = question
+    if fell_back and not evidence and history and settings.followup_condense:
+        condensed = await condense_followup(
+            llm_provider,
+            history,
+            question,
+            model=settings.query_expansion_model,
+            timeout=settings.query_expansion_timeout_seconds,
+        )
+        if condensed:
+            question_for_retrieval = condensed
+            log_event(logger, "followup_condensed", chars=len(condensed))
+    if question_for_retrieval is question and fell_back and not evidence and settings.intent_gate:
         intent = await classify_intent(
             llm_provider,
             question,
@@ -310,7 +329,7 @@ async def _complete(
                 PgVectorStore(retrieval_db),
                 llm_provider,
                 make_reranker(settings, llm_provider),
-                question,
+                question_for_retrieval,
                 settings=settings,
                 collection_ids=collection_ids,
                 # THE FALLBACK IS INSIDE THE BOUNDARY TOO. This is the path a
@@ -356,6 +375,9 @@ async def _complete(
         chat_answer.trace["intent"] = intent
     if auto_trace is not None:
         chat_answer.trace["auto_tools"] = auto_trace
+    if question_for_retrieval != question:
+        # 추적 화면이 "검색은 실제로 무엇을 찾았는가"에 답할 수 있게.
+        chat_answer.trace["condensed_query"] = question_for_retrieval
     if plan_trace is not None:
         # THE ACCEPTANCE TEST FOR THIS SLICE IS THAT answer() DID NOT CHANGE, so
         # the plan is merged into the trace `build_trace` already produced rather

@@ -444,6 +444,8 @@ async def test_the_api_key_can_be_neither_read_nor_written(owner, db, app):
         "INTENT_GATE",
         # 사례 서술을 첫 검색 전에 용어 질의로 다시 쓰는 단계. 측정 후 켠다.
         "RETRIEVAL_RECAST",
+        # 후속 발화를 이력에 비추어 자립형 검색 질문으로 압축. 실패=원문.
+        "FOLLOWUP_CONDENSE",
         # A model name, and "" means the rerank stage is absent from the call
         # path. It is listed so the screen SAYS the stage exists and is off,
         # rather than leaving the user to infer it from silence.
