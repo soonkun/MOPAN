@@ -109,8 +109,15 @@ export default function AccountMenu({
   const [deletePassword, setDeletePassword] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const panelRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     dialogRef.current?.showModal();
+    // showModal은 첫 포커스 가능한 요소 - 닉네임 입력칸 - 에 포커스를 준다.
+    // 아이폰에서는 그 즉시 키보드가 올라오고 화면이 줌인됐다(실사고): 바꿀
+    // 생각도 없는 칸에 커서부터 꽂는 것이다. 패널 자체(tabIndex -1)로 옮겨
+    // 키보드도 줌도 없이 열리고, Tab 한 번이면 닉네임에 닿는다.
+    panelRef.current?.focus();
     setTheme(currentTheme());
   }, []);
 
@@ -197,7 +204,7 @@ export default function AccountMenu({
       }}
       className="m-auto w-[calc(100vw-2rem)] max-w-[18rem] rounded-lg border border-outline-variant bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim md:mb-20 md:ml-4 md:mr-auto md:mt-auto"
     >
-      <div className="p-2">
+      <div ref={panelRef} tabIndex={-1} className="p-2 focus:outline-none">
         {view === "main" ? (
           <>
             <div className="flex items-center gap-3 px-2 pb-2 pt-2">

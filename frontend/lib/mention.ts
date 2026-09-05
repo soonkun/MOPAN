@@ -28,8 +28,10 @@ export type MentionEntry = {
   collectionId?: string;
   /** Workflow rows only: the id POST /api/chat takes. */
   workflowId?: string;
-  /** MCP rows only: the id POST /api/chat takes. */
-  toolId?: string;
+  /** MCP rows only: 서버 이름. 행이 도구가 아니라 서버 단위인 이유는 + 메뉴와
+   * 같다 - "서버를 연결하면 그 안의 기능은 다 쓰는 것"(소유자 원칙). 고르면
+   * 이번 질문의 자동 사용 후보에 이 서버가 토글과 무관하게 들어간다. */
+  serverName?: string;
 };
 
 /** The `@…` token the caret is sitting in, or null.
@@ -96,16 +98,20 @@ export function mentionEntries(
         });
       }
     } else if (callable.kind === "mcp") {
-      const tool = tools.find((t) => `mcp:${t.server_name}/${t.name}` === callable.ref);
-      if (!tool) continue;
+      // 서버 단위 한 줄로 접는다. 도구별 행("생활정보/current_weather" 셋)은
+      // 사용자에게 서버 내부 구조를 외우라는 요구였고, + 메뉴에서 이미 기각된
+      // 모양이다. 같은 서버의 두 번째 도구부터는 행을 만들지 않는다.
+      const server = callable.ref.replace(/^mcp:/, "").split("/")[0];
+      if (entries.some((e) => e.kind === "mcp" && e.serverName === server)) continue;
+      if (!tools.some((t) => t.server_name === server)) continue;
       entries.push({
-        key: callable.ref,
+        key: `mcp:${server}`,
         kind: "mcp",
-        name: callable.name,
-        description: callable.description,
+        name: server,
+        description: "이번 질문에 이 서버의 도구를 적극 사용합니다.",
         riskLevel: callable.risk_level,
-        ref: callable.ref,
-        toolId: tool.id,
+        ref: `mcp:${server}`,
+        serverName: server,
       });
     } else {
       const workflow = workflows.find((w) => `workflow:${w.name}` === callable.ref);

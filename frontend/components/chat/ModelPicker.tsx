@@ -11,6 +11,15 @@ import type { AnswerModel } from "@/lib/types";
  * this opens - two stacked sheets over a composer is one too many.
  */
 
+// 추론 수준 3단 - ChatGPT의 즉시/중간/깊이 슬라이더와 같은 모양(소유자 지목).
+// 값은 OpenAI reasoning_effort: "즉시"는 이 계열의 최저 단계 minimal이다(none은
+// API에 없고, low는 중간과의 거리가 라벨로 설명이 안 돼 3단으로 접었다).
+const EFFORTS = [
+  { id: "minimal", label: "즉시" },
+  { id: "medium", label: "중간" },
+  { id: "high", label: "깊이 생각" },
+] as const;
+
 export default function ModelPicker({
   models,
   value,
@@ -18,6 +27,8 @@ export default function ModelPicker({
   open,
   onClose,
   anchorRef,
+  reasoningEffort,
+  onReasoningEffortChange,
 }: {
   models: AnswerModel[];
   value: string;
@@ -25,6 +36,9 @@ export default function ModelPicker({
   open: boolean;
   onClose: () => void;
   anchorRef: React.RefObject<HTMLElement | null>;
+  /** 추론 모델이 선택된 동안 그 행 밑에 나타나는 즉시/중간/깊이의 현재값. */
+  reasoningEffort: string;
+  onReasoningEffortChange: (value: "minimal" | "medium" | "high") => void;
 }) {
   // Selecting and dismissing are deliberately two different events, and this was
   // found by driving it: with `onChange` closing the sheet, the first ArrowDown
@@ -88,6 +102,33 @@ export default function ModelPicker({
             {model.is_default && <span className="shrink-0 text-caption text-on-surface-variant">기본</span>}
           </label>
         ))}
+        {/* 고른 모델이 추론 계열이면 목록 바로 아래에서 깊이를 정한다 - 모델
+            선택과 한 자리에 있어야 찾는다(+ 메뉴의 별도 행은 아무도 못 찾았다).
+            누르면 켜진 채 남는다: 이 시트는 모델을 '클릭'해야 닫히고, 깊이
+            조절은 그 전에 눈으로 확인할 상태다. */}
+        {models.find((m) => m.id === value)?.reasoning && (
+          <div
+            role="group"
+            aria-label="추론 수준"
+            className="mx-3 mb-2 mt-1 flex gap-1 rounded-full bg-surface-container-high p-1"
+          >
+            {EFFORTS.map((effort) => (
+              <button
+                key={effort.id}
+                type="button"
+                aria-pressed={reasoningEffort === effort.id}
+                onClick={() => onReasoningEffortChange(effort.id)}
+                className={`flex-1 rounded-full px-2 py-1.5 text-caption transition-colors duration-150 ${
+                  reasoningEffort === effort.id
+                    ? "bg-surface font-medium text-on-surface shadow-sm"
+                    : "text-on-surface-variant hover:text-on-surface"
+                }`}
+              >
+                {effort.label}
+              </button>
+            ))}
+          </div>
+        )}
       </fieldset>
     </PopoverSheet>
   );

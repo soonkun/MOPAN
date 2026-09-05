@@ -92,13 +92,36 @@ test("a row whose id this client does not hold is dropped, not shown", () => {
       },
     ],
   );
+  // MCP는 서버 단위 한 줄이다(+ 메뉴와 같은 소유자 원칙): 도구 id가 아니라
+  // 서버 이름이 실리고, 그 이름이 이번 질문의 자동 사용 후보를 넓힌다.
   assert.deepEqual(
-    rows.map((r) => [r.kind, r.workflowId ?? r.toolId]),
+    rows.map((r) => [r.kind, r.workflowId ?? r.serverName]),
     [
       ["workflow", "w1"],
-      ["mcp", "t1"],
+      ["mcp", "현장관측"],
     ],
   );
+});
+
+test("two tools on one server collapse into one @ row", () => {
+  const callables = ["a_tool", "b_tool"].map((name) => ({
+    kind: "mcp" as const,
+    ref: `mcp:생활정보/${name}`,
+    name: `생활정보/${name}`,
+    description: null,
+    risk_level: "read" as const,
+    collections: [],
+  }));
+  const tools = ["a_tool", "b_tool"].map((name, i) => ({
+    id: `t${i}`,
+    server_name: "생활정보",
+    name,
+    description: null,
+    risk_level: "read" as const,
+    input_schema: {},
+  }));
+  const rows = mentionEntries(callables, [], tools);
+  assert.deepEqual(rows.map((r) => [r.name, r.serverName]), [["생활정보", "생활정보"]]);
 });
 
 test("the query filters by name, not by description", () => {

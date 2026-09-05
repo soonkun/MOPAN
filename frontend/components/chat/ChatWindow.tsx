@@ -144,6 +144,9 @@ export default function ChatWindow({
   const [orchestrator, setOrchestrator] = useState(false);
   // 자동 사용을 끈 MCP 서버 이름들. 여기 없는 서버는 전부 켜져 있는 것이다.
   const [mcpOff, setMcpOff] = useState<string[]>([]);
+  // @로 이번 질문에 지목한 서버들. 토글이 꺼져 있어도 자동 사용 후보에
+  // 들어가고("꺼져 있어도 @면 적극 사용"), 전송과 함께 비워진다.
+  const [pinnedServers, setPinnedServers] = useState<string[]>([]);
   // 추론 모델의 사고 깊이. 추론을 받는 모델을 골랐을 때만 UI가 뜨고 전송된다.
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
   // Every ENABLED workflow that has a graph. Empty for a deployment with none
@@ -563,8 +566,10 @@ export default function ChatWindow({
     } catch {
       // 못 읽으면 서버의 DEFAULT_TIMEZONE이 답한다.
     }
+    // 토글이 켜진 서버 + @로 지목된 서버의 합집합. 지목은 이번 질문 한정이라
+    // 전송과 함께 비워진다.
     const autoToolIds = tools
-      .filter((t) => !mcpOff.includes(t.server_name))
+      .filter((t) => !mcpOff.includes(t.server_name) || pinnedServers.includes(t.server_name))
       .map((t) => t.id);
     const pendingId = `temp-${Date.now()}`;
     setInput("");
@@ -579,6 +584,7 @@ export default function ChatWindow({
     // the turn that was just sent, and leaving the chip up would silently run
     // the tool again on the next question.
     setToolCall(null);
+    setPinnedServers([]);
     // The previous turn's plan, not this one's. Cleared on SEND rather than in
     // run(), so the steps of a paused plan survive the approval round trip and
     // the user can still read what has already happened while deciding.
@@ -657,10 +663,10 @@ export default function ChatWindow({
   }
 
   const EFFORT_LABEL: Record<ReasoningEffort, string> = {
-    minimal: "최소",
+    minimal: "즉시",
     low: "낮음",
     medium: "중간",
-    high: "높음",
+    high: "깊이 생각",
   };
 
   function chooseReasoningEffort(value: ReasoningEffort) {
@@ -672,6 +678,16 @@ export default function ChatWindow({
       // The choice still applies to this session; it just will not survive a
       // reload.
     }
+  }
+
+  function pinServer(name: string) {
+    setPinnedServers((prev) => (prev.includes(name) ? prev : [...prev, name]));
+    setNotice(`${name} 서버를 이번 질문에 사용합니다.`);
+  }
+
+  function unpinServer(name: string) {
+    setPinnedServers((prev) => prev.filter((n) => n !== name));
+    setNotice(`${name} 서버 지목을 해제했습니다.`);
   }
 
   /** MCP 서버 하나의 자동 사용 스위치. `@`로 직접 부르는 길은 이 값과 무관하게
@@ -979,13 +995,15 @@ export default function ChatWindow({
           orchestrator={orchestrator}
           onOrchestratorChange={chooseOrchestrator}
           reasoningEffort={reasoningEffort}
-          reasoningEffortLabel={EFFORT_LABEL[reasoningEffort]}
           onReasoningEffortChange={chooseReasoningEffort}
           mcpServers={[...new Set(tools.map((t) => t.server_name))].map((name) => ({
             name,
             on: !mcpOff.includes(name),
           }))}
           onMcpServerChange={chooseMcpServer}
+          pinnedServers={pinnedServers}
+          onServerPin={pinServer}
+          onServerUnpin={unpinServer}
           workflows={workflows}
           workflowId={workflowId}
           onWorkflowChange={chooseWorkflow}

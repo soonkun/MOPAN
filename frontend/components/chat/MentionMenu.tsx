@@ -23,7 +23,7 @@ import type { MentionEntry } from "@/lib/mention";
 
 const KIND_LABEL: Record<MentionEntry["kind"], string> = {
   rag: "문서 검색",
-  mcp: "MCP 도구",
+  mcp: "MCP 서버",
   workflow: "워크플로우",
 };
 

@@ -26,6 +26,16 @@ export const metadata = {
   description: "MOPAN AI Platform",
 };
 
+// maximumScale 1: iOS 사파리가 입력칸 포커스마다 화면 전체를 자동 줌해서,
+// 계정 창만 열어도 줌인이 되던 실사고(아이폰 실측). iOS 10부터 사용자의 핀치
+// 줌은 이 값과 무관하게 항상 동작하므로 접근성 손실은 없고, 잃는 것은 그
+// 원치 않는 자동 줌뿐이다. globals.css의 모바일 16px 규칙과 한 쌍.
+export const viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
+};
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     // suppressHydrationWarning is required, not cosmetic: public/theme.js sets

@@ -187,6 +187,18 @@ body {
        "예)" 접두어와 함께 "이렇게 쓰라는 거구나"를 만든다(소유자 지적). */
     @apply h-10 rounded-sm border border-outline bg-surface px-3 text-body text-on-surface transition-colors duration-150 placeholder:text-on-surface-variant placeholder:opacity-60 focus:border-primary;
   }
+
+  /* iOS 사파리는 포커스된 입력칸의 글꼴이 16px 미만이면 페이지 전체를 자동
+     줌한다. 모바일에서만 모든 폼 컨트롤을 16px로 - 데스크톱 밀도는 그대로
+     두고, 아이폰에서 계정 창·로그인·검색칸을 만질 때마다 줌아웃해야 하던
+     실사고를 근절한다. layout.tsx의 viewport maximumScale과 한 쌍. */
+  @media (max-width: 767px) {
+    input,
+    select,
+    textarea {
+      font-size: 16px;
+    }
+  }
 }
 
 /* The assistant answer's markdown, rendered by components/chat/Markdown.tsx.

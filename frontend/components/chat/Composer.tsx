@@ -6,7 +6,6 @@ import AttachmentChip from "@/components/chat/AttachmentChip";
 import MentionMenu from "@/components/chat/MentionMenu";
 import ModelPicker from "@/components/chat/ModelPicker";
 import PopoverSheet from "@/components/chat/PopoverSheet";
-import ToolPicker from "@/components/chat/ToolPicker";
 import Switch from "@/components/ui/Switch";
 import {
   filterEntries,
@@ -66,15 +65,7 @@ const MAX_HEIGHT = 8 * 26 + 16;
  * Two states would let the + menu and a picker be open together, which is the
  * bug the hand-off was written to avoid: two stacked sheets over a composer,
  * two Escapes to get out, and a scrim over a scrim. */
-type Sheet = null | "menu" | "model" | "workflow" | "tool" | "mcp" | "effort";
-
-// 추론 수준의 선택지와 한국어 라벨. 값은 OpenAI reasoning_effort 그대로다.
-const EFFORTS = [
-  { id: "minimal", label: "최소", hint: "가장 빠르고 저렴" },
-  { id: "low", label: "낮음", hint: "간단한 질문" },
-  { id: "medium", label: "중간", hint: "기본값" },
-  { id: "high", label: "높음", hint: "복잡한 추론·사례 판단" },
-] as const;
+type Sheet = null | "menu" | "model" | "workflow" | "mcp";
 
 // The four-point spark. Plain currentColor, NOT the brand gradient: §2 reserves
 // that for the wordmark, the assistant sparkle and the streaming indicator.
@@ -101,14 +92,6 @@ const CHIP = (
   </>
 );
 const CLIP = <path d="M17 8.5 9.4 16a2.5 2.5 0 0 0 3.6 3.6l7.1-7.1a4.5 4.5 0 0 0-6.4-6.4l-7 7a6.5 6.5 0 0 0 9.2 9.2l5.6-5.6" />;
-// 계기판 - 추론 수준 행. 바늘이 곧 "얼마나 깊이 생각하는가"다.
-const GAUGE = (
-  <>
-    <path d="M4 15a8 8 0 0 1 16 0" />
-    <path d="m12 15 3.5-4.5" />
-    <path d="M4 19h16" />
-  </>
-);
 // 플러그 - MCP 서버 행. 렌치(수동 도구 호출)와 구분되는 "연결"의 은유.
 const PLUG = (
   <>
@@ -251,10 +234,12 @@ export default function Composer({
   orchestrator,
   onOrchestratorChange,
   reasoningEffort,
-  reasoningEffortLabel,
   onReasoningEffortChange,
   mcpServers,
   onMcpServerChange,
+  pinnedServers,
+  onServerPin,
+  onServerUnpin,
   workflows,
   workflowId,
   onWorkflowChange,
@@ -306,9 +291,13 @@ export default function Composer({
    * "서버를 연결하면 그 안의 기능은 다 쓰는 것"이라는 소유자의 말 그대로. */
   mcpServers: { name: string; on: boolean }[];
   onMcpServerChange: (name: string, on: boolean) => void;
-  /** 추론 모델의 사고 깊이. 고른 모델이 추론을 받을 때만 행이 그려진다. */
+  /** @로 이번 질문에 지목한 서버들. 토글이 꺼져 있어도 자동 사용 후보에
+   * 들어가고, 전송과 함께 비워진다(첨부·도구 칩과 같은 수명). */
+  pinnedServers: string[];
+  onServerPin: (name: string) => void;
+  onServerUnpin: (name: string) => void;
+  /** 추론 모델의 사고 깊이. 모델 선택 시트 안의 즉시/중간/깊이가 그 집이다. */
   reasoningEffort: string;
-  reasoningEffortLabel: string;
   onReasoningEffortChange: (value: "minimal" | "low" | "medium" | "high") => void;
   /** GET /api/workflows/selectable. Empty for a deployment with no workflow
    * configured, which drops the row rather than offering a single 기본 row that
@@ -329,9 +318,6 @@ export default function Composer({
   // Null is "the menu is closed", and it is the ONLY thing that opens it.
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
-  // Which tool the ToolPicker should open on, when `@` named one. Cleared by the
-  // picker's own close, so the + menu's 도구 사용 row still opens where it was.
-  const [toolSeed, setToolSeed] = useState<string | null>(null);
   const mentionId = "composer-mention-list";
   // Chrome fires keydown(Enter) with isComposing=true while a Hangul syllable
   // is still being composed, but not every engine does; this ref is the second
@@ -429,12 +415,12 @@ export default function Composer({
       onWorkflowChange(entry.workflowId);
     } else if (entry.kind === "rag") {
       onCollectionChange(entry.collectionId ?? null);
-    } else if (entry.kind === "mcp" && entry.toolId) {
-      // The arguments still have to be filled in, and the tool's own
-      // input_schema is the only thing that knows what they are - so this hands
-      // off to the picker that renders it, opened on the row just chosen.
-      setToolSeed(entry.toolId);
-      setSheet("tool");
+    } else if (entry.kind === "mcp" && entry.serverName) {
+      // 서버 지목: 인자 입력 시트를 열지 않는다("도구 사용 창이 무슨 의미인지
+      // 모르겠다"던 실사고의 그 창이다). 인자는 자동 사용의 숙고가 질문에서
+      // 뽑고, 부족하면 되묻는다 - 지목은 그 후보에 이 서버를 토글과 무관하게
+      // 넣는 일만 한다.
+      onServerPin(entry.serverName);
     }
     // The caret back where the token was, in a frame that runs after React has
     // written the shortened value - setSelectionRange against the old text would
@@ -456,7 +442,6 @@ export default function Composer({
    * the same tick keeps the focus its showModal() just took. */
   function closeSheet() {
     setSheet(null);
-    setToolSeed(null);
     plusRef.current?.focus();
   }
 
@@ -478,8 +463,27 @@ export default function Composer({
       }}
       className="rounded-xl bg-surface-container p-2 outline-primary transition-colors duration-150 focus-within:outline focus-within:outline-2"
     >
-      {(toolCall || collectionId) && (
+      {(toolCall || collectionId || pinnedServers.length > 0) && (
         <div className="flex flex-wrap gap-2 p-1 pb-2">
+          {/* @로 지목한 MCP 서버. 이번 질문의 자동 사용 후보에 토글과 무관하게
+              들어간다 - "꺼져 있어도 @면 적극 사용"의 실체. */}
+          {pinnedServers.map((server) => (
+            <span
+              key={server}
+              className="inline-flex max-w-full items-center gap-2 rounded-md bg-surface-container-high px-3 py-1.5 text-label"
+            >
+              <span className="truncate">MCP · {server}</span>
+              <button
+                type="button"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => onServerUnpin(server)}
+                aria-label={`${server} 서버 지목 해제`}
+                className="shrink-0 text-on-surface-variant"
+              >
+                ✕
+              </button>
+            </span>
+          ))}
           {collectionId && (
             <span className="inline-flex max-w-full items-center gap-2 rounded-md bg-surface-container-high px-3 py-1.5 text-label">
               {/* The NAME, and 분류 beside it. A bare name would read as a file
@@ -822,17 +826,6 @@ export default function Composer({
                 onClick={() => setSheet("model")}
               />
             )}
-            {/* 고른 모델이 추론을 받을 때만. 비추론 모델에서 이 행이 남아
-                있으면 아무것도 안 바꾸는 설정을 파는 것이다. */}
-            {currentModel?.reasoning && (
-              <MenuRow
-                icon={GAUGE}
-                label="추론 수준"
-                value={reasoningEffortLabel}
-                onClick={() => setSheet("effort")}
-                title="모델이 답하기 전에 얼마나 깊이 생각할지 정합니다. 높일수록 느리고 비쌉니다."
-              />
-            )}
             {workflows.length > 0 && (
               <MenuRow
                 icon={SHIELD}
@@ -873,6 +866,8 @@ export default function Composer({
         open={sheet === "model"}
         onClose={closeSheet}
         anchorRef={plusRef}
+        reasoningEffort={reasoningEffort}
+        onReasoningEffortChange={onReasoningEffortChange}
       />
 
       <WorkflowPicker
@@ -884,49 +879,9 @@ export default function Composer({
         anchorRef={plusRef}
       />
 
-      <ToolPicker
-        tools={tools}
-        onSelect={onToolSelect}
-        open={sheet === "tool"}
-        onClose={closeSheet}
-        initialToolId={toolSeed}
-      />
-
-      {/* 추론 수준 - 고르면 닫힌다(모델 선택과 같은 규칙: 상태가 + 메뉴 행의
-          값으로 다시 보이므로 시트가 열려 있을 이유가 없다). */}
-      <PopoverSheet
-        open={sheet === "effort"}
-        onClose={closeSheet}
-        anchorRef={plusRef}
-        label="추론 수준"
-      >
-        <div className="p-2 pb-6 sm:pb-2">
-          {EFFORTS.map((effort) => (
-            <button
-              key={effort.id}
-              type="button"
-              aria-pressed={reasoningEffort === effort.id}
-              onClick={() => {
-                onReasoningEffortChange(effort.id);
-                closeSheet();
-              }}
-              className="flex w-full items-center gap-3 rounded-md px-3 py-3 text-left text-body text-on-surface transition-colors duration-150 hover:bg-surface-container-high sm:py-2"
-            >
-              <span className={reasoningEffort === effort.id ? "font-medium" : ""}>
-                {effort.label}
-              </span>
-              <span className="min-w-0 flex-1 truncate text-caption text-on-surface-variant">
-                {effort.hint}
-              </span>
-              {reasoningEffort === effort.id && (
-                <Glyph className="h-4 w-4 shrink-0 text-primary">
-                  <path d="m5 12 5 5L20 7" />
-                </Glyph>
-              )}
-            </button>
-          ))}
-        </div>
-      </PopoverSheet>
+      {/* ToolPicker(도구+JSON 인자 시트)는 화면에서 내려갔다: @도 +도 서버
+          단위가 됐고, 인자는 숙고가 뽑거나 되묻는다. 수동 tool_calls 계약은
+          백엔드에 그대로 있다 - 워크플로우와 승인 경로가 쓴다. */}
 
       {/* 도구 설정 - MCP 서버 단위 스위치, 클로드 데스크톱의 커넥터 목록.
           서버가 늘어나면 목록이 스크롤로 감당한다. 끈 서버도 @로 직접 부르는
