@@ -93,7 +93,7 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
   return (
     <PageShell>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="min-w-0 break-all text-headline font-medium">{doc?.filename ?? "문서"}</h1>
+        <h1 className="min-w-0 break-all pl-12 text-headline font-medium md:pl-0">{doc?.filename ?? "문서"}</h1>
         {doc && (
           // The accessible name carries the filename: "다운로드" alone would be
           // the same name this control has on every other document.

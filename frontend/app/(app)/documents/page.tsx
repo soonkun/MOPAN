@@ -130,7 +130,7 @@ export default function DocumentsPage() {
 
   return (
     <PageShell>
-      <h1 className="text-headline font-medium">문서</h1>
+      <h1 className="text-center text-headline font-medium md:text-left">문서</h1>
       <ErrorBanner message={error} />
 
       {/* `user === null` is "not loaded yet", not "not an admin". Branching on

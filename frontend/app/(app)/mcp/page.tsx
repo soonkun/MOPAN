@@ -116,7 +116,7 @@ export default function McpPage() {
 
   return (
     <PageShell>
-      <h1 className="text-headline font-medium">MCP 서버 관리</h1>
+      <h1 className="text-center text-headline font-medium md:text-left">MCP 서버 관리</h1>
       <ErrorBanner message={loadError} />
 
       <form onSubmit={handleCreate} className="space-y-3 rounded-md bg-surface-container-low p-6">

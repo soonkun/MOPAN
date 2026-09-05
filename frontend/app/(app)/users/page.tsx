@@ -113,7 +113,7 @@ export default function UsersPage() {
   return (
     <PageShell>
       <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
+        <div className="w-full text-center md:w-auto md:text-left">
           <h1 className="text-headline font-medium">사용자 관리</h1>
           {users && (
             <p className="mt-1 text-caption text-on-surface-variant">

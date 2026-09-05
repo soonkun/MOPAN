@@ -36,7 +36,7 @@ export default function WorkflowsPage() {
   return (
     <PageShell>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-headline font-medium">워크플로우</h1>
+        <h1 className="flex-1 text-center text-headline font-medium md:flex-none md:text-left">워크플로우</h1>
         <Link href="/workflows/new" className="btn-filled">
           새 워크플로우
         </Link>

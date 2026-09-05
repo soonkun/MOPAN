@@ -166,7 +166,7 @@ export default function CollectionsPage() {
 
   return (
     <PageShell>
-      <h1 className="text-headline font-medium">분류 관리</h1>
+      <h1 className="text-center text-headline font-medium md:text-left">분류 관리</h1>
       <ErrorBanner message={loadError} />
 
       {/* `user === null` is "not loaded yet", not "not an admin" - branching on

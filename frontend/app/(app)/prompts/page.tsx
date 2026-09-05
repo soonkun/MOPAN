@@ -143,7 +143,7 @@ export default function PromptsPage() {
 
   return (
     <PageShell>
-      <h1 className="text-headline font-medium">프롬프트 관리</h1>
+      <h1 className="text-center text-headline font-medium md:text-left">프롬프트 관리</h1>
       <ErrorBanner message={loadError} />
 
       <form onSubmit={handleCreate} className="space-y-3 rounded-md bg-surface-container-low p-6">

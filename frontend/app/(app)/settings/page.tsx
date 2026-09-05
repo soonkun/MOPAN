@@ -139,7 +139,7 @@ export default function SettingsPage() {
 
   return (
     <PageShell>
-      <h1 className="text-headline font-medium">고급 설정</h1>
+      <h1 className="text-center text-headline font-medium md:text-left">고급 설정</h1>
 
       <BrandingSection />
       <ErrorBanner message={loadError} />
