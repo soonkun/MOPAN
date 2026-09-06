@@ -213,3 +213,33 @@ async def test_history_reaches_the_deliberation(db, catalogue, provider):
     assert [m.role for m in sent] == ["system", "user", "assistant", "user"]
     assert sent[1].content == "오늘 날씨 알려줘"
     assert sent[-1].content == "대전"
+
+
+async def test_attached_images_reach_the_deliberation_message(db, catalogue, provider):
+    """사진 속 제품명 실사고: 이름이 질문 텍스트에 없으면 숙고가 도구를 부를
+    재료가 없다(called: []). 이미지는 답변만이 아니라 숙고의 사용자 메시지에도
+    실려야 한다 - 그래야 라벨을 읽고 그 이름으로 도구를 부른다."""
+    await deliberate_and_run(
+        db,
+        provider,
+        settings=Settings(),
+        question="여기 나온 농약정보좀 찾아줘",
+        auto_tool_ids=[catalogue["read"]],
+        model="gpt-4o",
+        images=["data:image/png;base64,QUJD"],
+    )
+    sent = provider.chat.call_args.args[0]
+    assert sent[-1].role == "user"
+    assert sent[-1].images == ["data:image/png;base64,QUJD"]
+
+    # 이미지가 없으면 이전과 바이트 단위로 같은 메시지: images는 None이다.
+    provider.chat.reset_mock()
+    await deliberate_and_run(
+        db,
+        provider,
+        settings=Settings(),
+        question="서울 날씨 어때?",
+        auto_tool_ids=[catalogue["read"]],
+        model="gpt-4o",
+    )
+    assert provider.chat.call_args.args[0][-1].images is None

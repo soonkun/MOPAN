@@ -815,3 +815,19 @@ async def test_seed_migrates_a_legacy_goods_url_and_prior_seed_name(admin_client
     assert row.builtin is True
     assert row.name == BUNDLED_SERVER_NAME
     assert (await db.scalar(select(func.count()).select_from(McpServer))) == 1
+
+
+def test_substantive_drops_only_failure_and_empty_markers():
+    """'도구 먼저, 빈손이면 RAG'(소유자 결정)의 판정 기준. 실패·빈 결과 표식은
+    '코퍼스는 근거가 아니다'의 증거가 못 되므로 부분집합에서 빠지고, 실제
+    내용을 실은 결과와 RAG·첨부 근거는 그대로 남는다."""
+    from app.mcp.service import EMPTY_RESULT_MESSAGE, TOOL_FAILED_PREFIX, substantive
+
+    kept_tool = to_evidence("표", "table_lookup", "'치킨' 일치 1건: [제29류/G0703]")
+    kept_rag = Evidence(source_type="chunk", ref="doc:1", content="문서 본문", score=0.5)
+    dropped = [
+        to_evidence("표", "table_lookup", EMPTY_RESULT_MESSAGE),
+        to_evidence("날씨", "current_weather", f"{TOOL_FAILED_PREFIX} 시간 초과"),
+    ]
+    assert substantive([kept_tool, *dropped, kept_rag]) == [kept_tool, kept_rag]
+    assert substantive(dropped) == []

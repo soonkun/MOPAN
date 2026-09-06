@@ -49,7 +49,9 @@ _SYSTEM = (
     "be inferred from the conversation, do not guess and do not stay silent: reply with exactly "
     "'ask: ' followed by ONE short Korean question asking for that detail "
     "(예: ask: 어떤 지역의 날씨가 궁금하신가요?). "
-    "When no tool helps, reply with the single word: pass. Never invent tool output."
+    "When no tool helps, reply with the single word: pass. Never invent tool output. "
+    "If an attached image carries the names or values the question is about (a product label, "
+    "a sign, a table), read them from the image and use them as tool arguments."
 )
 
 # 숙고에 같이 보여줄 직전 대화 수. 되묻기("어떤 지역...?")에 사용자가 "대전"이라고
@@ -82,6 +84,7 @@ async def deliberate_and_run(
     workflow: ResolvedWorkflow = DEFAULT_WORKFLOW,
     history: list[dict] | None = None,
     current_time: str | None = None,
+    images: list[str] | None = None,
 ) -> tuple[list[Evidence], dict | None, str | None]:
     """켜진 도구를 모델에게 보여주고, 부르겠다는 것을 실행해 Evidence로.
 
@@ -145,7 +148,12 @@ async def deliberate_and_run(
         content = (turn.get("content") or "")[:_HISTORY_CHARS]
         if role in ("user", "assistant") and content:
             messages.append(ChatMessage(role=role, content=content))
-    messages.append(ChatMessage(role="user", content=question))
+    # 첨부 이미지도 숙고가 본다. 실사고: 농약 사진 넷에 "여기 나온 농약정보좀
+    # 찾아줘" - 제품명이 텍스트에 없어 숙고가 도구를 안 불렀고(called: []),
+    # 이름은 답변 단계에야 읽혀 근거 없는 "자료에 없다"로 끝났다. 같은 질문을
+    # 이름으로 다시 치면 잡히던 비대칭의 원인. 이미지가 실리는 요청은 라우터가
+    # 이미 vision 모델을 강제하므로(400) 여기서 다시 검사하지 않는다.
+    messages.append(ChatMessage(role="user", content=question, images=images or None))
     try:
         result = await llm_provider.chat(
             messages,

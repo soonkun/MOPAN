@@ -21,6 +21,10 @@ from app.workflow.catalogue import (
 logger = logging.getLogger("mopan.mcp")
 
 TOOL_NOT_FOUND_MESSAGE = "요청한 MCP 도구를 찾을 수 없습니다."
+# run_tool_calls가 만드는 두 가지 '내용 없는' 결과의 표식. substantive()가
+# 이 둘을 걸러내므로 문구를 바꾸면 그쪽도 같이 - 그래서 상수다.
+TOOL_FAILED_PREFIX = "[도구 호출 실패]"
+EMPTY_RESULT_MESSAGE = "[도구가 빈 결과를 반환했습니다]"
 TOOL_UNAVAILABLE_MESSAGE = "지금은 사용할 수 없는 MCP 도구입니다. 관리자에게 문의해 주세요."
 # Slice 3 adds the approval frame that would let a human authorise one of these.
 # Until it exists, an unattended destructive call is the failure this system must
@@ -231,7 +235,7 @@ async def run_tool_calls(calls: list[PendingToolCall], *, settings: Settings) ->
         except MCPError as exc:
             # str(exc) is one of the Korean constants in app/mcp/client.py, all of
             # which have already been through `redact`.
-            content = f"[도구 호출 실패] {exc}"
+            content = f"{TOOL_FAILED_PREFIX} {exc}"
             log_event(
                 logger,
                 "mcp_tool_failed",
@@ -255,8 +259,28 @@ async def run_tool_calls(calls: list[PendingToolCall], *, settings: Settings) ->
             to_evidence(
                 call.server_name,
                 call.tool_name,
-                content or "[도구가 빈 결과를 반환했습니다]",
+                content or EMPTY_RESULT_MESSAGE,
                 {"risk_level": call.risk_level},
             )
         )
     return evidence
+
+
+def substantive(evidence: list[Evidence]) -> list[Evidence]:
+    """실제 내용을 실은 도구 근거만 - 호출 실패와 빈 결과를 뺀 부분집합.
+
+    "도구가 근거를 냈으면 직접 RAG를 건너뛴다"(router)의 '근거'는 이것이어야
+    한다: 빈손으로 돌아온 도구는 '코퍼스는 이 질문의 근거가 아니다'의 증거가
+    못 되는데, 실사고에서 표 조회의 무일치 응답이 근거로 취급되어 문서 검색까지
+    막았다(소유자 결정: 도구 먼저, 없으면 RAG). 실패·빈 결과 항목 자체는
+    evidence에 남는다 - 답변이 "표에는 없어 문서로 답합니다"라고 말할 수 있고,
+    무엇이 시도됐는지가 trace에 정직하게 남는다.
+
+    경계도 적는다: 남의 서버가 산문으로 "결과가 없습니다"라고 답하면 여기서
+    구분할 방법이 없다 - 그 문장이 근거로 취급되는 것까지가 이 필터의 한계다.
+    동봉 서버(examples_mcp)는 그래서 무일치를 빈 내용으로 돌려준다."""
+    return [
+        e
+        for e in evidence
+        if not (e.content.startswith(TOOL_FAILED_PREFIX) or e.content == EMPTY_RESULT_MESSAGE)
+    ]

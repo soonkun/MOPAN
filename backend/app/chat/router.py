@@ -36,7 +36,7 @@ from app.core.redis import get_redis
 from app.documents.storage import delete_document_files
 from app.llm.base import LLMError, LLMProvider
 from app.mcp.auto import deliberate_and_run
-from app.mcp.service import load_tool_calls, run_tool_calls
+from app.mcp.service import load_tool_calls, run_tool_calls, substantive
 from app.models.attachment import Attachment
 from app.models.conversation import Conversation
 from app.models.message import Message
@@ -290,15 +290,21 @@ async def _complete(
                 workflow=workflow,
                 history=history,
                 current_time=current_time,
+                images=images,
             )
         evidence = evidence + auto_evidence
-        if auto_evidence and intent == "chat":
+        # 도구 먼저, 빈손이면 RAG(소유자 결정). '근거를 냈다'의 기준은 실패·빈
+        # 결과를 뺀 부분집합이다 - 실사고: 표 조회의 무일치 응답이 근거로
+        # 취급되어 문서 검색까지 막고 "정보가 없습니다"로 끝났다. 빈손 항목은
+        # evidence에는 남아 답변이 "표에는 없다"고 말할 수 있다.
+        auto_substantive = substantive(auto_evidence)
+        if auto_substantive and intent == "chat":
             # 도구가 근거를 냈으면 잡담이 아니다: 잡담 프롬프트 대신 근거 답변
             # 프롬프트로, 근거-없음 경고 규칙도 정상 답변의 것으로.
             if auto_trace is not None:
                 auto_trace["intent_promoted"] = "chat->search"
             intent = "search"
-        if auto_evidence:
+        if auto_substantive:
             # 도구가 근거를 냈으면 직접 RAG는 건너뛴다. 숙고는 "실시간·외부
             # 데이터가 실제로 필요할 때만" 도구를 부르도록 지시되어 있으므로 그
             # 판정이 곧 "코퍼스는 이 질문의 근거가 아니다"이다. 실사고: "서울
@@ -308,7 +314,9 @@ async def _complete(
             # 문서가 둘 다 필요한 질문은 @로 도구를 직접 고르면 된다 - 그
             # 경로는 검색을 그대로 돈다.
             fell_back = False
-        if auto_ask and not evidence and not plan_evidence:
+        # 빈 결과·실패 표식만 있는 evidence는 '이미 근거가 있다'가 아니다 -
+        # 되물음이 그보다 나은 답인 것은 변하지 않는다.
+        if auto_ask and not substantive(evidence) and not plan_evidence:
             # 도구가 답인데 필수 인자가 질문에 없다("오늘 날씨 알려줘"에 지역이
             # 없다). 문서 검색으로 새면 "관련 문서가 없습니다"가 나가는데, 그건
             # 이 되물음보다 무조건 나쁜 답이다 - 검색을 건너뛰고 아래에서 이

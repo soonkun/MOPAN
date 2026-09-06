@@ -529,10 +529,12 @@ async def table_lookup(arguments: dict) -> str:
                 (await conn.execute(_FALLBACK_SQL, {"q": keyword, "n": limit - len(rows)})).all()
             )
     if not rows:
-        return (
-            f"'{keyword}'과 일치하는 텍스트가 코퍼스에 없습니다. 더 공식적인 명칭"
-            f"(예: '~업', '~용 소프트웨어')이나 다른 표현으로 다시 조회해 보세요."
-        )
+        # 빈 문자열이 계약이다: MOPAN 쪽 run_tool_calls가 이것을 "[도구가 빈
+        # 결과를 반환했습니다]" 표식으로 바꾸고, substantive() 필터가 그 표식을
+        # 근거로 치지 않아 직접 RAG로 강등된다(소유자 결정: 도구 먼저, 없으면
+        # RAG). 예전의 재조회 안내 산문은 근거로 취급되어 문서 검색까지 막았다
+        # - 자동 숙고는 1회라 그 안내를 읽고 재시도할 주체도 없었다.
+        return ""
     head = (
         f"'{keyword}' 일치 {len(rows)}건 (분류표 마커 {marked}건 + 본문 {len(rows) - marked}건):"
         if marked and len(rows) > marked
