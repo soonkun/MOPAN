@@ -1,22 +1,14 @@
-// Loaded from <head> as a plain, parser-blocking <script src>: it runs before
-// the browser lays out or paints anything, which is the whole point. React
-// hydrating later would be far too late - the user would see one frame of the
-// wrong theme on every reload.
+// 테마는 기기 설정(prefers-color-scheme)을 그대로 따른다 - 소유자 결정:
+// "핸드폰이나 컴퓨터 설정을 따라가는 게 맞고, 그럼 토글도 필요 없다."
+// 앱 안의 다크 모드 토글과 mopan-theme 저장값, data-theme 속성은 은퇴했다.
 //
-// It is a file rather than an inline dangerouslySetInnerHTML string because
-// this app has a hard no-dangerouslySetInnerHTML rule (see the citation
-// rendering in components/chat/MessageBubble.tsx for why), and a static
-// exception is still one more place a reviewer has to reason about.
-//
-// "system" and a missing key are the same thing: no attribute, so the
-// prefers-color-scheme block in globals.css decides.
+// 이 파일이 아직 남아 있는 이유는 청소다: 토글 시절에 저장된 값이 브라우저에
+// 남은 사용자를 위해 한 번씩 지워 준다. 읽는 코드가 없으니 없어도 동작은
+// 같지만, 죽은 키를 영원히 들고 다니게 두지 않는다.
 (function () {
   try {
-    var theme = localStorage.getItem("mopan-theme");
-    if (theme === "dark" || theme === "light") {
-      document.documentElement.setAttribute("data-theme", theme);
-    }
+    localStorage.removeItem("mopan-theme");
   } catch (e) {
-    // Private mode, blocked site data. The system preference still applies.
+    // 프라이빗 모드 - 지울 것도 남지 않는다.
   }
 })();

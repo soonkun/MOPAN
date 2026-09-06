@@ -38,21 +38,12 @@ export const viewport = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    // suppressHydrationWarning is required, not cosmetic: public/theme.js sets
-    // data-theme on this element before React exists, so the client DOM
-    // legitimately differs from the server HTML by exactly that attribute and
-    // React 19 otherwise logs a hydration mismatch on every dark-mode load. It
-    // suppresses the warning for THIS element's attributes only - children are
-    // still diffed normally.
-    <html
-      lang="ko"
-      className={`${inter.variable} ${notoSansKr.variable}`}
-      suppressHydrationWarning
-    >
+    // 테마는 기기 설정(prefers-color-scheme)이 CSS에서 그대로 결정한다 -
+    // 토글이 은퇴하면서(public/theme.js 참조) data-theme도, 그 속성 때문에
+    // 필요했던 suppressHydrationWarning도 같이 걷어냈다.
+    <html lang="ko" className={`${inter.variable} ${notoSansKr.variable}`}>
       <head>
-        {/* Parser-blocking on purpose - it sets data-theme from localStorage
-            before the first paint, so a dark-theme user never sees a white
-            flash on reload. See public/theme.js. */}
+        {/* 토글 시절의 localStorage 잔재를 지우는 청소 스크립트. */}
         <script src="/theme.js" />
       </head>
       <body>{children}</body>

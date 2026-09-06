@@ -3,46 +3,30 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { apiFetch, errorMessage } from "@/lib/api";
-import Switch from "@/components/ui/Switch";
 import type { User } from "@/lib/types";
 
 /** 계정 창 - 사이드바 아래 계정 줄을 누르면 뜬다. 클로드 데스크톱의 계정
 팝오버가 모양의 기준이다.
 
 컴팩트하다: 좁은 창(18rem), 설명 문장 없음. 위에서부터 프로필 헤더 → 닉네임
-→ 테마 스위치 행(아이콘은 지금 상태 - 라이트면 해) → 계정 설정 행 → 로그아웃
-행. 계정 삭제는 첫 화면에 두지 않는다 - "계정 설정" 안으로 한 번 더 들어가야
-맨 아래 나온다. 파괴적 동작이 클릭 한 번 거리면 그것은 기능이 아니라 함정이다.
+→ 계정 설정 행 → 로그아웃 행. 계정 삭제는 첫 화면에 두지 않는다 - "계정 설정"
+안으로 한 번 더 들어가야 맨 아래 나온다. 파괴적 동작이 클릭 한 번 거리면
+그것은 기능이 아니라 함정이다.
 
 네이티브 <dialog> + showModal() (ConfirmDialog와 같은 이유). 창 밖(backdrop)을
 클릭하면 닫힌다 - 닫기 버튼은 없다: dialog 요소 자체가 클릭 대상이면 그것이
 backdrop이다(내용은 안쪽 div가 전부 덮는다). 사이드바 content가 도킹·드로어로
 두 번 렌더되므로 이 다이얼로그는 그 밖에서 한 번만 마운트된다.
 
-테마는 라이트/다크 두 단: 저장된 값이 없으면 OS 설정을 보여주고, 누르는 순간
-명시값이 저장된다. */
+모바일에서는 바텀 시트다: 가운데 떠 있던 시절, 키보드가 화면을 줄였다 돌려주면
+창이 어중간한 높이에 남았다(소유자 실사고). 바닥에 붙이면 그럴 자리가 없다.
 
-const STORAGE_KEY = "mopan-theme";
+테마 토글은 은퇴했다(소유자 결정): 기기 설정(prefers-color-scheme)을 그대로
+따르는 것이 맞고, 그러면 스위치가 있을 이유가 없다. 저장값 청소는
+public/theme.js가 한다. */
 
-function currentTheme(): "light" | "dark" {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored === "light" || stored === "dark") return stored;
-  } catch {
-    // 프라이빗 모드 - 아래 OS 값이 답이다.
-  }
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-}
-
-function IconGlyph({ name }: { name: "sun" | "moon" | "logout" | "back" | "chevron" | "gear" }) {
+function IconGlyph({ name }: { name: "logout" | "back" | "chevron" | "gear" }) {
   const paths = {
-    sun: (
-      <>
-        <circle cx="12" cy="12" r="4" />
-        <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
-      </>
-    ),
-    moon: <path d="M20 13.5A8 8 0 1 1 10.5 4 6.5 6.5 0 0 0 20 13.5Z" />,
     logout: (
       <>
         <path d="M15 12H4" />
@@ -91,7 +75,6 @@ export default function AccountMenu({
   const router = useRouter();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [view, setView] = useState<"main" | "settings">("main");
-  const [theme, setTheme] = useState<"light" | "dark">("light");
   const [nickname, setNickname] = useState(user.nickname ?? "");
   const [savingNickname, setSavingNickname] = useState(false);
   const [savedNickname, setSavedNickname] = useState(false);
@@ -118,19 +101,7 @@ export default function AccountMenu({
     // 생각도 없는 칸에 커서부터 꽂는 것이다. 패널 자체(tabIndex -1)로 옮겨
     // 키보드도 줌도 없이 열리고, Tab 한 번이면 닉네임에 닿는다.
     panelRef.current?.focus();
-    setTheme(currentTheme());
   }, []);
-
-  function toggleTheme() {
-    const next = theme === "light" ? "dark" : "light";
-    setTheme(next);
-    document.documentElement.setAttribute("data-theme", next);
-    try {
-      localStorage.setItem(STORAGE_KEY, next);
-    } catch {
-      // 이 페이지에는 적용된다. 새로고침을 못 넘길 뿐.
-    }
-  }
 
   async function saveNickname() {
     setSavingNickname(true);
@@ -202,7 +173,11 @@ export default function AccountMenu({
       onClick={(event) => {
         if (event.target === dialogRef.current) dialogRef.current?.close();
       }}
-      className="motion-pop m-auto w-[calc(100vw-2rem)] max-w-[18rem] rounded-lg border border-outline-variant bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim md:mb-20 md:ml-4 md:mr-auto md:mt-auto"
+      // 모바일은 바닥에 붙는 시트(mt-auto mb-4), 데스크톱은 계정 줄 위
+      // (md:mb-20 md:ml-4). 가운데 정렬이던 시절 키보드가 시각적 뷰포트를
+      // 줄였다 돌려주면 창이 어중간한 높이에 남았다 - 바닥 고정에는 그럴
+      // 자리가 없다. motion-sheet: 좁은 화면에서 아래에서 올라온다.
+      className="motion-pop motion-sheet mx-auto mb-4 mt-auto w-[calc(100vw-2rem)] max-w-[18rem] rounded-lg border border-outline-variant bg-surface-container-low p-0 text-on-surface shadow-dialog backdrop:bg-scrim md:mb-20 md:ml-4 md:mr-auto"
     >
       <div ref={panelRef} tabIndex={-1} className="p-2 focus:outline-none">
         {view === "main" ? (
@@ -254,20 +229,9 @@ export default function AccountMenu({
               </div>
             </div>
 
-            {/* 메뉴 행들. 테마 행의 아이콘은 지금 상태다: 라이트면 해. */}
+            {/* 메뉴 행들. 다크 모드 행은 없다 - 테마는 기기 설정을 따른다
+                (파일 머리 주석). */}
             <div className="border-t border-outline-variant pt-1">
-              <button
-                type="button"
-                onClick={toggleTheme}
-                aria-pressed={theme === "dark"}
-                className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left text-body hover:bg-surface-container-high"
-              >
-                <span className="text-on-surface-variant">
-                  <IconGlyph name={theme === "light" ? "sun" : "moon"} />
-                </span>
-                <span className="min-w-0 flex-1">다크 모드</span>
-                <Switch on={theme === "dark"} />
-              </button>
               <button
                 type="button"
                 onClick={() => {
