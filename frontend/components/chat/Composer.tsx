@@ -759,7 +759,9 @@ export default function Composer({
           placeholder={
             listening
               ? "듣는 중입니다… 마이크를 다시 누르면 받아적은 내용이 들어갑니다."
-              : "질문을 입력하세요. @로 도구와 워크플로우를 부를 수 있습니다."
+              : // "질문을 입력하세요"는 당연한 말이라 뺐다(소유자 지정) -
+                // 자리가 가르쳐야 하는 것은 @뿐이다.
+                "@로 도구와 워크플로우를 부를 수 있습니다."
           }
           // A placeholder is not an accessible name: it is dropped the moment
           // the field has text, and some screen readers never announce it.
