@@ -20,6 +20,21 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
   // silence.
   const [doc, setDoc] = useState<DocumentItem | null>(null);
   const [chunks, setChunks] = useState<Chunk[]>([]);
+  // 문서 전체의 청크 수(제목의 괄호 숫자). chunks.length가 아니다 - 목록은
+  // 이제 한 장(100개)씩 내려온다: 만행짜리 표(실측 19,994청크)를 한 번에
+  // 그리다 브라우저가 죽은 실사고.
+  const [total, setTotal] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
+  // 유사도 검색: 입력값(query)과 실제 적용된 질의(activeQuery)를 가른다 -
+  // 지우기·재검색이 각각 무엇을 되돌리는지가 이 구분에서 나온다.
+  const [query, setQuery] = useState("");
+  const [activeQuery, setActiveQuery] = useState("");
+  const [searching, setSearching] = useState(false);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const chunksRef = useRef<Chunk[]>([]);
+  chunksRef.current = chunks;
+  const stateRef = useRef({ total: 0, activeQuery: "", loadingMore: false });
+  stateRef.current = { total, activeQuery, loadingMore };
   // Empty is not the same as not-loaded. Without this the list renders
   // "아직 청크가 없습니다." for the length of the fetch - a false statement - and
   // the (0) in the heading then jumps to its real value.
@@ -40,13 +55,17 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
     // re-parsed the whole file on every request - about 35 seconds of pdfplumber
     // on the 854-page document in this corpus - to fill a pane nobody read.
     try {
-      const [item, chunkList] = await Promise.all([
+      const [item, page] = await Promise.all([
         apiFetch<DocumentItem>(`/api/documents/${id}`),
-        apiFetch<Chunk[]>(`/api/documents/${id}/chunks`),
+        apiFetch<{ total: number; items: Chunk[] }>(`/api/documents/${id}/chunks?limit=100`),
       ]);
       docRef.current = item;
       setDoc(item);
-      setChunks(chunkList);
+      // 색인 중 폴링이 이 함수를 다시 부르면 1페이지로 돌아간다 - 처리 중엔
+      // 목록 자체가 바뀌고 있으므로 이어붙일 기준이 없다.
+      setChunks(page.items);
+      setTotal(page.total);
+      setActiveQuery("");
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -75,6 +94,71 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
     }, 3000);
     return () => clearInterval(interval);
   }, [load]);
+
+  // 스크롤이 끝에 닿으면 다음 100개. IntersectionObserver 하나로, 검색 모드
+  // (유사도 상위 N)는 이어붙일 "다음"이 없으므로 쉰다.
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+    const observer = new IntersectionObserver(async (entries) => {
+      const { total, activeQuery, loadingMore } = stateRef.current;
+      const loaded = chunksRef.current.length;
+      if (!entries[0].isIntersecting || loadingMore || activeQuery || loaded >= total) return;
+      setLoadingMore(true);
+      try {
+        const page = await apiFetch<{ total: number; items: Chunk[] }>(
+          `/api/documents/${id}/chunks?limit=100&offset=${loaded}`,
+        );
+        setChunks((prev) => [...prev, ...page.items]);
+        setTotal(page.total);
+      } catch {
+        // 다음 장 실패는 조용히 - 스크롤을 다시 올리면 재시도된다.
+      } finally {
+        setLoadingMore(false);
+      }
+    });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [id, loading]);
+
+  async function search() {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      await resetList();
+      return;
+    }
+    setSearching(true);
+    setError(null);
+    try {
+      const page = await apiFetch<{ total: number; items: Chunk[] }>(
+        `/api/documents/${id}/chunks?q=${encodeURIComponent(trimmed)}&limit=50`,
+      );
+      setChunks(page.items);
+      setTotal(page.total);
+      setActiveQuery(trimmed);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  async function resetList() {
+    setQuery("");
+    setActiveQuery("");
+    setSearching(true);
+    try {
+      const page = await apiFetch<{ total: number; items: Chunk[] }>(
+        `/api/documents/${id}/chunks?limit=100`,
+      );
+      setChunks(page.items);
+      setTotal(page.total);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSearching(false);
+    }
+  }
 
   async function download() {
     if (doc === null) return;
@@ -149,13 +233,63 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
           null, which is what should hide it. */}
       {(loading || doc !== null) && (
         <section className="rounded-md bg-surface-container-low p-4">
-          <h2 className="mb-4 text-title font-medium text-on-surface">
-            청크 목록{!loading && ` (${chunks.length})`}
-          </h2>
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <h2 className="text-title font-medium text-on-surface">
+              청크 목록{!loading && ` (${total.toLocaleString()})`}
+            </h2>
+            {/* 유사도 검색: 질문이 검색을 탈 때와 같은 임베딩 공간에서 이
+                문서 안의 청크를 순위 매긴다 - 정확일치가 아니라, 표현이
+                달라도 "이 내용이 어느 청크에 있나"에 답한다. */}
+            <form
+              className="flex min-w-0 flex-1 items-center gap-2 sm:max-w-md"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void search();
+              }}
+            >
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="내용으로 청크 찾기 (유사한 순)"
+                aria-label="청크 내용 검색"
+                className="field h-9 min-w-0 flex-1 text-body"
+              />
+              <button
+                type="submit"
+                disabled={searching}
+                className="btn-tonal btn-compact shrink-0"
+              >
+                {searching ? "찾는 중..." : "검색"}
+              </button>
+              {activeQuery && (
+                <button
+                  type="button"
+                  onClick={() => void resetList()}
+                  className="btn-tonal btn-compact shrink-0"
+                >
+                  지우기
+                </button>
+              )}
+            </form>
+          </div>
+          {activeQuery && !searching && (
+            <p className="mb-3 text-caption text-on-surface-variant">
+              &quot;{activeQuery}&quot;와 유사한 순 상위 {chunks.length}개입니다. 번호는 문서
+              안의 원래 위치입니다.
+            </p>
+          )}
           {loading ? (
             <p className="text-body text-on-surface-variant">불러오는 중...</p>
           ) : (
-            <ChunkViewer chunks={chunks} />
+            <>
+              <ChunkViewer chunks={chunks} />
+              {/* 무한 스크롤의 파수꾼: 화면에 들어오면 다음 100개를 청한다. */}
+              {!activeQuery && chunks.length < total && (
+                <div ref={sentinelRef} className="py-3 text-center text-caption text-on-surface-variant">
+                  {loadingMore ? "다음 청크 불러오는 중..." : `${chunks.length.toLocaleString()} / ${total.toLocaleString()}`}
+                </div>
+              )}
+            </>
           )}
         </section>
       )}

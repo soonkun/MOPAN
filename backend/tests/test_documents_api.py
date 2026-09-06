@@ -237,7 +237,11 @@ async def test_chunk_response_reports_embedding_state(admin_client, db, collecti
 
     response = await admin_client.get(f"/api/documents/{document_id}/chunks")
     assert response.status_code == 200
-    body = response.json()
+    # {total, items} 봉투: 만행짜리 표가 한 응답으로 내려가 브라우저를 죽인
+    # 실사고 이후 페이지네이션 계약이 됐다.
+    envelope = response.json()
+    body = envelope["items"]
+    assert envelope["total"] == 2
     assert [c["embedded"] for c in body] == [True, False]
     assert body[0]["chunk_metadata"] == {"strategy": "semantic"}
     assert "embedding" not in body[0]
@@ -581,3 +585,54 @@ async def test_attachments_live_under_their_own_subdirectory(member_client, admi
     root = Path(app.state.settings.upload_dir)
     assert (root / "attachments" / attachment_id / "source.txt").exists()
     assert (root / document.json()["id"] / "source.txt").exists()
+
+
+async def test_chunk_list_pages_and_ranks_by_similarity(admin_client, app, db, collection_id):
+    """만행짜리 표가 한 응답으로 내려가 브라우저를 죽인 실사고의 계약:
+    기본은 chunk_index 순 한 장(offset/limit)이고, q가 있으면 이 문서 안에서
+    임베딩 코사인 순위다 - 질문이 검색을 탈 때와 같은 공간."""
+    from unittest.mock import AsyncMock
+
+    upload = await admin_client.post(
+        "/api/documents",
+        data={"collection_id": collection_id},
+        files={"file": ("표.txt", "행들".encode(), "text/plain")},
+    )
+    document_id = uuid.UUID(upload.json()["id"])
+
+    def vec(x: float) -> list[float]:
+        return [x] + [0.0] * (EMBEDDING_DIM - 2) + [(1 - x * x) ** 0.5]
+
+    db.add_all(
+        [
+            Chunk(
+                document_id=document_id,
+                chunk_index=i,
+                content=f"행 {i}",
+                token_count=2,
+                char_count=3,
+                chunk_metadata={},
+                # 질의 벡터 [1,0,…]과의 코사인이 index 2 > 0 > 1 순이 되게.
+                embedding=vec([0.5, 0.1, 0.9][i]),
+            )
+            for i in range(3)
+        ]
+    )
+    await db.commit()
+
+    first = (await admin_client.get(f"/api/documents/{document_id}/chunks?limit=2")).json()
+    assert first["total"] == 3
+    assert [c["chunk_index"] for c in first["items"]] == [0, 1]
+    second = (
+        await admin_client.get(f"/api/documents/{document_id}/chunks?limit=2&offset=2")
+    ).json()
+    assert [c["chunk_index"] for c in second["items"]] == [2]
+
+    provider = AsyncMock()
+    provider.embed = AsyncMock(return_value=[vec(1.0)])
+    app.state.llm_provider = provider
+    ranked = (
+        await admin_client.get(f"/api/documents/{document_id}/chunks?q=희석배수")
+    ).json()
+    assert [c["chunk_index"] for c in ranked["items"]] == [2, 0, 1]
+    provider.embed.assert_awaited_once_with(["희석배수"])

@@ -98,6 +98,23 @@ const CHIP = (
   </>
 );
 const CLIP = <path d="M17 8.5 9.4 16a2.5 2.5 0 0 0 3.6 3.6l7.1-7.1a4.5 4.5 0 0 0-6.4-6.4l-7 7a6.5 6.5 0 0 0 9.2 9.2l5.6-5.6" />;
+// 카메라 - 모바일에서 찍어서 바로 첨부(capture 입력). 데스크톱에선 이미지
+// 파일 선택기로 열린다(capture는 무시되는 힌트라 따로 분기하지 않는다).
+const CAMERA = (
+  <>
+    <path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2l1.4-2.1A1 1 0 0 1 9.7 4.5h4.6a1 1 0 0 1 .8.4L16.5 7h2A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5Z" />
+    <circle cx="12" cy="13" r="3.2" />
+  </>
+);
+// 마이크 - 음성으로 프롬프트 입력. 누르면 듣기 시작, 다시 누르면 받아적은
+// 문장이 입력창에 들어간다.
+const MIC = (
+  <>
+    <path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z" />
+    <path d="M5.5 11a6.5 6.5 0 0 0 13 0" />
+    <path d="M12 17.5V21" />
+  </>
+);
 // 플러그 - MCP 서버 행. "연결"의 은유.
 const PLUG = (
   <>
@@ -320,8 +337,76 @@ export default function Composer({
   const currentWorkflow = workflows.find((w) => w.id === workflowId) ?? null;
 
   const fileRef = useRef<HTMLInputElement>(null);
+  const cameraRef = useRef<HTMLInputElement>(null);
   const plusRef = useRef<HTMLButtonElement>(null);
   const [sheet, setSheet] = useState<Sheet>(null);
+
+  // --- 음성 입력(Web Speech API) -------------------------------------------
+  // 누르면 듣기 시작, 다시 누르면 받아적은 문장이 입력창 끝에 붙는다 - 붙이기만
+  // 하고 전송은 사람이 한다(소유자 지정: "입력되고 바로 아래 전송버튼").
+  // 지원 여부는 effect에서 정한다: 서버 렌더는 window가 없어 초기값을 클라이언트
+  // 와 다르게 계산하면 hydration이 어긋난다.
+  const [speechSupported, setSpeechSupported] = useState(false);
+  const [listening, setListening] = useState(false);
+  const recognitionRef = useRef<{ stop: () => void } | null>(null);
+  const heardRef = useRef("");
+  // onend는 나중에 오는데 `value`는 시작 시점의 클로저다 - 최신 값을 ref로.
+  const valueRef = useRef(value);
+  valueRef.current = value;
+  useEffect(() => {
+    const w = window as unknown as Record<string, unknown>;
+    setSpeechSupported(Boolean(w.SpeechRecognition || w.webkitSpeechRecognition));
+    return () => recognitionRef.current?.stop();
+  }, []);
+
+  function toggleListening() {
+    if (listening) {
+      // stop()은 지금까지 인식된 것을 확정하고 onend를 부른다 - 입력은 거기서.
+      recognitionRef.current?.stop();
+      return;
+    }
+    const w = window as unknown as Record<string, unknown>;
+    const Recognition = (w.SpeechRecognition || w.webkitSpeechRecognition) as
+      | (new () => {
+          lang: string;
+          continuous: boolean;
+          interimResults: boolean;
+          onresult: ((event: { resultIndex: number; results: { length: number; [i: number]: { isFinal: boolean; 0: { transcript: string } } } }) => void) | null;
+          onend: (() => void) | null;
+          onerror: (() => void) | null;
+          start: () => void;
+          stop: () => void;
+        })
+      | undefined;
+    if (!Recognition) return;
+    const recognition = new Recognition();
+    recognition.lang = "ko-KR";
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    heardRef.current = "";
+    recognition.onresult = (event) => {
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) heardRef.current += event.results[i][0].transcript;
+      }
+    };
+    recognition.onerror = () => {
+      // not-allowed(권한 거부)·no-speech 등. onend가 뒤따라 정리한다.
+    };
+    recognition.onend = () => {
+      // 침묵으로 브라우저가 스스로 끝낸 경우도 여기로 온다 - 사람이 다시
+      // 누른 것과 같은 결과: 들은 것을 붙이고 버튼을 되돌린다.
+      setListening(false);
+      recognitionRef.current = null;
+      const heard = heardRef.current.trim();
+      heardRef.current = "";
+      if (!heard) return;
+      const current = valueRef.current;
+      onChange(current ? `${current.replace(/\s+$/, "")} ${heard}` : heard);
+    };
+    recognitionRef.current = recognition;
+    setListening(true);
+    recognition.start();
+  }
   // The `@…` being typed: where its `@` is, and what has been typed after it.
   // Null is "the menu is closed", and it is the ONLY thing that opens it.
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
@@ -564,79 +649,11 @@ export default function Composer({
         </div>
       )}
 
-      {/* The settings that survive the send, said out loud where the user is
-          still typing. A menu hides state, and "which model is about to answer"
-          and "the super agent is on" are answers wanted BEFORE pressing 전송,
-          not read off the trace afterwards.
-          Above the textarea rather than beside the + button, and that is a
-          width decision: at 390px the old row spent 260 of 358 pixels on
-          controls, and moving them here is what buys the textarea back. A chip
-          row is full-width and squeezes nothing.
-          The model chip appears only when there is more than one model - with
-          one, "which model" is not a question anyone is asking. */}
-      {(models.length > 1 || currentWorkflow || orchestrator) && (
-        <div className="flex flex-wrap gap-2 p-1 pb-2">
-          {models.length > 1 && currentModel && (
-            <StateChip
-              icon={CHIP}
-              label={currentModel.label}
-              onClick={() => setSheet("model")}
-              ariaLabel={`답변 모델: ${currentModel.label}`}
-            />
-          )}
-          {currentWorkflow && (
-            <StateChip
-              icon={FLOW}
-              label={currentWorkflow.name}
-              active
-              onClick={() => setSheet("workflow")}
-              ariaLabel={`워크플로우: ${currentWorkflow.name}`}
-              title="누르면 바꿉니다. 이 질문은 이 워크플로우의 절차로 답합니다."
-            />
-          )}
-          {orchestrator && (
-            <StateChip
-              icon={SPARK}
-              label="슈퍼 에이전트"
-              active
-              onClick={() => onOrchestratorChange(false)}
-              ariaLabel="슈퍼 에이전트 켜짐"
-              title="누르면 끕니다."
-            />
-          )}
-        </div>
-      )}
-
-      <div className="flex items-end gap-2">
-        {/* Everything that used to compete along this row lives behind this one
-            button now, grouped the way ChatGPT groups its own: what applies to
-            THIS message, a divider, then what persists across messages. */}
-        <button
-          ref={plusRef}
-          type="button"
-          // Tapping + must not close the keyboard. Reaching for it is the user
-          // continuing the same action - they are still composing - and a
-          // keyboard that drops costs them the tap to bring it back plus the
-          // scroll jump when the viewport resizes twice.
-          //
-          // A pointer press moves focus by DEFAULT, which blurs the textarea
-          // and dismisses the keyboard with it. preventDefault on mousedown
-          // suppresses only that focus shift; the click still fires, which is
-          // why this is the long-standing pattern for editor toolbar buttons.
-          // mousedown rather than pointerdown/touchstart: cancelling a touch
-          // sequence that early can also swallow the click on some browsers,
-          // and iOS synthesises mousedown before click, so this covers both.
-          onMouseDown={(event) => event.preventDefault()}
-          onClick={() => setSheet("menu")}
-          aria-haspopup="dialog"
-          aria-expanded={sheet === "menu"}
-          aria-label="추가"
-          className="icon-btn"
-        >
-          <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-        </button>
+      {/* 클로드 앱의 구성(소유자 지정): 입력창이 위 전폭, 그 아래 한 줄에
+          왼쪽부터 [+ · 모델 칩 · 상태 칩들], 오른쪽에 [마이크 · ↑ 전송].
+          상태 칩이 컨트롤과 같은 줄에 살아도 텍스트 폭을 안 뺏는 것은 입력창이
+          더 이상 그 줄에 없기 때문이다. */}
+      <div className="flex flex-col gap-1.5">
         <input
           ref={fileRef}
           type="file"
@@ -645,6 +662,20 @@ export default function Composer({
           className="hidden"
           // Cleared after every pick, or choosing the SAME file twice in a row
           // fires no change event and the second attachment never appears.
+          onChange={(e) => {
+            take(e.target.files);
+            e.target.value = "";
+            restoreKeyboard();
+          }}
+        />
+        {/* 카메라 전용 입력. capture는 모바일 브라우저에 "후면 카메라를 바로
+            열라"는 힌트이고 데스크톱은 무시하므로 분기 없이 안전하다. */}
+        <input
+          ref={cameraRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          className="hidden"
           onChange={(e) => {
             take(e.target.files);
             e.target.value = "";
@@ -725,7 +756,11 @@ export default function Composer({
             e.preventDefault();
             take(e.clipboardData.files);
           }}
-          placeholder="질문을 입력하세요. @로 도구와 워크플로우를 부를 수 있습니다."
+          placeholder={
+            listening
+              ? "듣는 중입니다… 마이크를 다시 누르면 받아적은 내용이 들어갑니다."
+              : "질문을 입력하세요. @로 도구와 워크플로우를 부를 수 있습니다."
+          }
           // A placeholder is not an accessible name: it is dropped the moment
           // the field has text, and some screen readers never announce it.
           aria-label="질문"
@@ -740,7 +775,7 @@ export default function Composer({
           }
           aria-autocomplete="list"
           style={{ maxHeight: MAX_HEIGHT }}
-          className="min-w-0 flex-1 resize-none bg-transparent px-2 py-2 text-body-lg text-on-surface placeholder:text-on-surface-variant focus:outline-none"
+          className="w-full resize-none bg-transparent px-2 py-2 text-body-lg text-on-surface placeholder:text-on-surface-variant focus:outline-none"
         />
 
         {/* The two `key`s are load-bearing, and this was measured. Without them
@@ -754,32 +789,121 @@ export default function Composer({
             second click, and the 중지 button never going away. Distinct keys
             make React replace the node instead, and a detached button has no
             form owner to submit. */}
-        {sending ? (
-          // The AbortController ChatWindow already held for unmount, surfaced.
+        <div className="flex items-center gap-1.5">
+          {/* Everything that used to compete along this row lives behind this
+              one button, grouped the way ChatGPT groups its own: what applies
+              to THIS message, a divider, then what persists across messages.
+              onMouseDown preventDefault: a pointer press moves focus by
+              default, which would drop the phone keyboard mid-composition -
+              the long-standing editor toolbar pattern, same as every control
+              in this row. */}
           <button
-            key="stop"
+            ref={plusRef}
             type="button"
-            onClick={onStop}
-            aria-label="답변 생성 중지"
-            className="h-10 shrink-0 rounded-full bg-surface-container-high px-5 text-label font-medium text-on-surface transition-colors duration-150 hover:bg-surface-container-highest"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => setSheet("menu")}
+            aria-haspopup="dialog"
+            aria-expanded={sheet === "menu"}
+            aria-label="추가"
+            className="icon-btn shrink-0"
           >
-            중지
+            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
           </button>
-        ) : (
-          // Filled when there is something to send, tonal when there is not -
-          // the button says whether the composer is ready without a word.
-          <button
-            key="send"
-            type="submit"
-            className={`h-10 shrink-0 rounded-full px-5 text-label font-medium transition-colors duration-150 ${
-              value.trim()
-                ? "bg-primary text-on-primary"
-                : "bg-surface-container-high text-on-surface-variant"
-            }`}
-          >
-            전송
-          </button>
-        )}
+
+          {/* 모델·워크플로우·슈퍼 에이전트 칩. 보내기 전에 알아야 하는 상태를
+              메뉴 뒤에 숨기지 않는다는 원칙은 그대로, 자리만 클로드처럼 아래
+              줄로. 좁은 화면에서 칩이 많으면 가로 스크롤. 모델 칩은 고를 수
+              있는 모델이 둘 이상일 때만 - 하나뿐이면 물을 것이 없다. */}
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto">
+            {models.length > 1 && currentModel && (
+              <StateChip
+                icon={CHIP}
+                label={currentModel.label}
+                onClick={() => setSheet("model")}
+                ariaLabel={`답변 모델: ${currentModel.label}`}
+              />
+            )}
+            {currentWorkflow && (
+              <StateChip
+                icon={FLOW}
+                label={currentWorkflow.name}
+                active
+                onClick={() => setSheet("workflow")}
+                ariaLabel={`워크플로우: ${currentWorkflow.name}`}
+                title="누르면 바꿉니다. 이 질문은 이 워크플로우의 절차로 답합니다."
+              />
+            )}
+            {orchestrator && (
+              <StateChip
+                icon={SPARK}
+                label="슈퍼 에이전트"
+                active
+                onClick={() => onOrchestratorChange(false)}
+                ariaLabel="슈퍼 에이전트 켜짐"
+                title="누르면 끕니다."
+              />
+            )}
+          </div>
+
+          {/* 마이크: 누르면 듣고, 다시 누르면 받아적은 문장이 입력창에 붙는다.
+              듣는 중에는 빨간 채움 + 맥동 링 + 입력창 안내 문구 - "지금 듣고
+              있는가"가 한눈에 보여야 한다(소유자 지적). API가 없는 브라우저
+              에서는 그리지 않는다. */}
+          {speechSupported && (
+            <button
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={toggleListening}
+              aria-pressed={listening}
+              aria-label={listening ? "듣기 끝내고 입력" : "음성으로 입력"}
+              title={listening ? "누르면 받아적은 내용이 입력됩니다." : "누르고 말한 뒤 다시 누르세요."}
+              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors duration-150 ${
+                listening
+                  ? "mic-listening bg-error text-on-error"
+                  : "bg-surface-container-high text-on-surface-variant hover:bg-surface-container-highest"
+              }`}
+            >
+              <Glyph className="h-5 w-5">{MIC}</Glyph>
+            </button>
+          )}
+          <span aria-live="polite" className="sr-only">
+            {listening ? "음성을 듣는 중입니다." : ""}
+          </span>
+
+          {sending ? (
+            // The AbortController ChatWindow already held for unmount, surfaced.
+            <button
+              key="stop"
+              type="button"
+              onClick={onStop}
+              aria-label="답변 생성 중지"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-surface-container-high text-on-surface transition-colors duration-150 hover:bg-surface-container-highest"
+            >
+              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
+                <rect x="7" y="7" width="10" height="10" rx="1.5" />
+              </svg>
+            </button>
+          ) : (
+            // ↑ 원형(클로드 모양). 채워지면 보낼 것이 있다는 뜻 - 문구 없이
+            // 상태를 말하는 규칙은 그대로다.
+            <button
+              key="send"
+              type="submit"
+              aria-label="전송"
+              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors duration-150 ${
+                value.trim()
+                  ? "bg-primary text-on-primary"
+                  : "bg-surface-container-high text-on-surface-variant"
+              }`}
+            >
+              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" />
+              </svg>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* The + menu. Two groups with a rule between them, which is the whole of
@@ -803,6 +927,15 @@ export default function Composer({
             >
               이 메시지에만
             </p>
+            {/* 파일 첨부 위(소유자 지정): 폰에서는 카메라가 바로 뜬다. */}
+            <MenuRow
+              icon={CAMERA}
+              label="사진 찍기"
+              onClick={() => {
+                closeSheet();
+                cameraRef.current?.click();
+              }}
+            />
             <MenuRow
               icon={CLIP}
               label="파일 첨부"

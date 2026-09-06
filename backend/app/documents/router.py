@@ -4,10 +4,11 @@ from pathlib import Path
 from urllib.parse import quote
 
 from arq.connections import ArqRedis
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import func, select
+from sqlalchemy import text as sql_text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,7 +31,13 @@ from app.models.collection import Collection
 from app.models.document import Document
 from app.models.user import User
 from app.schemas.collection import CollectionCreate, CollectionResponse, CollectionUpdate
-from app.schemas.document import ChunkResponse, DocumentReprocess, DocumentResponse
+from app.llm.base import LLMProvider
+from app.schemas.document import (
+    ChunkListResponse,
+    ChunkResponse,
+    DocumentReprocess,
+    DocumentResponse,
+)
 
 logger = logging.getLogger("mopan.documents")
 router = APIRouter(prefix="/api", tags=["documents"])
@@ -348,17 +355,66 @@ async def reprocess_document(
     return _to_response(document, collection_name, uploader_email, chunk_count)
 
 
-@router.get("/documents/{document_id}/chunks", response_model=list[ChunkResponse])
+@router.get("/documents/{document_id}/chunks", response_model=ChunkListResponse)
 async def list_chunks(
     document_id: uuid.UUID,
+    request: Request,
+    q: str | None = None,
+    offset: int = 0,
+    limit: int = 100,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ):
+    """한 장씩, 그리고 유사도로 찾기.
+
+    전량 반환이던 시절 만행짜리 표(19,994청크)가 한 응답으로 내려가 브라우저를
+    죽였다(소유자 실사고). 기본은 chunk_index 순 100개씩이고, 스크롤 끝에서
+    다음 장을 청한다.
+
+    `q`가 있으면 이 문서 안에서 질문이 검색을 탈 때와 같은 공간(임베딩 코사인)
+    으로 순위를 매겨 돌려준다 - 정확일치가 아니라 유사도라, 표현이 달라도
+    "이 내용이 어느 청크에 있나"에 답한다. 임베딩 호출이 한 번 들지만 질문
+    한 개 값이다. 아직 임베딩이 없는 청크(색인 중)는 순위를 매길 수 없어
+    빠진다."""
     await get_readable_document(db, document_id)
-    result = await db.scalars(
-        select(Chunk).where(Chunk.document_id == document_id).order_by(Chunk.chunk_index)
+    limit = min(max(limit, 1), 200)
+    offset = max(offset, 0)
+    total = (
+        await db.scalar(
+            select(func.count()).select_from(Chunk).where(Chunk.document_id == document_id)
+        )
+    ) or 0
+    query = q.strip() if q else ""
+    if query:
+        # q가 있을 때만 읽는다(늦은 접근): lifespan이 만든 하나이고, 목록만
+        # 넘기는 대부분의 호출은 임베딩과 무관하다. chat/router.py의 동명
+        # 의존성을 import하면 채팅 라우터 전체가 끌려온다.
+        llm_provider: LLMProvider = request.app.state.llm_provider
+        vector = (await llm_provider.embed([query]))[0]
+        # 정확 스캔 강제(실측 0행 실사고): HNSW 인덱스는 전역 최근접 ef_search
+        # 개를 먼저 뽑고 WHERE를 나중에 거르므로, 코퍼스 전체의 이웃이 전부 이
+        # 문서 밖이면 결과가 비어 버린다. 한 문서의 청크는 수천 행이라 정확
+        # 코사인 정렬이 밀리초면 되고, SET LOCAL이라 이 트랜잭션 밖(검색 본선의
+        # 전역 HNSW 질의)에는 손대지 않는다.
+        await db.execute(sql_text("SET LOCAL enable_indexscan = off"))
+        rows = await db.scalars(
+            select(Chunk)
+            .where(Chunk.document_id == document_id, Chunk.embedding.is_not(None))
+            .order_by(Chunk.embedding.cosine_distance(vector))
+            .offset(offset)
+            .limit(limit)
+        )
+    else:
+        rows = await db.scalars(
+            select(Chunk)
+            .where(Chunk.document_id == document_id)
+            .order_by(Chunk.chunk_index)
+            .offset(offset)
+            .limit(limit)
+        )
+    return ChunkListResponse(
+        total=total, items=[ChunkResponse.model_validate(row) for row in list(rows)]
     )
-    return list(result)
 
 
 @router.get("/documents/{document_id}/download")

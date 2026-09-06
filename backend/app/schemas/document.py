@@ -63,3 +63,12 @@ class ChunkResponse(BaseModel):
     @classmethod
     def _embedded_from_vector(cls, value: object) -> bool:
         return value is not None
+
+
+class ChunkListResponse(BaseModel):
+    """청크 목록의 한 장(page). total은 문서 전체의 청크 수 - 화면의 "(5,001)"
+    이 이 값이고, items.length가 아니다. 만행짜리 표(실측 19,994청크)를 한
+    응답으로 내리다 브라우저가 죽은 실사고가 이 봉투의 존재 이유다."""
+
+    total: int
+    items: list[ChunkResponse]

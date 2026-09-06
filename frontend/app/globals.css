@@ -351,6 +351,21 @@ body {
   animation: run-glow 1.3s ease-out infinite;
 }
 
+/* 음성 입력 - 듣는 중의 마이크. 빨간 채움 위에 링이 퍼져 나가 "지금 듣고
+   있다"가 한눈에 보인다(소유자 지적: 상태 확인이 안 됐다). reduce에서는
+   전역 무효화(§7)로 채움 색만 남는다. */
+@keyframes mic-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--error) 60%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 12px color-mix(in srgb, var(--error) 0%, transparent);
+  }
+}
+.mic-listening {
+  animation: mic-pulse 1.1s ease-out infinite;
+}
+
 /* §7 Motion is feedback, not decoration. Under `reduce` the app keeps every
    state change - only the tweening between states goes. Written as one global
    override rather than wrapping each transition in a no-preference query: same
