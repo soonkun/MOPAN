@@ -23,6 +23,8 @@ export const FILE_TYPE_LABEL: Record<string, string> = {
   txt: "텍스트",
   md: "마크다운",
   html: "웹문서",
+  xlsx: "엑셀",
+  csv: "CSV",
 };
 
 // Exported so the page's poll gate and this file's stalled note agree on what

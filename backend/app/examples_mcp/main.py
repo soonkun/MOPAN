@@ -497,15 +497,16 @@ _TABLE_SQL = sql_text(
     """
 )
 
-# 폴백: 마커 구조가 없는 배포를 위한 전(全) 코퍼스 정확 부분일치. 키 컬럼을
-# 추측하지 않는다 - 일치한 행의 주변 텍스트를 그대로 돌려주고, 어떤 값이
-# 코드인지는 답변 모델이 문맥으로 읽는다. 섹션이 있으면 섹션을, 없으면
-# 파일명을 좌표로 붙인다.
+# 본문 일치: 전(全) 코퍼스 정확 부분일치. 키 컬럼을 추측하지 않는다 - 일치한
+# 행의 주변 텍스트를 그대로 돌려주고, 어떤 값이 코드인지는 답변 모델이 문맥으로
+# 읽는다. 섹션이 있으면 섹션을, 없으면 파일명을 좌표로 붙인다. 마커 절은
+# 위 쿼리가 이미 다뤘으므로 뺀다 - 안 빼면 같은 행이 두 번 나온다.
 _FALLBACK_SQL = sql_text(
-    """
+    r"""
     SELECT COALESCE(NULLIF(c.section, ''), d.filename) AS place, c.content, d.filename
     FROM chunks c JOIN documents d ON d.id = c.document_id
     WHERE c.content ILIKE '%' || :q || '%'
+      AND (c.section IS NULL OR c.section !~ '^\[[^]]+/[^]]+\]')
     ORDER BY d.filename, c.chunk_index LIMIT :n
     """
 )
@@ -518,18 +519,25 @@ async def table_lookup(arguments: dict) -> str:
         raise ValueError("keyword는 2자 이상의 명칭/키워드여야 합니다.")
     limit = min(max(int(arguments.get("limit") or 8), 1), 20)
     async with _engine().connect() as conn:
-        rows = (await conn.execute(_TABLE_SQL, {"q": keyword, "n": limit})).all()
-        structured = bool(rows)
-        if not rows:
-            rows = (await conn.execute(_FALLBACK_SQL, {"q": keyword, "n": limit})).all()
+        rows = list((await conn.execute(_TABLE_SQL, {"q": keyword, "n": limit})).all())
+        marked = len(rows)
+        # 마커가 몇 건 맞아도 남는 슬롯은 본문 일치로 채운다. 실사고: "사파이어"
+        # 가 상품분류표의 보석 행에 먼저 걸려, 방금 임베딩한 등록농약 표의
+        # 살균제 사파이어가 아예 안 보였다 - 두 세계에 다 있는 말은 흔하다.
+        if len(rows) < limit:
+            rows += list(
+                (await conn.execute(_FALLBACK_SQL, {"q": keyword, "n": limit - len(rows)})).all()
+            )
     if not rows:
         return (
             f"'{keyword}'과 일치하는 텍스트가 코퍼스에 없습니다. 더 공식적인 명칭"
             f"(예: '~업', '~용 소프트웨어')이나 다른 표현으로 다시 조회해 보세요."
         )
     head = (
-        f"'{keyword}' 일치 {len(rows)}건 (마커 = [코드/코드]):"
-        if structured
+        f"'{keyword}' 일치 {len(rows)}건 (분류표 마커 {marked}건 + 본문 {len(rows) - marked}건):"
+        if marked and len(rows) > marked
+        else f"'{keyword}' 일치 {len(rows)}건 (마커 = [코드/코드]):"
+        if marked
         else f"'{keyword}' 마커 구조 일치 없음 - 전체 본문 정확일치 {len(rows)}건:"
     )
     lines = [head]

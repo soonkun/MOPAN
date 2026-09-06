@@ -539,3 +539,53 @@ def test_cid_garbage_ratio_flags_unmapped_font_pdfs():
     assert cid_garbage_ratio(mostly_text) < CID_GARBAGE_RATIO
 
     assert cid_garbage_ratio("") == 0.0
+
+
+# --- 표 파일(xlsx·csv) --------------------------------------------------------
+# 행이 "컬럼명: 값 | …"로 직렬화되는 것이 계약의 전부다: 표 조회 MCP의 정확
+# 부분일치가 행 단위로 잡고, 돌려준 창 안에 컬럼 이름이 같이 있어야 답변
+# 모델이 키 컬럼 추측 없이 값을 읽는다.
+
+
+def test_xlsx_rows_become_self_describing_lines(tmp_path):
+    from openpyxl import Workbook
+
+    from app.rag.parsers.base import ParseFailure
+
+    path = tmp_path / "표.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "농약목록"
+    sheet.append(["품목명", "등록번호", "용도"])
+    sheet.append(["글리포세이트", "제10-1234호", "제초제"])
+    sheet.append([None, None, None])  # 빈 행은 건너뛴다
+    sheet.append(["델타메트린", "제10-5678호", "살충제"])
+    book.save(path)
+
+    parsed = get_parser("xlsx").parse(str(path))
+    lines = [b.text for b in parsed.blocks if b.block_type == "paragraph"]
+    assert lines == [
+        "품목명: 글리포세이트 | 등록번호: 제10-1234호 | 용도: 제초제",
+        "품목명: 델타메트린 | 등록번호: 제10-5678호 | 용도: 살충제",
+    ]
+    # 시트 이름이 섹션이다 - 화면의 청크 좌표이자 MCP 폴백의 place.
+    assert all(b.section == "농약목록" for b in parsed.blocks)
+
+    empty = tmp_path / "빈.xlsx"
+    Workbook().save(empty)
+    with pytest.raises(ParseFailure):
+        get_parser("xlsx").parse(str(empty))
+
+
+def test_csv_parses_utf8_and_cp949_alike(tmp_path):
+    utf8 = tmp_path / "a.csv"
+    utf8.write_text("품목명,용도\n글리포세이트,제초제\n", encoding="utf-8-sig")
+    parsed = get_parser("csv").parse(str(utf8))
+    assert parsed.blocks[0].text == "품목명: 글리포세이트 | 용도: 제초제"
+
+    # 한국 엑셀의 "CSV로 저장"은 cp949다 - errors=replace로 뭉개면 정확
+    # 부분일치가 그 글자를 영원히 못 찾으므로 인코딩 자체를 살려 읽는다.
+    cp949 = tmp_path / "b.csv"
+    cp949.write_bytes("품목명,용도\n델타메트린,살충제\n".encode("cp949"))
+    parsed = get_parser("csv").parse(str(cp949))
+    assert parsed.blocks[0].text == "품목명: 델타메트린 | 용도: 살충제"

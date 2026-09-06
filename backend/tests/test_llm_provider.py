@@ -190,11 +190,24 @@ async def test_the_configured_timeout_fires():
         await provider.aclose()
 
 
-async def test_retries_are_bounded_and_skip_non_retryable_statuses():
+async def test_retries_are_bounded_and_skip_non_retryable_statuses(monkeypatch):
     """A 429 or 5xx is worth another attempt; a 401 is a bad key and retrying it
     just multiplies the failure. openai 1.47.0 draws that line itself - this
-    pins that the provider hands it the retry budget from Settings."""
-    for status, expected_attempts in ((429, 3), (500, 3), (401, 1), (400, 1)):
+    pins that the provider hands it the retry budget from Settings.
+
+    429만 곱이 붙는다: SDK의 초 단위 재시도 위에 배치 단위 인내 재시도
+    (_RATE_LIMIT_TRIES)가 얹힌다 - 분당 토큰 한도는 큰 표를 올린 날의 정상
+    상태라서다(만행 xlsx 실사고). 그래서 429의 기대 시도 수는 3 x 8이고,
+    다른 상태는 인내 없이 그대로다."""
+    from app.llm import openai_provider as module
+
+    monkeypatch.setattr(module.asyncio, "sleep", AsyncMock())
+    for status, expected_attempts in (
+        (429, 3 * module._RATE_LIMIT_TRIES),
+        (500, 3),
+        (401, 1),
+        (400, 1),
+    ):
         attempts: list[str] = []
 
         def handler(request, attempts=attempts, status=status):
@@ -209,6 +222,32 @@ async def test_retries_are_bounded_and_skip_non_retryable_statuses():
             await provider.embed(["a"])
         assert len(attempts) == expected_attempts, status
         await provider.aclose()
+
+
+async def test_a_rate_limited_batch_recovers_once_the_window_refills(monkeypatch):
+    """429 두 번 뒤 성공: 배치는 버려지지 않고, 기다렸다가 그 자리에서 이어진다."""
+    from app.llm import openai_provider as module
+
+    sleeps = AsyncMock()
+    monkeypatch.setattr(module.asyncio, "sleep", sleeps)
+    calls: list[int] = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) <= 2 * 3:  # SDK가 3번씩 시도하는 429 라운드 두 번
+            return httpx.Response(429, json={"error": {"message": "rate limited"}})
+        return httpx.Response(
+            200,
+            json={"data": [{"index": 0, "embedding": [0.1] * 1536}], "model": "text-embedding-3-small", "usage": {}},
+        )
+
+    provider = _provider(max_retries=2)
+    provider.client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    vectors = await provider.embed(["a"])
+    assert len(vectors) == 1 and len(vectors[0]) == 1536
+    assert sleeps.await_count == 2  # 429 라운드마다 한 번씩 기다렸다
+    await provider.aclose()
 
 
 async def test_settings_values_reach_the_sdk_client():

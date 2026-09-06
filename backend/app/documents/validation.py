@@ -1,6 +1,6 @@
 import filetype
 
-ALLOWED_EXTENSIONS = {"pdf", "docx", "txt", "md", "html"}
+ALLOWED_EXTENSIONS = {"pdf", "docx", "txt", "md", "html", "xlsx", "csv"}
 
 # Chat attachments only. Kept OUT of ALLOWED_EXTENSIONS on purpose: that set gates
 # /api/documents, and app/rag/parsers has no parser for an image, so an image in
@@ -27,6 +27,13 @@ ALLOWED_CONTENT_TYPES = {
     "txt": {"text/plain", "application/octet-stream"},
     "md": {"text/markdown", "text/plain", "text/x-markdown", "application/octet-stream"},
     "html": {"text/html", "application/xhtml+xml", "text/plain"},
+    "xlsx": {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/octet-stream",
+    },
+    # 윈도우 브라우저는 엑셀이 깔려 있으면 .csv를 application/vnd.ms-excel로
+    # 신고한다 - text/csv만 받으면 정작 한국 사무실의 업로드가 다 막힌다.
+    "csv": {"text/csv", "application/vnd.ms-excel", "text/plain", "application/octet-stream"},
     # No application/octet-stream escape hatch for images, unlike the text formats
     # above: every browser sets a real image/* type on a paste, a drop and a file
     # picker alike, so allowing the generic type would only widen the hole.
@@ -46,11 +53,18 @@ EXPECTED_MAGIC_MIME = {
         "application/zip",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     },
+    # .xlsx도 zip 컨테이너다 - docx와 같은 이유로 둘 다 받는다.
+    "xlsx": {
+        "application/zip",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    },
     # filetype reports exactly these four for the image formats accepted here, so
     # the sniffed mime and the canonical mime are the same value.
     **{extension: {mime} for extension, mime in IMAGE_MIME.items()},
 }
-TEXT_EXTENSIONS = {"txt", "md", "html"}
+# csv는 텍스트 검사(널 바이트·바이너리 서명 배제) 쪽이다: 매직 바이트가 없고,
+# cp949 본문은 filetype이 아무것도 못 알아보는 게 정상이다.
+TEXT_EXTENSIONS = {"txt", "md", "html", "csv"}
 MAGIC_SNIFF_BYTES = 261  # what `filetype` needs to identify every supported format
 
 

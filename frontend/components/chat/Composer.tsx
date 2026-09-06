@@ -49,6 +49,8 @@ export const ATTACHMENT_EXTENSIONS = [
   "txt",
   "md",
   "html",
+  "xlsx",
+  "csv",
   "png",
   "jpg",
   "jpeg",

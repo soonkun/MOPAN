@@ -1,11 +1,17 @@
+import asyncio
 import logging
 import time
 
-from openai import AsyncOpenAI, OpenAIError
+from openai import AsyncOpenAI, OpenAIError, RateLimitError
 
 from app.core.config import EMBEDDING_MAX_BATCH_SIZE
 from app.core.logging import log_event
 from app.llm.base import ChatMessage, ChatResult, LLMError, LLMProvider, ToolCall
+
+# 임베딩 배치가 429를 만났을 때의 바깥 재시도 횟수. 지수 백오프(2,4,8,…,45초
+# 상한)로 총 3분 남짓 - PIPELINE_TIMEOUT(870초) 안에서 분당 한도 창 몇 번을
+# 넘길 수 있는 크기다.
+_RATE_LIMIT_TRIES = 8
 
 logger = logging.getLogger("mopan.llm")
 
@@ -137,9 +143,22 @@ class OpenAIProvider(LLMProvider):
                 else {}
             )
             for batch in self._batches(texts):
-                response = await self.client.embeddings.create(
-                    model=self.embedding_model, input=batch, **extra
-                )
+                # 분당 토큰 한도(429)는 오류가 아니라 큰 표를 올린 날의 정상
+                # 상태다 - 창은 길어야 60초면 되살아난다. SDK 내부 재시도
+                # (max_retries=3)는 초 단위 백오프라 만행짜리 문서에서 금방
+                # 바닥났고(실사고: 등록농약 10,001행 xlsx가 failed), 그래서
+                # 여기서만 배치 단위로 길게 기다린다. 429가 아닌 오류는 그대로
+                # 실패한다 - 인내는 한도에만, 장애에는 아니다.
+                for attempt in range(_RATE_LIMIT_TRIES):
+                    try:
+                        response = await self.client.embeddings.create(
+                            model=self.embedding_model, input=batch, **extra
+                        )
+                        break
+                    except RateLimitError:
+                        if attempt == _RATE_LIMIT_TRIES - 1:
+                            raise
+                        await asyncio.sleep(min(2 * 2**attempt, 45))
                 vectors.extend(self._vectors_in_input_order(response, len(batch)))
         except OpenAIError as exc:
             # str(exc) on every SDK error class is "Error code: N - {server body}"

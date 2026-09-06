@@ -1,5 +1,6 @@
 from app.rag.parsers.base import Parser
 from app.rag.parsers.docx_parser import DocxParser
+from app.rag.parsers.excel_parser import CsvParser, ExcelParser
 from app.rag.parsers.html_parser import HtmlParser
 from app.rag.parsers.pdf_parser import PdfParser
 from app.rag.parsers.text_parser import TextParser
@@ -17,6 +18,9 @@ PARSERS: dict[str, Parser] = {
     "html": HtmlParser(),
     "pdf": PdfParser(),
     "docx": DocxParser(),
+    # 표 파일 - 행을 "컬럼명: 값 | …"로 직렬화해 표 조회 MCP와 RAG 양쪽이 읽는다.
+    "xlsx": ExcelParser(),
+    "csv": CsvParser(),
 }
 
 
@@ -27,4 +31,14 @@ def get_parser(file_type: str) -> Parser:
         raise ValueError(f"no parser registered for file type: {file_type}") from exc
 
 
-__all__ = ["PARSERS", "Parser", "get_parser", "TextParser", "HtmlParser", "PdfParser", "DocxParser"]
+__all__ = [
+    "PARSERS",
+    "Parser",
+    "get_parser",
+    "TextParser",
+    "HtmlParser",
+    "PdfParser",
+    "DocxParser",
+    "ExcelParser",
+    "CsvParser",
+]
