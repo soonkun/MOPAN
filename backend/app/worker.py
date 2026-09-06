@@ -13,6 +13,7 @@ from app.llm.openai_provider import OpenAIProvider
 from app.models.collection import Collection
 from app.models.document import TERMINAL_STATUSES, Document
 from app.rag.chunking import get_chunking_strategy, resolve, resolve_scheme
+from app.rag.chunking.rows import RowBundleChunking
 from app.rag.pipeline import USER_FACING_FAILURE
 from app.rag.pipeline import process_document as run_pipeline
 from app.retrieval.vector_store import PgVectorStore
@@ -97,11 +98,14 @@ async def process_document(ctx: dict, document_id: str) -> None:
                 # configuration so it can compose the head line from what that
                 # pattern captured. Empty - which is every collection until
                 # somebody says otherwise - means prose, and `settings` decides.
-                chunking = await db.scalar(
-                    select(Collection.chunking)
-                    .join(Document, Document.collection_id == Collection.id)
-                    .where(Document.id == uuid.UUID(document_id))
-                )
+                row = (
+                    await db.execute(
+                        select(Collection.chunking, Document.file_type)
+                        .join(Document, Document.collection_id == Collection.id)
+                        .where(Document.id == uuid.UUID(document_id))
+                    )
+                ).first()
+                chunking, file_type = row if row else (None, None)
                 markers = resolve(chunking)
                 # THE COLLECTION SUPPLIES THE VOCABULARY; THE DOCUMENT DECIDES.
                 # A scheme here means "documents in this collection are numbered
@@ -111,11 +115,19 @@ async def process_document(ctx: dict, document_id: str) -> None:
                 # self-contained document in a hierarchical collection is cut the
                 # way it is today.
                 scheme = resolve_scheme(chunking)
+                strategy = get_chunking_strategy(settings, chunking)
+                if file_type in ("xlsx", "csv"):
+                    # 표 파일은 형식 자체가 행 구조를 보증하므로 컬렉션의 산문
+                    # 전략 대신 행 묶음으로 자른다(내용 휴리스틱이 아니다 -
+                    # rows.py 상단). 계층 검출도 끈다: 행에는 편/장/조가 없고,
+                    # 켜 두면 표를 두 번 파싱만 한다.
+                    strategy = RowBundleChunking(max_chunk_tokens=settings.max_chunk_tokens)
+                    scheme = None
                 await run_pipeline(
                     db,
                     PgVectorStore(db),
                     ctx["llm_provider"],
-                    get_chunking_strategy(settings, chunking),
+                    strategy,
                     document_id,
                     section_marker=markers.marker if markers else None,
                     scheme=scheme,

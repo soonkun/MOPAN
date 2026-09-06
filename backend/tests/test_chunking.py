@@ -965,3 +965,45 @@ def test_a_preset_is_a_starting_point_not_a_cage():
     assert markers.marker.pattern == PRESETS["korean_ip_classification"]["marker"]
     assert markers.head_line == "{class_no}류 {code}."
 
+
+
+# --- 행 묶음 청킹(표 파일 전용) ----------------------------------------------
+
+
+async def test_row_bundles_never_split_a_row_and_carry_no_overlap():
+    """행 경계가 계약이다: 어떤 청크도 행을 중간에서 자르지 않고(모든 행이
+    어느 한 청크에 통째로 들어 있다), 겹침이 없다(행 수의 합 = 원본 행 수).
+    시트가 바뀌면 토큰이 남아도 끊는다 - section이 좌표라서."""
+    from app.rag.chunking.rows import RowBundleChunking
+
+    rows = [Block(text=f"품목명: 농약{i} | 용도: 살충제 | 희석배수: {i}배", block_type="paragraph", section="시트1") for i in range(30)]
+    rows += [Block(text=f"품목명: 비료{i} | 용도: 비료", block_type="paragraph", section="시트2") for i in range(3)]
+
+    async def no_embed(texts):  # pragma: no cover - 전략은 임베딩하지 않는다
+        raise AssertionError("row bundling must not embed")
+
+    candidates = await RowBundleChunking(max_chunk_tokens=120).chunk(rows, no_embed)
+
+    emitted_rows = [line for c in candidates for line in c.content.split("\n")]
+    assert emitted_rows == [b.text for b in rows]  # 순서 그대로, 잘림도 겹침도 없음
+    assert all(c.token_count <= 120 + 5 for c in candidates)  # 개행 토큰 여유만
+    assert len(candidates) < len(rows)  # 실제로 묶였다
+    # 시트 경계: 시트2 행이 시트1 청크에 섞이지 않는다.
+    for c in candidates:
+        sections = {rows[[b.text for b in rows].index(line)].section for line in c.content.split("\n")}
+        assert len(sections) == 1 and c.section in sections
+
+
+async def test_an_oversized_row_is_split_rather_than_refused():
+    from app.rag.chunking.rows import RowBundleChunking
+
+    long_row = Block(text="셀 하나가 문단인 행. " * 60, block_type="paragraph", section="시트1")
+    short = Block(text="품목명: 짧은행", block_type="paragraph", section="시트1")
+
+    async def no_embed(texts):  # pragma: no cover
+        raise AssertionError
+
+    candidates = await RowBundleChunking(max_chunk_tokens=50).chunk([short, long_row], no_embed)
+    assert candidates[0].content == "품목명: 짧은행"
+    assert all(c.token_count <= 50 for c in candidates[1:])
+    assert sum(1 for c in candidates) >= 3  # 긴 행이 여러 조각으로
