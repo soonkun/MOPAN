@@ -75,7 +75,7 @@ export default function ResearchRunPage() {
   return (
     <PageShell>
       <div className="flex flex-wrap items-center gap-2">
-        <Link href={run ? `/research/${run.project_id}` : "/research"} className="icon-btn h-9 w-9" aria-label="방으로">
+        <Link href={run ? `/research/${run.project_id}` : "/research"} className="icon-btn ml-12 h-9 w-9 shrink-0 md:ml-0" aria-label="방으로">
           <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
             <path d="m15 6-6 6 6 6" />
           </svg>

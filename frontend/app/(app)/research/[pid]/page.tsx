@@ -194,7 +194,8 @@ export default function ResearchProjectPage() {
   return (
     <PageShell>
       <div className="flex flex-wrap items-center gap-2">
-        <Link href="/research" className="icon-btn h-9 w-9" aria-label="딥 리서치 목록으로">
+        {/* ml-12: 모바일의 떠 있는 햄버거(왼쪽 위 고정) 밑에 깔리지 않게 - 문서 상세와 같은 규칙. */}
+        <Link href="/research" className="icon-btn ml-12 h-9 w-9 shrink-0 md:ml-0" aria-label="딥 리서치 목록으로">
           <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
             <path d="m15 6-6 6 6 6" />
           </svg>
@@ -213,27 +214,41 @@ export default function ResearchProjectPage() {
         <form onSubmit={start} className="space-y-3 rounded-md bg-surface-container-low p-4">
           <h2 className="text-title font-medium">리서치 시작</h2>
           {project?.instructions && (
-            <p className="text-caption text-on-surface-variant">이 방의 지침(v{project.instruction_version}): {project.instructions.slice(0, 160)}{project.instructions.length > 160 ? "…" : ""}</p>
+            <p className="text-body text-on-surface-variant">
+              <span className="font-medium text-on-surface">이 방의 지침</span> (v{project.instruction_version}) ·{" "}
+              {project.instructions.slice(0, 160)}
+              {project.instructions.length > 160 ? "…" : ""}
+            </p>
           )}
           <textarea
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            rows={4}
+            rows={5}
             placeholder="무엇을 조사할까요? 대상·조건·궁금한 점을 구체적으로 적을수록 좋습니다."
-            className="field w-full"
+            className="field w-full text-body"
             aria-label="리서치 요청"
           />
-          <div className="flex flex-wrap items-center gap-2">
+          {/* 첨부는 한 줄, 시작 버튼은 그 아래 오른콽 - 모바일에서 파일 선택기와 버튼이 한 줄에 몰리면 둘 다 잘린다. */}
+          <label className="flex flex-wrap items-center gap-2 text-body text-on-surface">
+            <span className="btn-tonal btn-compact cursor-pointer">참고 파일 첨부</span>
             <input
               ref={fileRef}
               type="file"
               accept=".pdf,.docx,.txt,.md,.html,.xlsx,.csv"
               onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-              className="text-caption text-on-surface-variant"
+              className="sr-only"
               aria-label="참고 파일 첨부"
             />
-            <span className="text-caption text-on-surface-variant">첨부 파일의 글자는 요청과 함께 읽히지만 문서 코퍼스에는 저장되지 않습니다.</span>
-            <button type="submit" disabled={starting || !prompt.trim()} className="btn-filled ml-auto">
+            <span className="min-w-0 truncate text-on-surface-variant">{file ? file.name : "선택한 파일 없음"}</span>
+            {file && (
+              <button type="button" onClick={() => { setFile(null); if (fileRef.current) fileRef.current.value = ""; }} className="btn-text btn-compact">
+                제거
+              </button>
+            )}
+          </label>
+          <p className="text-caption text-on-surface-variant">첨부 파일의 글자는 요청과 함께 읽히지만 문서 코퍼스에는 저장되지 않습니다.</p>
+          <div className="flex justify-end">
+            <button type="submit" disabled={starting || !prompt.trim()} className="btn-filled">
               {starting ? "시작 중..." : "리서치 시작"}
             </button>
           </div>
@@ -260,10 +275,10 @@ export default function ResearchProjectPage() {
                     {STATUS_LABEL[r.status] ?? r.status}
                   </span>
                   <span className="min-w-0 flex-1 truncate text-body text-on-surface">{r.prompt}</span>
-                  <span className="shrink-0 text-caption text-on-surface-variant">
+                  <span className="w-full text-caption text-on-surface-variant sm:w-auto sm:shrink-0">
                     {r.source_count > 0 && `출처 ${r.source_count} · `}
-                    {new Date(r.created_at).toLocaleString()}
-                    {r.created_by_email && ` · ${r.created_by_email}`}
+                    {new Date(r.created_at).toLocaleDateString()}
+                    {r.created_by_email && ` · ${r.created_by_email.split("@")[0]}`}
                   </span>
                 </Link>
               </li>
