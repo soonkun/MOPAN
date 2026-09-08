@@ -133,9 +133,11 @@ export default function ModelsSection() {
             <ul className="divide-y divide-outline-variant rounded-md bg-surface-container-low">
               {group.items.map((m) => {
                 const working = busy === m.id;
+                // 모바일: 이름 줄 아래에 스위치 줄(소유자 지적 - 한 줄에 몰아넣으면 이름이 세로로 쪼개졌다).
+                // 데스크톱(sm 이상): 이름과 스위치를 한 줄에.
                 return (
-                  <li key={m.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
-                    <div className="min-w-0 flex-1">
+                  <li key={m.id} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:gap-x-3">
+                    <div className="min-w-0 sm:flex-1">
                       <div className="flex flex-wrap items-baseline gap-x-2">
                         <span className="text-body font-medium text-on-surface">{m.label}</span>
                         {m.label !== m.id && <code className="text-caption text-on-surface-variant">{m.id}</code>}
@@ -147,7 +149,7 @@ export default function ModelsSection() {
                       </div>
                     </div>
                     {/* 세 토글 + 기본 라디오. 모바일은 줄바꿈으로 두 줄이 된다. */}
-                    <div className="flex flex-wrap items-center gap-3 text-caption text-on-surface-variant">
+                    <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-caption text-on-surface-variant">
                       <button
                         type="button"
                         disabled={working}
