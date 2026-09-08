@@ -33,10 +33,15 @@ export default function StructurePanel({
   doc,
   isAdmin,
   onReprocessed,
+  collectionStrategy,
 }: {
   doc: DocumentItem;
   isAdmin: boolean;
   onReprocessed: () => Promise<void>;
+  /** 문서가 속한 컬렉션의 청킹 전략(chunking.strategy). 표형(classification_table)은
+   * 컬렉션이 정하는 성격이라 문서별 판정·재정의가 없다 - 이 패널이 "아직 분석되지
+   * 않았습니다"라고 말하던 것이 표형 문서에서는 거짓이었다(소유자 지적). */
+  collectionStrategy?: string;
 }) {
   const s = doc.structure ?? {};
   // Keyed on `confidence`, not on "the dict is non-empty": between 다시 처리 and
@@ -81,6 +86,21 @@ export default function StructurePanel({
       : s.confidence === "ambiguous"
         ? "판단 보류"
         : "일반 문서";
+
+  if (collectionStrategy === "classification_table") {
+    return (
+      <section className="space-y-3 rounded-md bg-surface-container-low p-4">
+        <h2 className="text-title font-medium text-on-surface">구조 인식</h2>
+        <p className="text-body text-on-surface">구조 인식: 표형 문서 (분류표)</p>
+        <p className="text-caption text-on-surface-variant">
+          컬렉션 {doc.collection_name ? `'${doc.collection_name}'` : ""}의 청킹 설정이 분류표 전략이라 이 문서는
+          행 단위로 잘리고, 각 청크 앞의 [류/유사군코드] 마커가 표 조회 도구(RAG 문서 표 조회)와 문서 검색에
+          그대로 쓰입니다. 청크 {doc.chunk_count.toLocaleString()}개. 표형 여부는 문서가 아니라 컬렉션이 정하므로
+          여기서는 성격을 바꾸지 않습니다 - 컬렉션 관리에서 청킹 설정을 바꾼 뒤 이 문서를 다시 처리하면 됩니다.
+        </p>
+      </section>
+    );
+  }
 
   return (
     <section className="space-y-3 rounded-md bg-surface-container-low p-4">

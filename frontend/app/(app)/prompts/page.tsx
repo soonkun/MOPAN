@@ -14,6 +14,10 @@ import type { PromptSummary, PromptVersion } from "@/lib/types";
 // than to a blank, so a prompt added later is still identifiable.
 const PROMPT_LABEL: Record<string, string> = {
   answer_agent: "답변 지침",
+  clarify_agent: "되묻기 지침",
+  smalltalk_agent: "잡담·첨부 응답 지침",
+  intent_agent: "의도 분류 판정 (chat/search 한 단어로 답해야 함)",
+  planner_agent: "슈퍼 에이전트 계획",
 };
 
 const SEED_AUTHOR = "시스템";
@@ -252,7 +256,7 @@ export default function PromptsPage() {
                   </td>
                   <td className="px-3 py-3">v{p.version}</td>
                   <td className="px-3 py-3">{p.version_count}개</td>
-                  <td className="px-3 py-3">{formatDate(p.updated_at)}</td>
+                  <td className="px-3 py-3">{p.builtin ? "내장 기본값" : formatDate(p.updated_at)}</td>
                 </tr>
               ))}
             </tbody>

@@ -15,10 +15,13 @@ export class ApiError extends Error {
   // `node --experimental-strip-types` from importing this module, and with it
   // the zero-dependency test in api.test.ts.
   status: number;
+  /** 서버 detail이 객체일 때 그 원본(예: 중복 업로드 409의 existing_document_id). */
+  detail: unknown;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, detail?: unknown) {
     super(message);
     this.status = status;
+    this.detail = detail;
     this.name = "ApiError";
   }
 }
@@ -62,6 +65,9 @@ const HANGUL = /[가-힣]/;
 function detailText(payload: unknown, fallback: string): string {
   const detail = (payload as { detail?: unknown } | null)?.detail;
   if (typeof detail === "string") return HANGUL.test(detail) ? detail : fallback;
+  // 객체 detail은 message 필드를 문장으로 쓴다(중복 업로드 409 등). 나머지 필드는 ApiError.detail로.
+  const message = (detail as { message?: unknown } | null)?.message;
+  if (typeof message === "string") return HANGUL.test(message) ? message : fallback;
   if (Array.isArray(detail)) {
     const messages = detail
       .map((item) => (item as { msg?: unknown })?.msg)
@@ -75,7 +81,11 @@ function detailText(payload: unknown, fallback: string): string {
 async function failure(response: Response): Promise<ApiError> {
   redirectIfSessionGone(response.status);
   const payload = await response.json().catch(() => null);
-  return new ApiError(response.status, detailText(payload, `${REQUEST_FAILED} (HTTP ${response.status})`));
+  return new ApiError(
+    response.status,
+    detailText(payload, `${REQUEST_FAILED} (HTTP ${response.status})`),
+    (payload as { detail?: unknown } | null)?.detail,
+  );
 }
 
 export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {

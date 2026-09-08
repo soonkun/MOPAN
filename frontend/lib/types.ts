@@ -52,6 +52,8 @@ export interface PromptSummary {
   text: string;
   version_count: number;
   updated_at: string;
+  /** 코드 내장 기본값만 있고 저장된 버전이 없는 이름. 첫 저장이 version 1을 만든다. */
+  builtin: boolean;
   /** What the active text costs in tokens, and the ceiling a save is refused
    * above. Counted by the server: the browser cannot count cl100k tokens, and
    * the ceiling is a backend constant a copy here would silently outlive. */
@@ -190,8 +192,49 @@ export interface DocumentItem {
   uploader_email: string | null;
   chunk_count: number;
   structure: DocumentStructure;
+  /** 컬렉션 안의 폴더(0020). null = 루트. folder_path는 "인사/복무" 꼴. */
+  folder_id: string | null;
+  folder_path: string | null;
+  /** 규정 현행화(0021). is_current=false면 교체된 옛 버전 - 검색에 나오지 않는다. */
+  lineage_id: string | null;
+  version: number;
+  is_current: boolean;
+  superseded_at: string | null;
+  effective_date: string | null;
+  /** 점검 필요(4단계): 시행일/등록일이 기준 일수를 넘은 현행 문서. 탐색기 목록에서만 채워진다. */
+  stale?: boolean;
   created_at: string;
   updated_at: string;
+}
+
+/** 한 계보의 버전 한 개 (GET /api/documents/{id}/versions). */
+export interface DocumentVersion {
+  id: string;
+  version: number;
+  is_current: boolean;
+  status: DocumentStatus;
+  filename: string;
+  size_bytes: number;
+  effective_date: string | null;
+  superseded_at: string | null;
+  created_at: string;
+  uploader_email: string | null;
+}
+
+/** 컬렉션 안의 폴더 한 개 (GET /api/collections/{cid}/folders). */
+export interface Folder {
+  id: string;
+  collection_id: string;
+  parent_id: string | null;
+  name: string;
+  path: string;
+  depth: number;
+  document_count: number;
+  child_count: number;
+  /** 하위 트리 합계(4단계). 트리 노드에 보이는 숫자. */
+  total_document_count: number;
+  total_size_bytes: number;
+  last_updated_at: string | null;
 }
 
 export interface Chunk {
@@ -347,7 +390,8 @@ export interface CallableTool {
   name: string;
   description: string | null;
   risk_level: McpRiskLevel;
-  collections: { id: string; name: string }[];
+  /** rag 항목의 분류. folders는 @폴더 멘션용 경로 라벨("인사/복무"). */
+  collections: { id: string; name: string; folders?: { id: string; name: string; path_label: string }[] }[];
 }
 
 /** GET /api/workflows/selectable - what the composer's `@` menu and its picker
@@ -373,6 +417,70 @@ export interface AnswerModel {
   is_default: boolean;
   /** 추론 수준(reasoning_effort)을 받는 모델인가. 조절 UI를 그릴지의 근거. */
   reasoning: boolean;
+  /** openai | local - 서버 GPU에 띄운 로컬 모델이면 배지를 단다. */
+  provider: string;
+}
+
+/** 딥 리서치 (app/research). sources는 채팅 Citation과 같은 모양이라 Markdown이 그대로 그린다. */
+export interface ResearchProject {
+  id: string;
+  name: string;
+  description: string | null;
+  budget: { sub_queries: number; top_k_per_query: number; gap_rounds: number; max_evidence_chunks: number };
+  model: string | null;
+  reasoning_effort: string | null;
+  gap_model: string | null;
+  collection_ids: string[];
+  instructions: string;
+  instruction_version: number;
+  run_count: number;
+  last_run_at: string | null;
+  created_at: string;
+}
+
+export interface ResearchInstruction {
+  version: number;
+  text: string;
+  is_active: boolean;
+  created_by_email: string | null;
+  created_at: string;
+}
+
+export type ResearchStatus = "queued" | "planning" | "searching" | "gap" | "synthesis" | "done" | "failed" | "cancelled";
+
+export interface ResearchRunSummary {
+  id: string;
+  project_id: string;
+  prompt: string;
+  status: ResearchStatus;
+  model: string | null;
+  created_by_email: string | null;
+  created_at: string;
+  finished_at: string | null;
+  source_count: number;
+}
+
+export interface ResearchRun extends ResearchRunSummary {
+  steps: { stage: string; at: string; detail: string }[];
+  report: string | null;
+  sources: Citation[];
+  sub_queries: string[];
+  error: string | null;
+  attachment_name: string | null;
+  reasoning_effort: string | null;
+  usage: Record<string, number>;
+}
+
+/** 관리자 모델 레지스트리 한 행 (GET /api/admin/models). .env 목록의 모델은 from_env. */
+export interface AdminModel {
+  id: string;
+  label: string;
+  provider: string;
+  enabled: boolean;
+  is_default: boolean;
+  supports_vision: boolean;
+  supports_reasoning: boolean;
+  from_env: boolean;
 }
 
 export interface Conversation {
@@ -572,12 +680,14 @@ export interface RuntimeSetting {
   label: string;
   help: string;
   group: string;
-  kind: "int" | "float";
+  kind: "int" | "float" | "str" | "bool";
   minimum: number;
   maximum: number;
-  value: number;
-  env_value: number;
+  value: number | string | boolean;
+  env_value: number | string | boolean;
   overridden: boolean;
+  /** str 종류의 선택지(모델 이름). ""는 기본값을 뜻한다. 숫자·bool은 null. */
+  choices: string[] | null;
 }
 
 /** A value deliberately NOT editable at runtime, with the reason. Served by the
@@ -586,6 +696,8 @@ export interface EnvOnlySetting {
   key: string;
   label: string;
   reason: string;
+  /** 어느 설정 카테고리 밑에 접혀 보이는가(API의 group 키). */
+  group: string;
 }
 
 export interface SettingsPayload {

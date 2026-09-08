@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { apiFetch, errorMessage } from "@/lib/api";
+import { ApiError, apiFetch, errorMessage } from "@/lib/api";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import { FILE_TYPE_LABEL } from "@/components/documents/DocumentTable";
 import type { DocumentItem } from "@/lib/types";
@@ -32,26 +32,35 @@ function rejection(file: File): string | null {
 
 export default function UploadDropzone({
   collectionId,
+  folderId,
   onUploaded,
 }: {
   collectionId: string;
+  /** 올릴 폴더. 없으면 컬렉션 루트. */
+  folderId?: string | null;
   onUploaded: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // 중복 409(0021): 같은 내용의 현행 문서가 있으면 서버가 묻는다. 파일을 잡아 두고
+  // "그래도 올리기"(force)나 "그 문서 보기"를 낸다 - 참조용 사본은 정당하므로 막지 않는다.
+  const [duplicate, setDuplicate] = useState<{ file: File; message: string; existingId: string | null } | null>(null);
 
-  async function uploadFile(file: File) {
+  async function uploadFile(file: File, force = false) {
     const refusal = rejection(file);
     if (refusal) {
       setError(refusal);
       return;
     }
     setError(null);
+    setDuplicate(null);
     setBusy(true);
     const formData = new FormData();
     formData.append("collection_id", collectionId);
+    if (folderId) formData.append("folder_id", folderId);
+    if (force) formData.append("force", "true");
     formData.append("file", file);
     try {
       // apiFetch handles FormData correctly: it only sets a JSON Content-Type for
@@ -59,7 +68,12 @@ export default function UploadDropzone({
       await apiFetch<DocumentItem>("/api/documents", { method: "POST", body: formData });
       onUploaded();
     } catch (err) {
-      setError(errorMessage(err));
+      if (err instanceof ApiError && err.status === 409) {
+        const detail = err.detail as { existing_document_id?: string } | undefined;
+        setDuplicate({ file, message: err.message, existingId: detail?.existing_document_id ?? null });
+      } else {
+        setError(errorMessage(err));
+      }
     } finally {
       setBusy(false);
     }
@@ -67,6 +81,16 @@ export default function UploadDropzone({
 
   return (
     <div className="space-y-2">
+      {duplicate && (
+        <div className="flex flex-wrap items-center gap-2 rounded-md bg-surface-container-high px-4 py-3 text-body">
+          <span className="min-w-0 flex-1">{duplicate.message}</span>
+          {duplicate.existingId && (
+            <a href={`/documents/${duplicate.existingId}`} className="btn-text btn-compact">그 문서 보기</a>
+          )}
+          <button type="button" onClick={() => void uploadFile(duplicate.file, true)} className="btn-tonal btn-compact">그래도 올리기</button>
+          <button type="button" onClick={() => setDuplicate(null)} className="btn-text btn-compact">취소</button>
+        </div>
+      )}
       {/* A <button>, not a <div onClick>. As a div this was pointer-only: not in
           the tab order, no role, no Enter/Space handler, so the one control that
           gets a document into the system was unreachable without a mouse. The

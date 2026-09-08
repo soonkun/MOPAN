@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { apiFetch, errorMessage } from "@/lib/api";
 import EditorCanvas, { type Selection } from "@/components/workflows/EditorCanvas";
@@ -94,6 +94,7 @@ export default function WorkflowEditorPage() {
   const [loaded, setLoaded] = useState(isNew);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
   const [graphError, setGraphError] = useState<{
     node?: string;
     edge?: number;
@@ -301,6 +302,7 @@ export default function WorkflowEditorPage() {
           </svg>
         </button>
         <input
+          ref={nameRef}
           value={draft.name}
           onChange={(event) => setDraft({ ...draft, name: event.target.value })}
           maxLength={200}
@@ -339,8 +341,17 @@ export default function WorkflowEditorPage() {
           </button>
           <button
             type="button"
-            onClick={() => void save()}
-            disabled={saving || !draft.name.trim()}
+            // 이름이 비어 있으면 버튼을 죽이는 대신 이유를 말한다 - 상단바의 투명한
+            // 이름 칸은 모바일에서 눈에 띄지 않아, 조용한 비활성은 "저장이 안 된다"로 읽혔다.
+            onClick={() => {
+              if (!draft.name.trim()) {
+                setSaveError("워크플로우 이름을 먼저 적어 주세요. 상단바의 '워크플로우 이름' 칸입니다.");
+                nameRef.current?.focus();
+                return;
+              }
+              void save();
+            }}
+            disabled={saving}
             aria-label={editingId ? "저장" : "만들기"}
             className="btn-filled btn-compact gap-1.5 px-2.5 sm:px-4"
           >

@@ -6,9 +6,10 @@ import { apiFetch, downloadDocument, errorMessage } from "@/lib/api";
 import ChunkViewer from "@/components/documents/ChunkViewer";
 import { TERMINAL } from "@/components/documents/DocumentTable";
 import StructurePanel from "@/components/documents/StructurePanel";
+import VersionsPanel from "@/components/documents/VersionsPanel";
 import PageShell from "@/components/layout/PageShell";
 import ErrorBanner from "@/components/ui/ErrorBanner";
-import type { Chunk, DocumentItem, User } from "@/lib/types";
+import type { Chunk, Collection, DocumentItem, User } from "@/lib/types";
 
 // Next 15 made `params` a Promise. A client component cannot await, so it
 // unwraps with React 19's `use()`. A synchronous signature is a build error.
@@ -19,6 +20,8 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
   // into a file where `document` is a DocumentItem reads the wrong thing in
   // silence.
   const [doc, setDoc] = useState<DocumentItem | null>(null);
+  // 문서가 속한 컬렉션의 청킹 전략 - 표형(분류표) 문서를 구조 인식 카드가 알아보기 위해.
+  const [collectionStrategy, setCollectionStrategy] = useState<string | undefined>(undefined);
   const [chunks, setChunks] = useState<Chunk[]>([]);
   // 문서 전체의 청크 수(제목의 괄호 숫자). chunks.length가 아니다 - 목록은
   // 이제 한 장(100개)씩 내려온다: 만행짜리 표(실측 19,994청크)를 한 번에
@@ -55,12 +58,15 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
     // re-parsed the whole file on every request - about 35 seconds of pdfplumber
     // on the 854-page document in this corpus - to fill a pane nobody read.
     try {
-      const [item, page] = await Promise.all([
+      const [item, page, collections] = await Promise.all([
         apiFetch<DocumentItem>(`/api/documents/${id}`),
         apiFetch<{ total: number; items: Chunk[] }>(`/api/documents/${id}/chunks?limit=100`),
+        apiFetch<Collection[]>("/api/collections").catch(() => [] as Collection[]),
       ]);
       docRef.current = item;
       setDoc(item);
+      const strategy = collections.find((c) => c.id === item.collection_id)?.chunking?.strategy;
+      setCollectionStrategy(typeof strategy === "string" ? strategy : undefined);
       // 색인 중 폴링이 이 함수를 다시 부르면 1페이지로 돌아간다 - 처리 중엔
       // 목록 자체가 바뀌고 있으므로 이어붙일 기준이 없다.
       setChunks(page.items);
@@ -218,8 +224,14 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
       {/* Above the chunk list, because it is what explains the chunk list: a
           document judged 참조형 was cut on its own numbering and every chunk
           below carries its governing clause. */}
+      {doc !== null && <VersionsPanel doc={doc} isAdmin={user?.role === "admin"} onChanged={load} />}
       {doc !== null && (
-        <StructurePanel doc={doc} isAdmin={user?.role === "admin"} onReprocessed={load} />
+        <StructurePanel
+          doc={doc}
+          isAdmin={user?.role === "admin"}
+          onReprocessed={load}
+          collectionStrategy={collectionStrategy}
+        />
       )}
 
       {/* One pane, and one line per row. This screen answers "did the chunking

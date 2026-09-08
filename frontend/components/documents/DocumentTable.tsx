@@ -54,18 +54,51 @@ export function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+export type SortKey = "name" | "created_at" | "chunks" | "status" | "size";
+
 export default function DocumentTable({
   documents,
   onDownload,
   onDelete,
+  selected,
+  onToggle,
+  onToggleAll,
+  sort,
+  order,
+  onSort,
+  showFolder = false,
+  draggable = false,
 }: {
   documents: DocumentItem[];
   onDownload: (doc: DocumentItem) => void;
-  // Optional because DELETE /api/documents/{id} is require_admin. The page
-  // passes it only for an admin, so nobody is shown a control the API would
-  // answer 403 to.
   onDelete?: (doc: DocumentItem) => void;
+  /** 체크박스 선택(탐색기의 일괄 작업). 셋 다 있을 때만 열이 그려진다. */
+  selected?: Set<string>;
+  onToggle?: (id: string) => void;
+  onToggleAll?: (checked: boolean) => void;
+  /** 서버 정렬. onSort가 있으면 해당 머리글이 버튼이 된다. */
+  sort?: SortKey;
+  order?: "asc" | "desc";
+  onSort?: (key: SortKey) => void;
+  /** 하위 폴더 포함 보기에서 문서가 어느 폴더에 있는지 보인다. */
+  showFolder?: boolean;
+  /** 행을 끌어 폴더 트리에 놓을 수 있게. dataTransfer에 문서 id. */
+  draggable?: boolean;
 }) {
+  const selectable = selected !== undefined && onToggle !== undefined && onToggleAll !== undefined;
+  const allChecked = selectable && documents.length > 0 && documents.every((d) => selected.has(d.id));
+  function header(label: string, key: SortKey, className = "") {
+    if (!onSort) return <th scope="col" className={`px-3 py-3 ${className}`}>{label}</th>;
+    const active = sort === key;
+    return (
+      <th scope="col" className={`px-3 py-3 ${className}`} aria-sort={active ? (order === "asc" ? "ascending" : "descending") : "none"}>
+        <button type="button" onClick={() => onSort(key)} className={`inline-flex items-center gap-1 hover:text-on-surface ${active ? "text-on-surface" : ""}`}>
+          {label}
+          <span aria-hidden="true" className="text-caption">{active ? (order === "asc" ? "▲" : "▼") : "↕"}</span>
+        </button>
+      </th>
+    );
+  }
   if (documents.length === 0) {
     return <p className="py-8 text-center text-body text-on-surface-variant">문서가 없습니다.</p>;
   }
@@ -73,25 +106,43 @@ export default function DocumentTable({
     <DataTable caption="등록된 문서 목록">
         <thead>
           <tr className="bg-surface-container-low text-label font-medium text-on-surface-variant">
-            <th scope="col" className="px-3 py-3">문서명</th>
+            {selectable && (
+              <th scope="col" className="w-8 px-3 py-3">
+                <input type="checkbox" checked={allChecked} onChange={(e) => onToggleAll(e.target.checked)} aria-label="전체 선택" />
+              </th>
+            )}
+            {header("문서명", "name")}
+            {showFolder && <th scope="col" className="px-3 py-3">폴더</th>}
             <th scope="col" className="px-3 py-3">분류</th>
             <th scope="col" className="px-3 py-3">형식</th>
             <th scope="col" className="px-3 py-3">등록자</th>
-            <th scope="col" className="px-3 py-3">등록일</th>
-            <th scope="col" className="px-3 py-3 text-right">청크 수</th>
+            {header("등록일", "created_at")}
+            {header("청크 수", "chunks", "text-right")}
             {/* One 상태 column, not the spec's separate Embedding/Index pair.
                 backend/app/rag/pipeline.py writes the vector and its row in one
                 vector_store.upsert, and both retrieval indexes are Postgres-
                 maintained on that insert, so no document can be embedded but not
                 indexed. Two columns would always show the same value. */}
-            <th scope="col" className="px-3 py-3">상태</th>
-            <th scope="col" className="px-3 py-3 text-right">크기</th>
+            {header("상태", "status")}
+            {header("크기", "size", "text-right")}
             <th scope="col" className="px-3 py-3">작업</th>
           </tr>
         </thead>
         <tbody>
           {documents.map((doc) => (
-            <tr key={doc.id} className="border-b border-outline-variant transition-colors duration-150 hover:bg-surface-container-low">
+            <tr
+              key={doc.id}
+              draggable={draggable}
+              onDragStart={draggable ? (e) => { e.dataTransfer.setData("text/mopan-document", doc.id); e.dataTransfer.effectAllowed = "move"; } : undefined}
+              className={`border-b border-outline-variant transition-colors duration-150 hover:bg-surface-container-low ${
+                selected?.has(doc.id) ? "bg-primary-container/30" : ""
+              } ${draggable ? "cursor-grab" : ""}`}
+            >
+              {selectable && (
+                <td className="px-3 py-3">
+                  <input type="checkbox" checked={selected.has(doc.id)} onChange={() => onToggle(doc.id)} aria-label={`${doc.filename} 선택`} />
+                </td>
+              )}
               <td className="px-3 py-3">
                 {/* Bounded, or the 문서명 column starves every column after it.
                     Measured at 1280x900 with a 244-character filename: unbounded,
@@ -105,7 +156,18 @@ export default function DocumentTable({
                 >
                   {doc.filename}
                 </Link>
+                {doc.stale && (
+                  <span className="mt-0.5 mr-1 inline-block rounded-full bg-error-container/60 px-1.5 text-caption text-on-error-container" title="시행일(또는 등록일)이 기준 일수를 넘은 현행 문서 - 현행화 여부를 확인하세요">
+                    점검 필요
+                  </span>
+                )}
+                {(doc.version > 1 || !doc.is_current) && (
+                  <span className={`mt-0.5 inline-block rounded-full px-1.5 text-caption ${doc.is_current ? "bg-primary-container text-on-primary-container" : "bg-surface-container-high text-on-surface-variant line-through"}`}>
+                    v{doc.version}{doc.is_current ? "" : " 교체됨"}
+                  </span>
+                )}
               </td>
+              {showFolder && <td className="px-3 py-3 text-on-surface-variant">{doc.folder_path ?? "(루트)"}</td>}
               <td className="px-3 py-3 text-on-surface-variant">{doc.collection_name ?? "-"}</td>
               <td className="px-3 py-3 text-on-surface-variant">
                 {FILE_TYPE_LABEL[doc.file_type] ?? doc.file_type}

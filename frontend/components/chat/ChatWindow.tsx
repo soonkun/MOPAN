@@ -131,6 +131,8 @@ export default function ChatWindow({
   // the whole corpus, which is what every question sent before this existed
   // asked for.
   const [collectionId, setCollectionId] = useState<string | null>(null);
+  // 폴더 범위(계획 3단계). 분류와 함께 고르고, 분류를 풀면 함께 풀린다.
+  const [folder, setFolder] = useState<{ id: string; label: string } | null>(null);
   // ONE pending call. Slice 2 is manual invocation - the user picks the tool -
   // so there is nothing here to plan with; the request body already takes a
   // list because Slice 3's orchestrator will send several.
@@ -624,6 +626,7 @@ export default function ChatWindow({
           // this app has always sent. A collection a workflow cannot reach is a
           // Korean 400 from the server before the conversation is created.
           ...(collectionId ? { collection_ids: [collectionId] } : {}),
+          ...(folder ? { folder_ids: [folder.id] } : {}),
           ...(calls.length
             ? { tool_calls: calls.map((c) => ({ tool_id: c.tool.id, arguments: c.arguments })) }
             : {}),
@@ -676,7 +679,7 @@ export default function ChatWindow({
     minimal: "즉시",
     low: "낮음",
     medium: "중간",
-    high: "깊이 생각",
+    high: "깊이",
   };
 
   function chooseReasoningEffort(value: ReasoningEffort) {
@@ -756,12 +759,19 @@ export default function ChatWindow({
    * in the composer, because the chip is small and the consequence is not:
    * scoping to one collection is the difference between "the corpus does not
    * say" and "this part of it does not". */
-  function chooseCollection(id: string | null) {
+  function chooseCollection(id: string | null, chosenFolder?: { id: string; label: string } | null) {
     setCollectionId(id);
+    setFolder(id ? chosenFolder ?? null : null);
     const name = callables
       .find((c) => c.kind === "rag")
       ?.collections.find((c) => c.id === id)?.name;
-    setNotice(name ? `${name} 분류에서만 찾습니다.` : "분류 제한을 풀었습니다.");
+    setNotice(
+      chosenFolder && name
+        ? `${name} / ${chosenFolder.label} 폴더에서만 찾습니다.`
+        : name
+          ? `${name} 분류에서만 찾습니다.`
+          : "분류 제한을 풀었습니다.",
+    );
   }
 
   function chooseModel(id: string) {
@@ -995,6 +1005,7 @@ export default function ChatWindow({
           tools={tools}
           callables={callables}
           collectionId={collectionId}
+          folderLabel={folder?.label ?? null}
           onCollectionChange={chooseCollection}
           toolCall={toolCall}
           onToolSelect={(call) => {

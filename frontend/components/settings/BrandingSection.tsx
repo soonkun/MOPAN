@@ -104,7 +104,6 @@ export default function BrandingSection() {
 
   return (
     <section className="space-y-3">
-      <h2 className="text-title font-medium">화면 브랜딩</h2>
       <p className="notice">
         사이드바 제목과 새 대화 첫 화면의 문구·추천 질문·마스코트입니다. 비워 두면 MOPAN
         기본값으로 그려집니다.

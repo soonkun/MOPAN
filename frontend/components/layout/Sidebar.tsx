@@ -49,6 +49,15 @@ const NAV_ICON: Record<string, React.ReactNode> = {
       <path d="M9 13h6M9 17h4" />
     </>
   ),
+  // 딥 리서치 - 망원경(ChatGPT의 딥 리서치 아이콘과 같은 은유, 소유자 요청): 기울어진 원통과
+  // 짧은 대안경, 두 다리. 멀리 있는 것을 오래 들여다본다는 뜻.
+  "/research": (
+    <>
+      <path d="m4.6 10.9 10.6-5.3a1.6 1.6 0 0 1 2.1.7l1.5 3a1.6 1.6 0 0 1-.7 2.1L7.5 16.7a1.6 1.6 0 0 1-2.1-.7l-1.5-3a1.6 1.6 0 0 1 .7-2.1Z" />
+      <path d="m18.2 6.4 2.3-1.1 1.6 3.1-2.3 1.2" />
+      <path d="M12 14.4 9.2 21M12.7 14.1 15.5 21" />
+    </>
+  ),
   // 분류 관리 - a folder, which is what a collection is.
   "/collections": <path d="M3 8a2 2 0 0 1 2-2h3.2l1.8 2H19a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
   // 사용자 관리 - two people.
@@ -299,6 +308,9 @@ export default function Sidebar() {
   const navLinks = [
     { href: "/chat", label: "새 대화" },
     { href: "/documents", label: "문서" },
+    // 딥 리서치 - 코퍼스를 여러 갈래로 읽고 인용한 것만 출처로 내는 보고서. 방 만들기는
+    // 관리자, 실행은 모든 사용자(원본 새싹이와 같다).
+    { href: "/research", label: "딥 리서치" },
   ];
 
   // Rendered only for an admin. All three screens are admin-only on the server too -

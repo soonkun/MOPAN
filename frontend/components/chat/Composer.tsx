@@ -254,6 +254,7 @@ export default function Composer({
   tools,
   callables,
   collectionId,
+  folderLabel,
   onCollectionChange,
   toolCall,
   onToolSelect,
@@ -296,7 +297,9 @@ export default function Composer({
    * it, because scoping a search is a per-question thought rather than a
    * setting. */
   collectionId: string | null;
-  onCollectionChange: (id: string | null) => void;
+  onCollectionChange: (id: string | null, folder?: { id: string; label: string } | null) => void;
+  /** 폴더 범위가 있으면 칩에 경로를 보인다. */
+  folderLabel?: string | null;
   /** ONE pending call. Slice 2 is manual invocation; a plan that runs several
    * steps is Slice 3, and the backend already accepts a list. */
   toolCall: PendingToolCall | null;
@@ -509,7 +512,10 @@ export default function Composer({
     if (entry.kind === "workflow" && entry.workflowId) {
       onWorkflowChange(entry.workflowId);
     } else if (entry.kind === "rag") {
-      onCollectionChange(entry.collectionId ?? null);
+      onCollectionChange(
+        entry.collectionId ?? null,
+        entry.folderId ? { id: entry.folderId, label: entry.folderLabel ?? entry.name } : null,
+      );
     } else if (entry.kind === "mcp" && entry.serverName) {
       // 서버 지목: 인자 입력 시트를 열지 않는다("도구 사용 창이 무슨 의미인지
       // 모르겠다"던 실사고의 그 창이다). 인자는 자동 사용의 숙고가 질문에서
@@ -583,7 +589,11 @@ export default function Composer({
             <span className="inline-flex max-w-full items-center gap-2 rounded-md bg-surface-container-high px-3 py-1.5 text-label">
               {/* The NAME, and 분류 beside it. A bare name would read as a file
                   the message carries, which is what the chip next to it is. */}
-              <span className="truncate">분류 · {currentCollection?.name ?? "삭제된 분류"}</span>
+              <span className="truncate">
+                {folderLabel ? "폴더 · " : "분류 · "}
+                {currentCollection?.name ?? "삭제된 분류"}
+                {folderLabel ? ` / ${folderLabel}` : ""}
+              </span>
               <button
                 type="button"
                 onMouseDown={(event) => event.preventDefault()}

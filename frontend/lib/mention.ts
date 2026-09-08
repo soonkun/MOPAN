@@ -26,6 +26,9 @@ export type MentionEntry = {
   ref: string;
   /** RAG rows only: which collection this row would scope the search to. */
   collectionId?: string;
+  /** RAG 폴더 행: 하위 폴더 포함 범위. collectionId와 함께 온다. */
+  folderId?: string;
+  folderLabel?: string;
   /** Workflow rows only: the id POST /api/chat takes. */
   workflowId?: string;
   /** MCP rows only: 서버 이름. 행이 도구가 아니라 서버 단위인 이유는 + 메뉴와
@@ -96,6 +99,20 @@ export function mentionEntries(
           ref: callable.ref,
           collectionId: collection.id,
         });
+        // 폴더 항목(계획 3단계): "분류 / 폴더 경로". 입력한 글자로 걸러지므로 폴더가 많아도 된다.
+        for (const folder of collection.folders ?? []) {
+          entries.push({
+            key: `rag:${collection.id}:${folder.id}`,
+            kind: "rag",
+            name: `${collection.name} / ${folder.path_label}`,
+            description: "이 폴더(하위 폴더 포함) 안에서만 근거를 찾습니다.",
+            riskLevel: callable.risk_level,
+            ref: callable.ref,
+            collectionId: collection.id,
+            folderId: folder.id,
+            folderLabel: folder.path_label,
+          });
+        }
       }
     } else if (callable.kind === "mcp") {
       // 서버 단위 한 줄로 접는다. 도구별 행("생활정보/current_weather" 셋)은
