@@ -16,8 +16,21 @@ const PROMPT_LABEL: Record<string, string> = {
   answer_agent: "답변 지침",
   clarify_agent: "되묻기 지침",
   smalltalk_agent: "잡담·첨부 응답 지침",
-  intent_agent: "의도 분류 판정 (chat/search 한 단어로 답해야 함)",
+  intent_agent: "의도 분류 판정",
   planner_agent: "슈퍼 에이전트 계획",
+  research_planner: "리서치 계획",
+  research_gap: "리서치 격차 분석",
+  research_synthesis: "리서치 보고서 종합",
+};
+
+// 편집기 위에 보이는 계약 안내 - 출력 형식이 코드와 약속된 프롬프트만.
+const PROMPT_NOTE: Record<string, string> = {
+  intent_agent:
+    "이 프롬프트는 chat 또는 search 한 단어로만 답하게 두어야 합니다. 다른 출력은 전부 search(문서 검색)로 처리되므로 " +
+    "형식을 어겨도 답변은 멈추지 않지만 잡담 분기가 사라집니다. 이미지가 첨부되면 서버가 힌트를 뒤에 덧붙입니다.",
+  research_planner: 'JSON {"sub_queries": [...]} 만 출력하게 두어야 합니다. 파싱에 실패하면 원문 질문 하나로 검색합니다.',
+  research_gap: 'JSON {"sub_queries": [...]} 만 출력하게 두어야 합니다. 비어 있으면 격차 분석을 마칩니다.',
+  research_synthesis: "방의 지침이 있으면 그 뒤에 붙고, 인용 강제·출력 형식 규칙은 코드가 항상 덧붙입니다.",
 };
 
 const SEED_AUTHOR = "시스템";
@@ -240,7 +253,7 @@ export default function PromptsPage() {
                           .then(setVersions)
                           .catch((err) => setLoadError(errorMessage(err)));
                       }}
-                      className={`text-label font-medium underline ${
+                      className={`text-left text-label font-medium underline ${
                         p.name === selected ? "text-on-primary-container" : "text-primary"
                       }`}
                     >
@@ -269,6 +282,7 @@ export default function PromptsPage() {
             <h2 className="text-title font-medium">
               {PROMPT_LABEL[active.name] ?? active.name} 편집
             </h2>
+            {PROMPT_NOTE[active.name] && <p className="notice">{PROMPT_NOTE[active.name]}</p>}
 
             {/* The one thing an admin has to understand before typing here. It
                 is not an ErrorBanner - nothing has gone wrong - so it is a

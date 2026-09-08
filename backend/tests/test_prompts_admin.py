@@ -421,6 +421,12 @@ async def test_a_template_at_the_allowance_is_accepted(admin_client):
     assert response.status_code == 201
 
 
+async def test_builtin_prompt_history_is_empty_not_missing(admin_client):
+    """내장 이름(clarify_agent 등)은 행이 없어도 이력이 빈 목록이다 - 404면 화면이 오류 배너를 띄운다."""
+    assert (await admin_client.get("/api/prompts/intent_agent/versions")).json() == []
+    assert (await admin_client.get("/api/prompts/no_such_prompt/versions")).status_code == 404
+
+
 async def test_the_screen_is_told_what_the_active_prompt_costs_and_what_the_limit_is(admin_client):
     """Counted server-side because there is no honest way to count cl100k tokens
     in a browser, and the limit rides along because a copy of it in the TSX would

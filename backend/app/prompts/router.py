@@ -190,6 +190,9 @@ async def list_prompt_versions(
 ):
     versions = await _versions_of(db, name)
     if not versions:
+        # 내장 프롬프트는 저장된 버전이 없어도 존재한다 - 빈 이력이 정답이다(화면이 "찾을 수 없음"을 띄우던 실사고).
+        if name in _FALLBACK_PROMPTS:
+            return []
         raise HTTPException(status_code=404, detail=PROMPT_NOT_FOUND_MESSAGE)
     return [_to_version_response(prompt, email) for prompt, email in versions]
 
