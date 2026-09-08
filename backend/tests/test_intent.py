@@ -61,3 +61,18 @@ async def test_chat_intent_answers_without_clarify_and_with_the_smalltalk_prompt
     assert result.citations == []
     system_text = provider.calls[0][0][0].content
     assert "conversational" in system_text
+
+
+async def test_image_attachment_reaches_the_classifier_as_a_hint():
+    """게이트는 글자만 본다 - 그림이 붙었다는 사실은 여기서만 전달된다(실사고:
+    포스터 사진의 문구 확인이 문서 검색을 탔다). 기본값은 프롬프트 불변."""
+    provider = FakeProvider(reply="chat")
+    await classify_intent(provider, "자료의 문구를 확인해줘", model="fake-mini", timeout=5.0, has_images=True)
+    system, user = provider.calls[0][0]
+    assert "ATTACHED AN IMAGE" in system.content
+    assert user.content.startswith("[image attached]")
+
+    plain = FakeProvider(reply="search")
+    await classify_intent(plain, "자료의 문구를 확인해줘", model="fake-mini", timeout=5.0)
+    system, user = plain.calls[0][0]
+    assert "ATTACHED AN IMAGE" not in system.content and user.content == "자료의 문구를 확인해줘"

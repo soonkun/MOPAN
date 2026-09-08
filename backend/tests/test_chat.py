@@ -731,8 +731,8 @@ async def test_the_model_list_is_readable_by_any_authenticated_user(logged_in, t
 
     assert response.status_code == 200
     assert response.json() == [
-        {"id": "gpt-4o", "label": "GPT-4o", "is_default": True, "reasoning": False},
-        {"id": "gpt-4o-mini", "label": "GPT-4o mini", "is_default": False, "reasoning": False},
+        {"id": "gpt-4o", "label": "GPT-4o", "is_default": True, "reasoning": False, "provider": "openai"},
+        {"id": "gpt-4o-mini", "label": "GPT-4o mini", "is_default": False, "reasoning": False, "provider": "openai"},
     ]
 
 
@@ -752,4 +752,5 @@ async def test_a_model_with_no_label_is_still_offered_under_its_id(logged_in, ap
         "label": "my-local-vlm",
         "is_default": False,
         "reasoning": False,
+        "provider": "openai",
     } in listed

@@ -24,6 +24,9 @@ from app.auth.dependencies import get_current_user, require_admin
 from app.chat.prompt import _FALLBACK_PROMPTS
 from app.core.config import Settings, get_app_settings
 from app.core.db import get_db_session
+from app.documents.folders import folder_paths
+from app.models.folder import Folder
+from app.llm.catalog import load_catalog
 from app.core.logging import log_event
 from app.models.collection import Collection
 from app.models.mcp import McpServer, McpTool
@@ -31,6 +34,7 @@ from app.models.prompt import Prompt
 from app.models.user import User
 from app.models.workflow import Workflow, WorkflowVersion
 from app.schemas.workflow import (
+    FolderRef,
     CallableToolResponse,
     WorkflowCollectionRef,
     WorkflowCreate,
@@ -141,13 +145,13 @@ async def _validate_prompt(db: AsyncSession, name: str) -> None:
         raise HTTPException(status_code=400, detail=UNKNOWN_PROMPT_MESSAGE.format(name=name[:100]))
 
 
-def _validate_model(model: str | None, settings: Settings) -> None:
+async def _validate_model(model: str | None, settings: Settings, db: AsyncSession) -> None:
     """The SAME allowlist POST /api/chat enforces. Checked here as well as there
     because a Korean sentence on the form an admin is filling in is worth more
     than a refusal on somebody else's question three days later - and checked
     THERE as well as here because an operator can drop a model from ANSWER_MODELS
     long after this row was saved."""
-    if model is not None and model not in settings.selectable_models:
+    if model is not None and not (await load_catalog(db, settings)).is_allowed(model):
         raise HTTPException(status_code=400, detail=UNKNOWN_MODEL_MESSAGE.format(name=model[:100]))
 
 
@@ -269,6 +273,12 @@ async def list_callable_tools(
     question may already reach.
     """
     collections = list((await db.scalars(select(Collection).order_by(Collection.name))).all())
+    # 폴더도 @로 고른다(계획 3단계): 컬렉션마다 폴더와 경로 라벨을 동봉한다.
+    folder_rows = (await db.scalars(select(Folder))).all()
+    labels: dict = {}
+    for c in collections:
+        if any(f.collection_id == c.id for f in folder_rows):
+            labels[c.id] = await folder_paths(db, c.id)
     entries = [
         CallableToolResponse(
             kind="rag",
@@ -276,7 +286,21 @@ async def list_callable_tools(
             name="문서 검색",
             description="이 배포의 문서를 검색합니다.",
             risk_level="read",
-            collections=[WorkflowCollectionRef(id=c.id, name=c.name) for c in collections],
+            collections=[
+                WorkflowCollectionRef(
+                    id=c.id,
+                    name=c.name,
+                    folders=sorted(
+                        (
+                            FolderRef(id=f.id, name=f.name, path_label=labels.get(c.id, {}).get(f.id, f.name))
+                            for f in folder_rows
+                            if f.collection_id == c.id
+                        ),
+                        key=lambda x: x.path_label,
+                    ),
+                )
+                for c in collections
+            ],
         )
     ]
     tool_rows = (
@@ -351,7 +375,7 @@ async def create_workflow(
     """Admin only, because a workflow is configuration every user then answers
     through: its prompt, its corpus scope, its tool list and now its procedure."""
     await _validate_prompt(db, payload.prompt_name)
-    _validate_model(payload.answer_model, settings)
+    await _validate_model(payload.answer_model, settings, db)
     collections = await _load_collections(db, payload.collection_ids)
     tools = await _load_tools(db, payload.tool_ids)
 
@@ -436,7 +460,7 @@ async def update_workflow(
     if "answer_model" in fields:
         # NULL is "use the deployment default", which is always allowed; only a
         # named model is checked against the allowlist.
-        _validate_model(payload.answer_model, settings)
+        await _validate_model(payload.answer_model, settings, db)
         workflow.answer_model = payload.answer_model
     if payload.enabled is not None:
         workflow.enabled = payload.enabled

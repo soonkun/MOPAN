@@ -41,7 +41,8 @@ def _upload(name: str, data: bytes, content_type: str) -> UploadFile:
 
 async def test_save_upload_stream_round_trip(tmp_path):
     upload = _upload("report.pdf", PDF_HEAD, "application/pdf")
-    path, size = await save_upload_stream(tmp_path, "doc-1", "pdf", upload, max_bytes=4096)
+    path, size, sha256 = await save_upload_stream(tmp_path, "doc-1", "pdf", upload, max_bytes=4096)
+    assert len(sha256) == 64
 
     assert path == tmp_path / "doc-1" / "source.pdf"
     assert size == len(PDF_HEAD)
@@ -61,7 +62,7 @@ async def test_storage_path_ignores_the_client_filename(tmp_path, evil_name):
     """A traversal filename must not influence the path at all: the server names
     the file from the validated extension."""
     upload = _upload(evil_name, PDF_HEAD, "application/pdf")
-    path, _ = await save_upload_stream(tmp_path, "doc-2", "pdf", upload, max_bytes=4096)
+    path, _, _ = await save_upload_stream(tmp_path, "doc-2", "pdf", upload, max_bytes=4096)
 
     assert path.resolve().is_relative_to(tmp_path.resolve())
     assert path.name == "source.pdf"

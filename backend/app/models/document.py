@@ -1,7 +1,7 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, String, Text, func, text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -18,6 +18,8 @@ class Document(Base):
             "status in ('uploaded', 'parsing', 'chunking', 'embedding', 'indexed', 'failed')",
             name="ck_documents_status_valid",
         ),
+        # 계보당 현행은 하나(0021) - 프롬프트·워크플로우 버전의 is_active와 같은 부분 유니크.
+        Index("uq_documents_lineage_current", "lineage_id", unique=True, postgresql_where=text("is_current")),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -27,6 +29,19 @@ class Document(Base):
         nullable=False,
         index=True,
     )
+    # 컬렉션 안의 폴더. NULL = 루트. RESTRICT: 문서가 든 폴더는 지울 수 없다(0020).
+    folder_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("folders.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    # 규정 현행화(0021): 같은 규정의 계보와 버전. 계보당 현행(is_current)은 하나(부분 유니크).
+    # 검색 두 팔과 표 조회는 is_current만 본다. 기본값은 "자기 자신이 계보 1·버전 1·현행".
+    lineage_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, default=uuid.uuid4, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    effective_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # 파일 내용 해시(중복 감지). 같은 해시의 현행 문서가 있으면 업로드가 409로 묻는다.
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     filename: Mapped[str] = mapped_column(String(500), nullable=False)
     file_type: Mapped[str] = mapped_column(String(20), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)

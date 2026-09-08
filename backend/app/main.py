@@ -55,12 +55,18 @@ async def lifespan(app: FastAPI):
         batch_size=settings.embedding_batch_size,
         batch_chars=settings.embedding_batch_chars,
         embedding_dim=settings.embedding_dim,
+        local_base_url=settings.local_llm_base_url,
+        local_api_key=settings.local_llm_api_key,
     )
     # 동봉 MCP 자동 등록. 실패해도 기동은 계속된다(seed 안에서 삼킨다).
+    from app.llm.catalog import discover_local_models, load_catalog
     from app.mcp.seed import seed_bundled_servers
 
     async with app.state.sessionmaker() as session:
         await seed_bundled_servers(session, settings)
+        # 로컬 GPU 모델 발견(실패해도 부팅은 산다) + 프로바이더 라우팅 정보(app/llm/catalog.py).
+        await discover_local_models(session, settings)
+        (await load_catalog(session, settings)).apply_to_provider(app.state.llm_provider)
 
     try:
         yield
@@ -136,6 +142,10 @@ def create_app() -> FastAPI:
     from app.chat.router import router as chat_router
     from app.documents.router import router as documents_router
     from app.mcp.router import router as mcp_router
+    from app.llm.router import router as models_router
+    from app.research.router import router as research_router
+    from app.documents.folders import router as folders_router
+    from app.documents.versions import router as versions_router
     from app.observability.router import router as observability_router
     from app.prompts.router import router as prompts_router
     from app.users.router import router as users_router
@@ -145,8 +155,13 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(branding_router)
     app.include_router(chat_router)
+    # documents_router보다 먼저: /documents/search가 /documents/{document_id}에 UUID로 잡히지 않게.
+    app.include_router(folders_router)
+    app.include_router(versions_router)
     app.include_router(documents_router)
     app.include_router(mcp_router)
+    app.include_router(models_router)
+    app.include_router(research_router)
     app.include_router(observability_router)
     app.include_router(prompts_router)
     app.include_router(users_router)

@@ -11,6 +11,7 @@ from app.attachments.service import attachment_root, get_owned_attachment, no_vi
 from app.auth.dependencies import get_current_user
 from app.core.config import Settings, get_app_settings
 from app.core.db import get_db_session
+from app.llm.catalog import load_catalog
 from app.core.logging import log_event
 from app.documents.storage import delete_document_files, save_upload_stream
 from app.documents.validation import (
@@ -70,8 +71,10 @@ async def upload_attachment(
     # is no longer the check that makes an image part unable to reach a blind
     # model - POST /api/chat owns that, where the choice is actually known - it is
     # the early "no model here can see at all" one.
-    if kind == "image" and not settings.any_model_supports_vision:
-        raise HTTPException(status_code=400, detail=no_vision_message(settings.answer_model))
+    if kind == "image":
+        catalog = await load_catalog(db, settings)
+        if not catalog.any_enabled_supports_vision:
+            raise HTTPException(status_code=400, detail=no_vision_message(catalog.default or settings.answer_model))
 
     head = await file.read(MAGIC_SNIFF_BYTES)
     try:
@@ -93,7 +96,7 @@ async def upload_attachment(
 
     root = attachment_root(settings.upload_dir)
     try:
-        path, size = await save_upload_stream(
+        path, size, _sha256 = await save_upload_stream(
             root,
             str(attachment.id),
             extension,

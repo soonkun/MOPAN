@@ -30,6 +30,8 @@ class ChatRequest(BaseModel):
     conversation_id: uuid.UUID | None = None
     message: str = Field(min_length=1, max_length=8000)
     collection_ids: list[uuid.UUID] | None = None
+    # 폴더 범위(계획 3단계): 하위 폴더 포함 문서 집합으로 검색을 좁힌다. collection_ids와 AND.
+    folder_ids: list[uuid.UUID] | None = None
     # Ids from POST /api/attachments. The count ceiling is
     # MAX_ATTACHMENTS_PER_MESSAGE and is enforced in the router, not here: it is
     # operator configuration, and a Field(max_length=...) would freeze it at
@@ -138,6 +140,8 @@ class AnswerModelResponse(BaseModel):
     # 말지의 근거이고, 실제 강제는 프로바이더가 한다(비추론 모델의 effort는
     # 조용히 버려진다).
     reasoning: bool = False
+    # openai | local - 화면이 "로컬 GPU" 배지를 단다.
+    provider: str = "openai"
 
 
 class ConversationResponse(BaseModel):

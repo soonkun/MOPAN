@@ -23,16 +23,13 @@ from app.auth.dependencies import get_current_user
 from app.chat.intent import classify_intent
 from app.chat.condense import condense_followup
 from app.chat.service import ChatAnswer, answer, load_history, persist_turn, retrieve
-from app.core.config import (
-    MODEL_LABELS,
-    Settings,
-    get_app_settings,
-    model_supports_reasoning,
-)
+from app.core.config import Settings, get_app_settings
+from app.llm.catalog import load_catalog
 from app.core.localtime import now_line
 from app.core.db import get_db_session
 from app.core.logging import log_event
 from app.core.redis import get_redis
+from app.documents.folders import documents_in_folders
 from app.documents.storage import delete_document_files
 from app.llm.base import LLMError, LLMProvider
 from app.mcp.auto import deliberate_and_run
@@ -123,6 +120,7 @@ async def _pause_frame(
     question: str,
     model: str,
     collection_ids: list[uuid.UUID] | None,
+    document_ids: list[uuid.UUID] | None = None,
     attachment_ids: list[uuid.UUID],
     tool_evidence: list[Evidence],
     workflow: ResolvedWorkflow,
@@ -161,6 +159,7 @@ async def _pause_frame(
             "workflow_id": str(workflow.id) if workflow.id else None,
             "author": run.author,
             "collection_ids": [str(c) for c in collection_ids] if collection_ids else None,
+            "document_ids": [str(d) for d in document_ids] if document_ids is not None else None,
             "attachment_ids": [str(a) for a in attachment_ids],
             "graph": graph.to_raw(),
             "results": {
@@ -211,6 +210,7 @@ async def _complete(
     images: list[str] | None,
     model: str,
     attachment_ids: list[uuid.UUID],
+    document_ids: list[uuid.UUID] | None = None,
     workflow: ResolvedWorkflow,
     user_nickname: str | None = None,
     auto_tool_ids: list[uuid.UUID] | None = None,
@@ -260,8 +260,9 @@ async def _complete(
         intent = await classify_intent(
             llm_provider,
             question,
-            model=settings.query_expansion_model,
+            model=settings.intent_model or settings.query_expansion_model,
             timeout=settings.query_expansion_timeout_seconds,
+            has_images=bool(images),
         )
     if intent == "chat":
         fell_back = False
@@ -291,6 +292,7 @@ async def _complete(
                 history=history,
                 current_time=current_time,
                 images=images,
+                scope_document_ids=document_ids,
             )
         evidence = evidence + auto_evidence
         # 도구 먼저, 빈손이면 RAG(소유자 결정). '근거를 냈다'의 기준은 실패·빈
@@ -298,14 +300,18 @@ async def _complete(
         # 취급되어 문서 검색까지 막고 "정보가 없습니다"로 끝났다. 빈손 항목은
         # evidence에는 남아 답변이 "표에는 없다"고 말할 수 있다.
         auto_substantive = substantive(auto_evidence)
+        # 문서 검색을 막는 것은 외부 도구의 근거만이다. 내장 표 조회는 같은 코퍼스를
+        # 부분 문자열로 읽은 것이라 문서 검색의 대체가 아니고, 그 부분일치는 소음일
+        # 수 있다(auto.py의 builtin 표시 주석 참조).
+        auto_external = [e for e in auto_substantive if not e.metadata.get("builtin")]
         if auto_substantive and intent == "chat":
             # 도구가 근거를 냈으면 잡담이 아니다: 잡담 프롬프트 대신 근거 답변
             # 프롬프트로, 근거-없음 경고 규칙도 정상 답변의 것으로.
             if auto_trace is not None:
                 auto_trace["intent_promoted"] = "chat->search"
             intent = "search"
-        if auto_substantive:
-            # 도구가 근거를 냈으면 직접 RAG는 건너뛴다. 숙고는 "실시간·외부
+        if auto_external:
+            # 외부 도구가 근거를 냈으면 직접 RAG는 건너뛴다. 숙고는 "실시간·외부
             # 데이터가 실제로 필요할 때만" 도구를 부르도록 지시되어 있으므로 그
             # 판정이 곧 "코퍼스는 이 질문의 근거가 아니다"이다. 실사고: "서울
             # 날씨"가 search로 분류되어 도구 근거 1개에 무관한 심사기준 14개가
@@ -340,6 +346,7 @@ async def _complete(
                 question_for_retrieval,
                 settings=settings,
                 collection_ids=collection_ids,
+                document_ids=document_ids,
                 # THE FALLBACK IS INSIDE THE BOUNDARY TOO. This is the path a
                 # refused or empty graph lands on, and a workflow restricted to
                 # one collection whose graph was thrown away must not answer from
@@ -473,8 +480,12 @@ async def chat(
     # as a forged body would be. An explicit `model` in the request still wins,
     # which is what keeps the composer's own picker meaningful when a workflow is
     # selected.
-    model = payload.model or workflow.answer_model or settings.answer_model
-    if model not in settings.selectable_models:
+    # 허가 목록은 카탈로그다(.env 목록 + llm_models 덧씌우기, app/llm/catalog.py):
+    # 관리자가 화면에서 끈 모델은 요청이 이름을 대도 여기서 거절된다.
+    catalog = await load_catalog(db, settings)
+    catalog.apply_to_provider(llm_provider)
+    model = payload.model or workflow.answer_model or catalog.default or settings.answer_model
+    if not catalog.is_allowed(model):
         raise HTTPException(status_code=400, detail=f"사용할 수 없는 답변 모델입니다: {model}")
 
     # THE COLLECTION BOUNDARY, resolved before anything is written. `retrieve`
@@ -486,6 +497,8 @@ async def chat(
         collection_ids = workflow.scope_collections(payload.collection_ids)
     except WorkflowScopeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # 폴더 범위(계획 3단계): 하위 폴더 포함 문서 집합. 빈 폴더면 빈 목록 = 근거 없음.
+    document_ids = await documents_in_folders(db, payload.folder_ids) if payload.folder_ids else None
 
     # 슈퍼 에이전트 IS A PER-CONVERSATION CHOICE AND NOTHING ELSE NOW. It used to
     # be turnable on by a row - `agents.orchestrator` - which is precisely how a
@@ -513,7 +526,7 @@ async def chat(
     # that proves the model the user actually picked can - without it, choosing a
     # text-only model for a question with a screenshot in it sends an image part
     # to a blind model and gets an opaque provider 400 back inside a 200 stream.
-    if images and not settings.model_supports_vision(model):
+    if images and not catalog.supports_vision(model):
         raise HTTPException(status_code=400, detail=no_vision_message(model))
 
     # Resolved here, before the conversation exists, for exactly the reason the
@@ -646,6 +659,7 @@ async def chat(
                             question=payload.message,
                             model=model,
                             collection_ids=collection_ids,
+                            document_ids=document_ids,
                             attachment_ids=attachment_ids,
                             tool_evidence=tool_evidence,
                             workflow=workflow,
@@ -689,6 +703,7 @@ async def chat(
                 images=images,
                 model=model,
                 attachment_ids=attachment_ids,
+                document_ids=document_ids,
                 workflow=workflow,
                 user_nickname=user.nickname,
                 auto_tool_ids=payload.auto_tool_ids,
@@ -793,6 +808,7 @@ async def approve(
     stored_workflow_id = stored.get("workflow_id")
     workflow = await load_workflow(db, uuid.UUID(stored_workflow_id) if stored_workflow_id else None)
     collection_ids = [uuid.UUID(c) for c in stored.get("collection_ids") or []] or None
+    document_ids = [uuid.UUID(d) for d in stored["document_ids"]] if stored.get("document_ids") is not None else None
     attachment_ids = [uuid.UUID(a) for a in stored.get("attachment_ids") or []]
     attachments = await load_claimable(db, attachment_ids, user)
     images = await to_image_urls(attachments)
@@ -879,6 +895,7 @@ async def approve(
                         question=question,
                         model=model,
                         collection_ids=collection_ids,
+                        document_ids=document_ids,
                         attachment_ids=attachment_ids,
                         tool_evidence=tool_evidence,
                         workflow=workflow,
@@ -897,6 +914,7 @@ async def approve(
                 plan_trace=run.trace(),
                 plan_ms=int(stored.get("plan_ms") or 0) + run.elapsed_ms,
                 collection_ids=collection_ids,
+                document_ids=document_ids,
                 images=images,
                 model=model,
                 attachment_ids=attachment_ids,
@@ -963,18 +981,23 @@ async def search(
 async def list_models(
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_app_settings),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """What the composer's model picker lists. Any authenticated user may read it:
     it is the same allowlist POST /api/chat enforces, so it discloses nothing a
     user could not already learn by sending a model and being refused."""
+    catalog = await load_catalog(db, settings)
+    # 기본 모델이 맨 앞 - 화면이 첫 항목을 기본으로 고른다.
+    ordered = sorted(catalog.enabled, key=lambda m: m.id != catalog.default)
     return [
         AnswerModelResponse(
-            id=model,
-            label=MODEL_LABELS.get(model, model),
-            is_default=model == settings.answer_model,
-            reasoning=model_supports_reasoning(model),
+            id=m.id,
+            label=m.label,
+            is_default=m.id == catalog.default,
+            reasoning=m.supports_reasoning,
+            provider=m.provider,
         )
-        for model in settings.selectable_models
+        for m in ordered
     ]
 
 

@@ -29,6 +29,7 @@ from app.documents.validation import (
 from app.models.chunk import Chunk
 from app.models.collection import Collection
 from app.models.document import Document
+from app.models.folder import Folder
 from app.models.user import User
 from app.schemas.collection import CollectionCreate, CollectionResponse, CollectionUpdate
 from app.llm.base import LLMProvider
@@ -78,6 +79,12 @@ def _to_response(document, collection_name, uploader_email, chunk_count) -> Docu
         uploader_email=uploader_email,
         chunk_count=chunk_count or 0,
         structure=document.structure or {},
+        folder_id=document.folder_id,
+        lineage_id=document.lineage_id,
+        version=document.version,
+        is_current=document.is_current,
+        superseded_at=document.superseded_at,
+        effective_date=document.effective_date,
         created_at=document.created_at,
         updated_at=document.updated_at,
     )
@@ -180,6 +187,9 @@ async def delete_collection(
 async def upload_document(
     collection_id: uuid.UUID = Form(...),
     file: UploadFile = File(...),
+    folder_id: uuid.UUID | None = Form(default=None),
+    # 같은 내용의 파일이 이미 있어도 올린다(참조용 사본). 기본은 409로 묻는다(0021).
+    force: bool = Form(default=False),
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_app_settings),
@@ -188,6 +198,10 @@ async def upload_document(
     collection = await db.get(Collection, collection_id)
     if collection is None:
         raise HTTPException(status_code=404, detail=COLLECTION_NOT_FOUND_MESSAGE)
+    if folder_id is not None:
+        folder = await db.get(Folder, folder_id)
+        if folder is None or folder.collection_id != collection_id:
+            raise HTTPException(status_code=400, detail="그 분류에 없는 폴더입니다.")
 
     filename = (file.filename or "").strip()
     try:
@@ -208,6 +222,7 @@ async def upload_document(
 
     document = Document(
         collection_id=collection_id,
+        folder_id=folder_id,
         filename=filename[:500],
         file_type=extension,
         size_bytes=0,
@@ -229,7 +244,7 @@ async def upload_document(
     # a reverse proxy is ever added, raise its limit (nginx: client_max_body_size)
     # to match settings.max_upload_size_mb.
     try:
-        path, size = await save_upload_stream(
+        path, size, sha256 = await save_upload_stream(
             settings.upload_dir,
             str(document.id),
             extension,
@@ -240,8 +255,29 @@ async def upload_document(
         await db.rollback()
         raise HTTPException(status_code=413, detail=str(exc)) from exc
 
+    # 중복 감지(0021): 같은 해시의 현행 문서가 있으면 막지 않고 묻는다 - 409에 그 문서를 적어
+    # 화면이 "그 문서로 가기 / 그래도 올리기"를 낼 수 있게. force면 통과(참조용 사본).
+    duplicate = await db.scalar(
+        select(Document)
+        .where(Document.sha256 == sha256, Document.is_current.is_(True), Document.id != document.id)
+        .limit(1)
+    )
+    if duplicate is not None and not force:
+        # rollback 전에 읽는다 - rollback은 ORM 객체를 만기시켜 이후 속성 접근이 동기 IO(MissingGreenlet)가 된다.
+        dup_id, dup_name, new_id = str(duplicate.id), duplicate.filename, str(document.id)
+        await db.rollback()
+        await delete_document_files(settings.upload_dir, new_id)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": f"같은 내용의 파일이 이미 있습니다: '{dup_name}'.",
+                "existing_document_id": dup_id,
+                "existing_filename": dup_name,
+            },
+        )
     document.storage_path = str(path)
     document.size_bytes = size
+    document.sha256 = sha256
     await db.commit()
 
     try:

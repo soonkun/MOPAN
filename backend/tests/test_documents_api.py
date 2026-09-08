@@ -363,7 +363,7 @@ async def test_delete_refuses_while_the_collection_holds_documents(admin_client,
         await admin_client.post(
             "/api/documents",
             data={"collection_id": collection_id},
-            files={"file": (name, b"hello", "text/plain")},
+            files={"file": (name, name.encode("utf-8"), "text/plain")},
         )
 
     response = await admin_client.delete(f"/api/collections/{collection_id}")

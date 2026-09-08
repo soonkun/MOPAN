@@ -8,6 +8,8 @@ from app.models.collection import Collection
 from app.models.conversation import Conversation
 from app.models.document import DOCUMENT_STATUSES, TERMINAL_STATUSES, Document
 from app.models.feedback import FEEDBACK_RATINGS, MessageFeedback
+from app.models.folder import MAX_FOLDER_DEPTH, Folder
+from app.models.llm_model import MODEL_PROVIDERS, LlmModel
 from app.models.mcp import (
     DEFAULT_RISK_LEVEL,
     MCP_AUTH_KINDS,
@@ -17,6 +19,15 @@ from app.models.mcp import (
 )
 from app.models.message import MESSAGE_ROLES, Message
 from app.models.prompt import Prompt
+from app.models.research import (
+    BUDGET_LIMITS,
+    RESEARCH_STATUSES,
+    RESEARCH_TERMINAL,
+    ResearchInstruction,
+    ResearchProject,
+    ResearchRun,
+    clamp_budget,
+)
 from app.models.user import USER_ROLES, User
 from app.models.workflow import (
     Workflow,
@@ -26,6 +37,12 @@ from app.models.workflow import (
 )
 
 __all__ = [
+    "Folder",
+    "ResearchProject",
+    "ResearchInstruction",
+    "ResearchRun",
+    "LlmModel",
+    "MODEL_PROVIDERS",
     "Base",
     "Branding",
     "User",

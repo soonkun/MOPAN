@@ -13,6 +13,7 @@ from app.rag.chunking.base import ChunkingStrategy
 from app.rag.chunking.hierarchy import CHARACTERS, Scheme, detect
 from app.rag.parsers import get_parser
 from app.rag.parsers.base import ParseFailure
+from app.documents.versions import revert_current_on_failure
 from app.rag.references import build_edges, relink_external
 from app.retrieval.vector_store import VectorItem, VectorStore
 
@@ -211,6 +212,7 @@ async def process_document(
             await vector_store.delete_by_document(document.id)
             document.status = "failed"
             document.error_message = str(exc)
+            await revert_current_on_failure(db, document)
             await db.commit()
         log_event(logger, "document_parse_refused", document_id=document_id, reason=str(exc))
         return
@@ -226,6 +228,7 @@ async def process_document(
             # User-facing text only; the traceback goes to the log, because this
             # column is rendered in the Documents UI.
             document.error_message = USER_FACING_FAILURE
+            await revert_current_on_failure(db, document)
             await db.commit()
         logger.exception("document processing failed", extra={"extra_fields": {"document_id": document_id}})
         raise

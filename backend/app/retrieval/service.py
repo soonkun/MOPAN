@@ -81,6 +81,7 @@ async def hybrid_search(
     candidate_limit: int,
     sparse_weight: float = 1.0,
     collection_ids: list[uuid.UUID] | None = None,
+    document_ids: list[uuid.UUID] | None = None,
     neighbor_expansion: ExpansionMode = "off",
     chunk_overlap: int = 0,
     token_budget: int = 0,
@@ -164,7 +165,10 @@ async def hybrid_search(
     # started beating one arm's rank-1 truth, the same failure that pins
     # RETRIEVAL_CANDIDATE_LIMIT at 10 (app/retrieval/collapse.py has the table).
     for variant, embedding in zip(variants, embeddings, strict=True):
-        hits = await vector_store.search(embedding, candidate_limit, collection_ids)
+        # document_ids는 있을 때만 넘긴다 - 테스트의 가짜 스토어와 외부 VectorStore 구현이 옛 시그니처다.
+        hits = await vector_store.search(
+            embedding, candidate_limit, collection_ids, **({"document_ids": document_ids} if document_ids is not None else {})
+        )
         rankings.append([hit.chunk_id for hit in hits])
         dense_seen.update(rankings[-1])
         weights.append(1.0)
@@ -173,6 +177,7 @@ async def hybrid_search(
             variant,
             candidate_limit,
             collection_ids,
+            document_ids=document_ids,
             tokenizer=sparse_tokenizer,
             df_trim=sparse_df_trim,
         )

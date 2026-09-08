@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, update
@@ -6,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import require_admin
-from app.chat.prompt import MANDATORY_TOKEN_ALLOWANCE
+from app.chat.prompt import _FALLBACK_PROMPTS, MANDATORY_TOKEN_ALLOWANCE
 from app.core.db import get_db_session
 from app.core.logging import log_event
 from app.core.tokens import count_tokens
@@ -99,6 +100,23 @@ async def list_prompts(
         by_name.setdefault(row.name, []).append(row)
 
     responses: list[PromptResponse] = []
+    # 행이 없는 내장 프롬프트(intent/clarify/smalltalk/planner)도 나열한다 - 새 배포에서
+    # 마이그레이션이 심지 않은 이름이 화면에 보이지 않아 편집할 길이 없었다(소유자 지적).
+    # 첫 저장이 version 1 행을 만든다(create_version이 내장 이름을 받는다).
+    for name, template in _FALLBACK_PROMPTS.items():
+        if name not in by_name:
+            responses.append(
+                PromptResponse(
+                    name=name,
+                    version=template.version,
+                    text=template.text,
+                    version_count=0,
+                    updated_at=datetime(1970, 1, 1, tzinfo=UTC),
+                    builtin=True,
+                    tokens=count_tokens(template.text),
+                    token_limit=MANDATORY_TOKEN_ALLOWANCE,
+                )
+            )
     for name, versions in by_name.items():
         # The ACTIVE row, and only it - "the newest" is not the same thing the
         # moment an admin rolls back to version 1. Falling back to the newest
@@ -121,6 +139,7 @@ async def list_prompts(
                 token_limit=MANDATORY_TOKEN_ALLOWANCE,
             )
         )
+    responses.sort(key=lambda r: r.name)
     return responses
 
 
@@ -196,7 +215,7 @@ async def create_prompt_version(
     existing = (
         await db.scalars(select(Prompt).where(Prompt.name == name).with_for_update())
     ).all()
-    if not existing:
+    if not existing and name not in _FALLBACK_PROMPTS:
         raise HTTPException(status_code=404, detail=PROMPT_NOT_FOUND_MESSAGE)
 
     # int(), not string ordering: "10" sorts before "9". A version this code did

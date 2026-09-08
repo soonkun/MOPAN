@@ -4,9 +4,18 @@ from datetime import datetime
 from pydantic import BaseModel, Field, field_validator
 
 
+class FolderRef(BaseModel):
+    id: uuid.UUID
+    name: str
+    # "인사/복무" 꼴 경로 라벨 - @ 메뉴가 그대로 보인다.
+    path_label: str
+
+
 class WorkflowCollectionRef(BaseModel):
     id: uuid.UUID
     name: str
+    # GET /api/tools의 rag 항목에만 채운다(폴더 범위 멘션). 워크플로우 응답에서는 빈 목록.
+    folders: list[FolderRef] = []
 
 
 class WorkflowToolRef(BaseModel):

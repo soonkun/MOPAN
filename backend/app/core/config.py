@@ -243,6 +243,22 @@ class Settings(BaseSettings):
     # it must stay a CHEAP model - expansion runs in front of every question and
     # is worth a fraction of a cent, not a frontier completion.
     query_expansion_model: str = "gpt-4o-mini"
+    # 의도 게이트(app/chat/intent.py)가 쓰는 모델. 비면 query_expansion_model.
+    # 런타임 설정(app_settings INTENT_MODEL)으로 화면에서 고른다.
+    intent_model: str = ""
+    # 서버 GPU에 띄운 OpenAI 호환 LLM 서버(Ollama http://127.0.0.1:11434/v1, vLLM 등).
+    # 비면 로컬 모델 없음. 모델 목록은 /models로 발견해 llm_models 표에 넣고 관리자가
+    # 허가한다(app/llm/catalog.py). 임베딩은 계속 OpenAI다.
+    local_llm_base_url: str = ""
+    local_llm_api_key: str = "ollama"
+    # 딥 리서치(app/research): 종합 프롬프트에 넣는 근거의 토큰 상한과 동시 실행 상한.
+    # 원본(새싹이)의 문자 상한 90,000을 토큰으로 옮겼다. 넘치면 뒤에서 자르고 잘린 개수를
+    # steps에 적는다 - "읽지 않은 것은 출처가 아니다".
+    research_evidence_token_budget: int = 60_000
+    research_max_concurrent: int = 2
+    # 문서 관리(계획 4단계): 시행일(없으면 등록일)이 이 일수보다 오래된 현행 문서를 "점검 필요"로 표시한다.
+    # 규정은 개정 주기가 있어 오래된 현행본은 현행화 여부를 사람이 확인해야 한다. 기본 3년.
+    document_stale_days: int = 1095
     # 약근거 재시도의 확장에만 쓰는 모델. 비어 있으면 query_expansion_model.
     # 분리된 이유(실측): "학회 발표 후 출원" 사례 질문에서 mini의 재작성 3개는
     # 전부 일반어("법적 문제")에 머물렀고, gpt-5.6-luna는 3개 전부 코퍼스의

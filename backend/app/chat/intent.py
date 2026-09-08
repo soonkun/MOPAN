@@ -25,6 +25,7 @@ gpt-4o-mini - 발화당 약 $0.00002, 수백 ms). 규칙 기반이 아닌 이유
 import asyncio
 import logging
 
+from app.chat.prompt import get_prompt
 from app.llm.base import ChatMessage, LLMProvider
 
 logger = logging.getLogger("mopan.chat")
@@ -32,24 +33,20 @@ logger = logging.getLogger("mopan.chat")
 SEARCH = "search"
 CHAT = "chat"
 
-# 코드 상수이고 프롬프트 저장소가 아니다. expansion.py의 재작성 프롬프트와
-# 같은 이유: 출력 라벨("chat"/"search")은 코드와의 계약이라, 화면에서 편집할
-# 수 있게 두면 라벨이 표류하는 순간 게이트가 전부 "search"로 무너진다 (안전한
-# 방향이긴 하지만, 편집이 조용히 무의미해지는 컨트롤은 두지 않는다).
-_SYSTEM = (
-    "You route messages for a document-grounded Q&A system. Decide whether the user's message "
-    "needs a DOCUMENT SEARCH to answer, or is merely CONVERSATIONAL.\n"
-    "\n"
-    "Reply with exactly one word:\n"
-    "- chat: greetings, thanks, goodbyes, small talk, jokes, test messages, or questions about "
-    "the assistant/system itself (who are you, what can you do).\n"
-    "- search: EVERYTHING else - any request for information, explanation, facts, procedures, "
-    "opinions on a subject, or a follow-up to an earlier informational question.\n"
-    "\n"
-    "When in doubt, reply search. A search that finds nothing is handled gracefully; a real "
-    "question dismissed as chat never gets its answer.\n"
-    "\n"
-    "One word only: chat or search."
+# 판정 프롬프트는 prompt.py의 INTENT_SYSTEM_PROMPT가 기본값이고, 프롬프트 관리의
+# intent_agent가 있으면 그것이 우선한다(get_prompt). 라벨 계약은 파싱이 지킨다:
+# chat/search 외의 출력은 전부 search다.
+INTENT_PROMPT_NAME = "intent_agent"
+
+# 이미지가 붙은 발화에만 덧붙는다. 게이트는 글자만 보므로 "자료의 문구를 확인해줘"가
+# 첨부 그림을 읽어 달라는 말인지 코퍼스를 뒤져 달라는 말인지 알 길이 없었다(실사고:
+# 포스터 사진의 문구 확인이 도구·문서 검색을 타고 "근거 없음" 경고까지 달렸다).
+# 그림 자체에 대한 요청은 검색할 정답 청크가 없으니 chat과 같은 갈래다.
+_IMAGE_HINT = (
+    "\n\nThe user ATTACHED AN IMAGE to this message. If the message is about the image itself "
+    "- read its text, describe it, check or transcribe its wording, translate it - reply chat: "
+    "the image is answered directly and no document search can help. If it asks how the image "
+    "relates to the documents (its classification, legality, a procedure, a rule), reply search."
 )
 
 
@@ -59,14 +56,17 @@ async def classify_intent(
     *,
     model: str,
     timeout: float,
+    has_images: bool = False,
 ) -> str:
     """`question`이 검색을 원하면 "search", 대화면 "chat". 절대 raise하지 않는다."""
+    system = (await get_prompt(INTENT_PROMPT_NAME)).text + (_IMAGE_HINT if has_images else "")
+    user = f"[image attached]\n{question}" if has_images else question
     try:
         result = await asyncio.wait_for(
             llm_provider.chat(
                 [
-                    ChatMessage(role="system", content=_SYSTEM),
-                    ChatMessage(role="user", content=question),
+                    ChatMessage(role="system", content=system),
+                    ChatMessage(role="user", content=user),
                 ],
                 temperature=0.0,
                 model=model,

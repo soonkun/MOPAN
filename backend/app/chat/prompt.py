@@ -9,6 +9,11 @@ from app.core.db import current_sessionmaker
 from app.core.logging import log_event
 from app.core.tokens import count_tokens, decode_tokens, encode_tokens
 from app.llm.base import ChatMessage
+# 별칭 필수: 이 모듈에도 PLANNER_SYSTEM_PROMPT(워크플로우 플래너 v1)가 있다. 같은 이름으로 들여오면
+# 모듈 정의가 덮어써 리서치 플래너가 워크플로우 계획(steps JSON)을 받는다(실측 2026-09-08).
+from app.research.prompts import GAP_SYSTEM_PROMPT as RESEARCH_GAP_PROMPT
+from app.research.prompts import PLANNER_SYSTEM_PROMPT as RESEARCH_PLANNER_PROMPT
+from app.research.prompts import SYNTHESIS_SYSTEM_PROMPT as RESEARCH_SYNTHESIS_PROMPT
 from app.retrieval.evidence import Evidence
 
 logger = logging.getLogger("mopan.chat")
@@ -252,6 +257,25 @@ PLANNER_GRAPH_SYSTEM_PROMPT = (
 # 자체에 대한 질문 - 가 받는 프롬프트. 검색이 돌지 않았으므로 근거 펜스도 인용
 # 규칙도 없다. "안녕?"에 심사기준 인용이 달려 나가던 실측 실패가 이것의 존재
 # 이유다.
+# 의도 게이트(app/chat/intent.py)의 판정 프롬프트. 출력 라벨 chat/search는 코드와의
+# 계약이다 - 편집해도 두 단어 중 하나로 답하게 두어야 하며, 다른 출력은 전부 search로
+# 강등된다(안전한 방향). 소유자 요구로 화면 편집 대상이 되었다.
+INTENT_SYSTEM_PROMPT = (
+    "You route messages for a document-grounded Q&A system. Decide whether the user's message "
+    "needs a DOCUMENT SEARCH to answer, or is merely CONVERSATIONAL.\n"
+    "\n"
+    "Reply with exactly one word:\n"
+    "- chat: greetings, thanks, goodbyes, small talk, jokes, test messages, or questions about "
+    "the assistant/system itself (who are you, what can you do).\n"
+    "- search: EVERYTHING else - any request for information, explanation, facts, procedures, "
+    "opinions on a subject, or a follow-up to an earlier informational question.\n"
+    "\n"
+    "When in doubt, reply search. A search that finds nothing is handled gracefully; a real "
+    "question dismissed as chat never gets its answer.\n"
+    "\n"
+    "One word only: chat or search."
+)
+
 SMALLTALK_SYSTEM_PROMPT = (
     "You are MOPAN's assistant. The user's message is conversational - a greeting, thanks, "
     "small talk, or a question about you or this system - so NO document retrieval was run and "
@@ -265,7 +289,11 @@ SMALLTALK_SYSTEM_PROMPT = (
     "\n"
     "Never invent document contents, statistics, or citations - you have none. If the message "
     "actually asks something the document corpus might answer, do not answer it from memory; "
-    "invite the user to ask it as a question so the documents can be searched."
+    "invite the user to ask it as a question so the documents can be searched.\n"
+    "\n"
+    "If the user attached an image, the request is about that image: read, transcribe or "
+    "describe exactly what is visible in it, as fully as the request needs - the brevity rule "
+    "above does not apply. Say what you cannot make out rather than guessing."
 )
 
 
@@ -308,6 +336,12 @@ _FALLBACK_PROMPTS = {
     # 의도 게이트가 "chat"으로 판정한 발화가 받는 프롬프트. clarify_agent와 같은
     # 계약: 마이그레이션 없이 이 사전이 폴백이고, 시딩하면 프롬프트 관리에서
     # 편집된다. 근거 없이 부르므로 인용 규칙이 없다 - 지어낼 근거 자체가 없다.
+    "intent_agent": PromptTemplate(name="intent_agent", version="1", text=INTENT_SYSTEM_PROMPT),
+    # 딥 리서치 세 단계(app/research). 안전 규칙(인용 강제·출력 형식)은 research/prompts.py에서
+    # 편집 불가로 항상 뒤에 붙는다.
+    "research_planner": PromptTemplate(name="research_planner", version="1", text=RESEARCH_PLANNER_PROMPT),
+    "research_gap": PromptTemplate(name="research_gap", version="1", text=RESEARCH_GAP_PROMPT),
+    "research_synthesis": PromptTemplate(name="research_synthesis", version="1", text=RESEARCH_SYNTHESIS_PROMPT),
     "smalltalk_agent": PromptTemplate(
         name="smalltalk_agent", version="1", text=SMALLTALK_SYSTEM_PROMPT
     ),

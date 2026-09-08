@@ -10,6 +10,7 @@ from app.auth.dependencies import get_current_user, require_admin
 from app.chat.service import evidence_utilization
 from app.core.config import Settings, get_app_settings
 from app.core.db import get_db_session
+from app.llm.catalog import load_catalog
 from app.core.logging import log_event
 from app.core.settings_store import (
     ENV_ONLY_SETTINGS,
@@ -159,18 +160,27 @@ async def put_feedback(
     return FeedbackResponse(rating=row.rating, comment=row.comment, updated_at=row.updated_at)
 
 
-def _setting_response(spec: SettingSpec, effective: Settings, base: Settings) -> SettingResponse:
+def _setting_response(
+    spec: SettingSpec, effective: Settings, base: Settings, model_choices: list[str] | None = None
+) -> SettingResponse:
     return SettingResponse(
         key=spec.key,
         label=spec.label,
         help=spec.help,
         group=spec.group,
-        kind="int" if spec.kind is int else "float",
+        kind={int: "int", float: "float", str: "str", bool: "bool"}[spec.kind],
         minimum=spec.minimum,
         maximum=spec.maximum,
         value=getattr(effective, spec.field),
         env_value=getattr(base, spec.field),
         overridden=getattr(effective, spec.field) != getattr(base, spec.field),
+        # 모델 선택 설정의 선택지: 이 배포가 답변에 쓰는 모델들 + 질문 다시 쓰기 모델.
+        # ""는 '질문 다시 쓰기 모델과 같음'이라는 기본값이다.
+        choices=(
+            [""] + list(dict.fromkeys((model_choices or effective.selectable_models) + [effective.query_expansion_model]))
+            if spec.key == "INTENT_MODEL"
+            else None
+        ),
     )
 
 
@@ -179,6 +189,7 @@ async def list_settings(
     request: Request,
     admin: User = Depends(require_admin),
     settings: Settings = Depends(get_app_settings),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """Only the keys in RUNTIME_SAFE_SETTINGS are enumerable here, which is why
     no secret can leak through this endpoint: OPENAI_API_KEY has no entry, so
@@ -187,10 +198,14 @@ async def list_settings(
     booted with - so the screen can show what removing an override would restore.
     """
     base: Settings = request.app.state.settings
+    model_choices = [m.id for m in (await load_catalog(db, settings)).enabled]
     return SettingsResponse(
-        settings=[_setting_response(spec, settings, base) for spec in RUNTIME_SAFE_SETTINGS.values()],
+        settings=[
+            _setting_response(spec, settings, base, model_choices)
+            for spec in RUNTIME_SAFE_SETTINGS.values()
+        ],
         env_only=[
-            EnvOnlySettingResponse(key=item.key, label=item.label, reason=item.reason)
+            EnvOnlySettingResponse(key=item.key, label=item.label, reason=item.reason, group=item.group)
             for item in ENV_ONLY_SETTINGS
         ],
     )

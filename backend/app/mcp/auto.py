@@ -50,6 +50,9 @@ _SYSTEM = (
     "'ask: ' followed by ONE short Korean question asking for that detail "
     "(예: ask: 어떤 지역의 날씨가 궁금하신가요?). "
     "When no tool helps, reply with the single word: pass. Never invent tool output. "
+    "For a classification or goods-table lookup, search with the OFFICIAL goods name rather than "
+    "the user's colloquial word (어플 -> 애플리케이션 소프트웨어, 폰 -> 스마트폰), and try two or "
+    "three candidate names when the first is uncertain. "
     "If an attached image carries the names or values the question is about (a product label, "
     "a sign, a table), read them from the image and use them as tool arguments."
 )
@@ -85,6 +88,7 @@ async def deliberate_and_run(
     history: list[dict] | None = None,
     current_time: str | None = None,
     images: list[str] | None = None,
+    scope_document_ids: list | None = None,
 ) -> tuple[list[Evidence], dict | None, str | None]:
     """켜진 도구를 모델에게 보여주고, 부르겠다는 것을 실행해 Evidence로.
 
@@ -186,8 +190,15 @@ async def deliberate_and_run(
                 ),
                 server_name=server.name,
                 tool_name=tool.name,
-                arguments=arguments,
+                # 폴더 범위 주입(계획 3단계): 모델이 넣는 인자가 아니라 서버가 넣는다 - 모델에게
+                # 맡기면 빠뜨린다. 내장 표 조회만 받는다(같은 코퍼스를 읽으므로).
+                arguments=(
+                    {**arguments, "document_ids": [str(d) for d in scope_document_ids]}
+                    if server.builtin and scope_document_ids is not None
+                    else arguments
+                ),
                 risk_level=tool.risk_level,
+                builtin=server.builtin,
             )
         )
         trace["called"].append(f"{server.name}/{tool.name}")
@@ -205,5 +216,14 @@ async def deliberate_and_run(
         return [], trace, ask
 
     evidence = await run_tool_calls(calls, settings=settings)
+    # 내장 서버(RAG 문서 표 조회)의 근거는 코퍼스 자체를 읽은 것이다. 라우터의
+    # "도구가 근거를 냈으면 RAG를 건너뛴다"는 외부 데이터(날씨 등)를 위한 규칙이라,
+    # 이 표시로 내장 근거를 그 판정에서 뺀다. 실사고: '어플' 부분일치 4건(어플리케이터)이
+    # 근거로 취급되어 문서 검색이 막히고, 모델이 9류·42류를 기억에서 채웠다.
+    builtin_servers = {server.name for _, server in by_name.values() if server.builtin}
+    for item in evidence:
+        metadata = getattr(item, "metadata", None)
+        if isinstance(metadata, dict) and metadata.get("server") in builtin_servers:
+            metadata["builtin"] = True
     trace["ms"] = int((time.perf_counter() - started) * 1000)
     return evidence, trace, None

@@ -243,7 +243,9 @@ def test_worker_settings_declares_only_real_arq_parameters():
     assert declared <= allowed, sorted(declared - allowed)
     # arq registers by func.__name__; documents/service.py enqueues the literal.
     # Renaming the function otherwise fails only at runtime, as a worker log line.
-    assert "process_document" in {f.__name__ for f in worker_module.WorkerSettings.functions}
+    # arq의 func(...) 래퍼(Function)는 .name을, 맨 함수는 __name__을 갖는다.
+    names = {getattr(f, "name", None) or getattr(f, "__name__", None) for f in worker_module.WorkerSettings.functions}
+    assert {"process_document", "run_research"} <= names
 
 
 def test_worker_bounds_job_timeout_and_retries():

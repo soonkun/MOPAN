@@ -14,6 +14,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
 
 from app.chat.prompt import (
+    _FALLBACK_PROMPTS,
     ANSWER_SYSTEM_PROMPT,
     MANDATORY_TOKEN_ALLOWANCE,
     build_prompt,
@@ -292,7 +293,9 @@ async def test_every_route_refuses_an_anonymous_caller(client, method, path):
 
 async def test_list_shows_the_active_text_and_the_version_count(admin_client):
     body = (await admin_client.get("/api/prompts")).json()
-    assert [p["name"] for p in body] == ["answer_agent"]
+    # 이름순. 저장된 행이 없는 내장 프롬프트도 builtin으로 나열된다.
+    assert [p["name"] for p in body] == sorted(set(_FALLBACK_PROMPTS) | {"answer_agent", "planner_agent"})
+    assert body[0]["name"] == "answer_agent"
     assert body[0]["text"] == ANSWER_SYSTEM_PROMPT
     assert body[0]["version"] == "1"
     assert body[0]["version_count"] == 1

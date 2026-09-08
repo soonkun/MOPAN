@@ -150,6 +150,8 @@ class PendingToolCall:
     tool_name: str
     arguments: dict
     risk_level: str
+    # 내장 서버(RAG 문서 표 조회)면 True. 요청의 폴더 범위(document_ids)를 인자에 주입하는 근거.
+    builtin: bool = False
 
 
 async def load_tool_calls(

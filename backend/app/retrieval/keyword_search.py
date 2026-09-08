@@ -191,6 +191,7 @@ async def keyword_search(
     query_text: str,
     limit: int,
     collection_ids: list[uuid.UUID] | None = None,
+    document_ids: list[uuid.UUID] | None = None,
     tokenizer: str = "simple",
     df_trim: float = 0.0,
 ) -> list[str]:
@@ -222,15 +223,20 @@ async def keyword_search(
     ts_query = _TS_QUERY.bindparams(tokens=tokens, words=words)
     # is_comparison=True types the result as boolean; without it the expression
     # inherits TSVECTOR and only happens to render correctly in a WHERE clause.
-    query = select(Chunk.id).where(Chunk.content_tsv.op("@@", is_comparison=True)(ts_query))
+    # 현행 문서만(0021) - PgVectorStore.search와 같은 조건, 같은 이유. 조인은 항상.
+    query = (
+        select(Chunk.id)
+        .join(Document, Document.id == Chunk.document_id)
+        .where(Chunk.content_tsv.op("@@", is_comparison=True)(ts_query), Document.is_current.is_(True))
+    )
     if collection_ids is not None:
         # `is not None`, not truthiness: an empty list means "scoped to no
         # collection" and must return nothing, exactly as in PgVectorStore.search.
         # Reading [] as unscoped would widen a Slice 3 Super Agent query from zero
         # collections to every collection in the system.
-        query = query.join(Document, Document.id == Chunk.document_id).where(
-            Document.collection_id.in_(collection_ids)
-        )
+        query = query.where(Document.collection_id.in_(collection_ids))
+    if document_ids is not None:
+        query = query.where(Document.id.in_(document_ids))
     # ts_rank is not indexable and never filters - the @@ predicate does that, and
     # ts_rank only orders the rows the index already returned. Tie-broken by id
     # because ts_rank scores two chunks carrying the same lexemes at the same

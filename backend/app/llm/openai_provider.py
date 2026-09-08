@@ -16,6 +16,28 @@ _RATE_LIMIT_TRIES = 8
 logger = logging.getLogger("mopan.llm")
 
 
+# GPT-5.6 계열이 /v1/chat/completions에서 실측(2026-09-08, 400 원문)으로 거절한 두 가지:
+#   "'reasoning_effort' does not support 'minimal' ... Supported: none, low, medium, high, xhigh"
+#   "Function tools with reasoning_effort are not supported ... use /v1/responses or set
+#    reasoning_effort to 'none'"
+# 화면의 "즉시"는 minimal로 오므로 이 계열에선 최저 단계 none으로 옮기고, 함수 도구가
+# 붙은 호출(도구 먼저 단계)은 none으로 내린다 - 근거를 읽고 답하는 두 번째 호출엔 도구가
+# 없어 사용자가 고른 깊이가 그대로 간다.
+# ponytail: 접두어 단언. /v1/responses로 옮기면 도구+추론을 함께 쓸 수 있다.
+NO_MINIMAL_MODEL_PREFIXES = ("gpt-5.6",)
+
+
+def adapt_reasoning_effort(model: str, effort: str | None, *, has_tools: bool) -> str | None:
+    if not model.startswith(NO_MINIMAL_MODEL_PREFIXES):
+        return effort
+    # 값이 없어도 none을 명시한다: 이 계열은 effort 미지정 시 기본 추론이 켜져 있어
+    # 도구가 붙으면 그대로 400이다(도구 심의 호출은 effort를 넘기지 않는다 - 실측).
+    if has_tools:
+        return "none"
+    return "none" if effort == "minimal" else effort
+
+
+
 class OpenAIProvider(LLMProvider):
     def __init__(
         self,
@@ -31,6 +53,8 @@ class OpenAIProvider(LLMProvider):
         batch_size: int = 128,
         batch_chars: int = 200_000,
         embedding_dim: int | None = None,
+        local_base_url: str = "",
+        local_api_key: str = "ollama",
     ):
         # Both are admin-configurable, so an invalid value is reachable from
         # configuration. Unvalidated, batch_size <= 0 degrades to one request per
@@ -47,6 +71,16 @@ class OpenAIProvider(LLMProvider):
         # so a bad key costs one attempt, not max_retries of them. Nothing to
         # reimplement here; just hand it the budget from Settings.
         self.client = AsyncOpenAI(api_key=api_key, timeout=timeout, max_retries=max_retries)
+        # 서버 GPU의 OpenAI 호환 서버(Ollama/vLLM). 어느 모델이 로컬인지는 카탈로그가
+        # local_model_names로 심어 준다(app/llm/catalog.py:Catalog.apply_to_provider);
+        # "name:tag" 꼴은 Ollama 관례라 심기 전에도 로컬로 본다.
+        self.local_client = (
+            AsyncOpenAI(base_url=local_base_url, api_key=local_api_key or "none", timeout=max(timeout, 120.0), max_retries=1)
+            if local_base_url
+            else None
+        )
+        self.local_model_names: set[str] = set()
+        self.reasoning_model_names: set[str] | None = None
         self.embedding_model = embedding_model
         self.answer_model = answer_model
         self.batch_size = batch_size
@@ -175,6 +209,19 @@ class OpenAIProvider(LLMProvider):
         )
         return vectors
 
+    def _is_local(self, model: str) -> bool:
+        return self.local_client is not None and (model in self.local_model_names or ":" in model)
+
+    def _client_for(self, model: str) -> AsyncOpenAI:
+        return self.local_client if self._is_local(model) else self.client
+
+    def _is_reasoning(self, model: str) -> bool:
+        from app.core.config import model_supports_reasoning
+
+        if self.reasoning_model_names is not None:
+            return model in self.reasoning_model_names
+        return model_supports_reasoning(model)
+
     async def chat(
         self,
         messages: list[ChatMessage],
@@ -196,13 +243,15 @@ class OpenAIProvider(LLMProvider):
         # reasoning_effort는 그 계열만 받는다. 어느 쪽이든 어기면 원문 400이
         # 그대로 나가므로 적응은 호출부가 아니라 여기 한 곳에서 한다 -
         # 비추론 모델에 남은 effort(브라우저에 기억된 값)는 조용히 버린다.
-        from app.core.config import model_supports_reasoning
-
-        if model_supports_reasoning(str(request["model"])):
+        model_name = str(request["model"])
+        client = self._client_for(model_name)
+        if self._is_reasoning(model_name):
             request.pop("temperature", None)
         else:
             request.pop("reasoning_effort", None)
-        effort = request.pop("reasoning_effort", None)
+        effort = adapt_reasoning_effort(
+            model_name, request.pop("reasoning_effort", None), has_tools=bool(tools)
+        )
         if effort is not None:
             # extra_body로: 이 컨테이너의 openai SDK는 reasoning_effort를 명명
             # 인자로 모른다(실측 TypeError). extra_body는 버전 무관하게 요청
@@ -210,7 +259,7 @@ class OpenAIProvider(LLMProvider):
             request["extra_body"] = {**request.get("extra_body", {}), "reasoning_effort": effort}
 
         try:
-            response = await self.client.chat.completions.create(**request)
+            response = await client.chat.completions.create(**request)
         except OpenAIError as exc:
             raise LLMError(f"chat completion failed: {exc}") from exc
 

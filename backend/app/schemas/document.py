@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -25,6 +25,17 @@ class DocumentResponse(BaseModel):
     # (`app/rag/chunking/hierarchy.py:Detection.as_json`) and modelling them here
     # would be a second definition to keep in step.
     structure: dict = Field(default_factory=dict)
+    # 폴더(0020). None = 컬렉션 루트. folder_path는 사람이 읽는 "인사/복무" 꼴.
+    folder_id: uuid.UUID | None = None
+    folder_path: str | None = None
+    # 규정 현행화(0021). version 1·is_current true가 보통의 문서다.
+    lineage_id: uuid.UUID | None = None
+    version: int = 1
+    is_current: bool = True
+    superseded_at: datetime | None = None
+    effective_date: date | None = None
+    # 점검 필요(4단계): 시행일/등록일이 DOCUMENT_STALE_DAYS를 넘은 현행 문서. 탐색기 목록에서만 채운다.
+    stale: bool = False
     created_at: datetime
     updated_at: datetime
 

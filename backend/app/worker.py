@@ -2,6 +2,8 @@ import asyncio
 import logging
 import uuid
 
+from arq import func
+
 from arq.connections import RedisSettings
 from sqlalchemy import select
 
@@ -46,6 +48,8 @@ async def startup(ctx: dict) -> None:
         batch_size=settings.embedding_batch_size,
         batch_chars=settings.embedding_batch_chars,
         embedding_dim=settings.embedding_dim,
+        local_base_url=settings.local_llm_base_url,
+        local_api_key=settings.local_llm_api_key,
     )
 
 
@@ -73,6 +77,9 @@ async def mark_failed(ctx: dict, document_id: str) -> None:
             if document is not None and document.status not in TERMINAL_STATUSES:
                 document.status = "failed"
                 document.error_message = USER_FACING_FAILURE
+                from app.documents.versions import revert_current_on_failure
+
+                await revert_current_on_failure(db, document)
                 await db.commit()
     except Exception:
         logger.exception(
@@ -159,8 +166,34 @@ async def process_document(ctx: dict, document_id: str) -> None:
         raise
 
 
+async def run_research(ctx: dict, run_id: str) -> None:
+    """딥 리서치 한 실행(app/research/service.py). 실패는 Runner가 행에 적는다."""
+    from app.core.settings_store import effective_settings as _effective
+    from app.models.research import ResearchProject, ResearchRun
+    from app.research.service import Runner, make_retriever
+
+    async with ctx["sessionmaker"]() as db:
+        settings = await _effective(db, ctx["settings"])
+        run = await db.get(ResearchRun, uuid.UUID(run_id))
+        project = await db.get(ResearchProject, run.project_id) if run else None
+        collection_ids = [uuid.UUID(c) for c in (project.collection_ids if project else [])]
+    # 라우팅 정보(로컬 모델 여부)를 프로바이더에 심는다 - 웹 프로세스가 아니라 여기서.
+    from app.llm.catalog import load_catalog
+    async with ctx["sessionmaker"]() as db:
+        (await load_catalog(db, settings)).apply_to_provider(ctx["llm_provider"])
+    runner = Runner(
+        uuid.UUID(run_id), sessionmaker=ctx["sessionmaker"], settings=settings, llm_provider=ctx["llm_provider"],
+        retrieve=make_retriever(ctx["sessionmaker"], settings, ctx["llm_provider"], collection_ids),
+    )
+    await runner.run()
+
+
+RESEARCH_TIMEOUT = 1800
+
+
 class WorkerSettings:
-    functions = [process_document]
+    # 리서치는 문서 파이프라인보다 오래 걸리고, 실패해도 다시 돌리면 안 된다(비용) - 별도 func 설정.
+    functions = [process_document, func(run_research, timeout=RESEARCH_TIMEOUT, max_tries=1)]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)

@@ -62,6 +62,7 @@ class VectorStore(ABC):
         embedding: list[float],
         limit: int,
         collection_ids: list[uuid.UUID] | None = None,
+        document_ids: list[uuid.UUID] | None = None,
     ) -> list[ScoredId]: ...
 
     @abstractmethod
@@ -158,6 +159,7 @@ class PgVectorStore(VectorStore):
         embedding: list[float],
         limit: int,
         collection_ids: list[uuid.UUID] | None = None,
+        document_ids: list[uuid.UUID] | None = None,
     ) -> list[ScoredId]:
         # cosine_distance emits the `<=>` operator, which is the only one
         # ix_chunks_embedding (HNSW, vector_cosine_ops) can serve. `<->` or `<#>`
@@ -166,15 +168,22 @@ class PgVectorStore(VectorStore):
         # A chunk whose embedding never landed distances to NULL, which ORDER BY
         # ASC puts last - so it only surfaces when there are fewer real rows than
         # `limit`, and then `float(None)` below raises. Exclude it here instead.
-        query = select(Chunk.id, distance).where(Chunk.embedding.is_not(None))
+        # 현행 문서만(0021 규정 현행화): 교체된 옛 버전의 청크는 어떤 검색에도 나오지 않는다.
+        # 그래서 Document 조인은 범위 지정과 무관하게 항상 한다.
+        query = (
+            select(Chunk.id, distance)
+            .join(Document, Document.id == Chunk.document_id)
+            .where(Chunk.embedding.is_not(None), Document.is_current.is_(True))
+        )
         if collection_ids is not None:
             # `is not None` rather than truthiness: an empty list means "scoped to
             # no collection" and must return nothing. Reading it as "unscoped"
             # would widen a Slice 3 Super Agent query from zero collections to
             # every collection in the system.
-            query = query.join(Document, Document.id == Chunk.document_id).where(
-                Document.collection_id.in_(collection_ids)
-            )
+            query = query.where(Document.collection_id.in_(collection_ids))
+        if document_ids is not None:
+            # 폴더 범위(계획 3단계): 하위 폴더 문서 집합. 빈 목록 = 아무것도 없다(위와 같은 규칙).
+            query = query.where(Document.id.in_(document_ids))
         # Tie-broken by id for exactly the reason keyword_search is: two chunks
         # holding the same embedding are the same distance from the query, and
         # Postgres may return those in any order. An unstable dense ranking makes

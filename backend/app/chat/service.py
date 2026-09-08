@@ -61,6 +61,7 @@ async def retrieve(
     *,
     settings: Settings,
     collection_ids: list[uuid.UUID] | None = None,
+    document_ids: list[uuid.UUID] | None = None,
     workflow: ResolvedWorkflow = DEFAULT_WORKFLOW,
 ) -> list[Evidence]:
     """The DIRECT RAG path, unchanged since Slice 1 and still the default.
@@ -118,6 +119,7 @@ async def retrieve(
         candidate_limit=settings.retrieval_candidate_limit,
         sparse_weight=settings.sparse_weight,
         collection_ids=scoped,
+        document_ids=document_ids,
         # Neighbour expansion is opted into HERE, at the one choke point every
         # direct-RAG caller reaches - /api/chat, /api/search and the
         # orchestrator's fallback all come through this function - rather than at

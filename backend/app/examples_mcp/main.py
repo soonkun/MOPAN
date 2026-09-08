@@ -481,35 +481,44 @@ TABLE_TOOLS = [
                     "description": "표에서 찾을 명칭/키워드 (부분일치, 2자 이상)",
                 },
                 "limit": {"type": "integer", "description": "최대 결과 수 (기본 8, 최대 20)"},
+                "document_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "MOPAN이 폴더 범위로 주입한다. 모델이 채울 필요 없음.",
+                },
             },
             "required": ["keyword"],
         },
     },
 ]
 
-_TABLE_SQL = sql_text(
-    r"""
+_TABLE_SQL_TEMPLATE = r"""
     SELECT DISTINCT ON (marker) marker, content, filename FROM (
       SELECT split_part(c.section, ']', 1) || ']' AS marker, c.content, d.filename
       FROM chunks c JOIN documents d ON d.id = c.document_id
       WHERE c.section ~ '^\[[^]]+/[^]]+\]' AND c.content ILIKE '%' || :q || '%'
+        AND d.is_current {scope}
     ) rows ORDER BY marker LIMIT :n
     """
-)
 
 # 본문 일치: 전(全) 코퍼스 정확 부분일치. 키 컬럼을 추측하지 않는다 - 일치한
 # 행의 주변 텍스트를 그대로 돌려주고, 어떤 값이 코드인지는 답변 모델이 문맥으로
 # 읽는다. 섹션이 있으면 섹션을, 없으면 파일명을 좌표로 붙인다. 마커 절은
 # 위 쿼리가 이미 다뤘으므로 뺀다 - 안 빼면 같은 행이 두 번 나온다.
-_FALLBACK_SQL = sql_text(
-    r"""
+_FALLBACK_SQL_TEMPLATE = r"""
     SELECT COALESCE(NULLIF(c.section, ''), d.filename) AS place, c.content, d.filename
     FROM chunks c JOIN documents d ON d.id = c.document_id
     WHERE c.content ILIKE '%' || :q || '%'
+      AND d.is_current {scope}
       AND (c.section IS NULL OR c.section !~ '^\[[^]]+/[^]]+\]')
     ORDER BY d.filename, c.chunk_index LIMIT :n
     """
-)
+
+
+# 폴더 범위(계획 3단계): MOPAN이 주입한 document_ids가 있으면 그 문서만. 없으면 전 코퍼스.
+def _scoped(template: str, ids: list[str] | None):
+    scope = "AND c.document_id = ANY(CAST(:ids AS uuid[]))" if ids else ""
+    return sql_text(template.replace("{scope}", scope))
 
 
 async def table_lookup(arguments: dict) -> str:
@@ -518,15 +527,18 @@ async def table_lookup(arguments: dict) -> str:
     if len(keyword) < 2:
         raise ValueError("keyword는 2자 이상의 명칭/키워드여야 합니다.")
     limit = min(max(int(arguments.get("limit") or 8), 1), 20)
+    raw_ids = arguments.get("document_ids")
+    ids = [str(i) for i in raw_ids] if isinstance(raw_ids, list) and raw_ids else None
+    params = {"q": keyword, "n": limit, **({"ids": ids} if ids else {})}
     async with _engine().connect() as conn:
-        rows = list((await conn.execute(_TABLE_SQL, {"q": keyword, "n": limit})).all())
+        rows = list((await conn.execute(_scoped(_TABLE_SQL_TEMPLATE, ids), params)).all())
         marked = len(rows)
         # 마커가 몇 건 맞아도 남는 슬롯은 본문 일치로 채운다. 실사고: "사파이어"
         # 가 상품분류표의 보석 행에 먼저 걸려, 방금 임베딩한 등록농약 표의
         # 살균제 사파이어가 아예 안 보였다 - 두 세계에 다 있는 말은 흔하다.
         if len(rows) < limit:
             rows += list(
-                (await conn.execute(_FALLBACK_SQL, {"q": keyword, "n": limit - len(rows)})).all()
+                (await conn.execute(_scoped(_FALLBACK_SQL_TEMPLATE, ids), {**params, "n": limit - len(rows)})).all()
             )
     if not rows:
         # 빈 문자열이 계약이다: MOPAN 쪽 run_tool_calls가 이것을 "[도구가 빈

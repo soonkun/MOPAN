@@ -211,12 +211,14 @@ class SettingResponse(BaseModel):
     label: str
     help: str
     group: str
-    kind: Literal["int", "float"]
+    kind: Literal["int", "float", "str", "bool"]
     minimum: float
     maximum: float
-    value: float
-    env_value: float
+    value: int | float | bool | str
+    env_value: int | float | bool | str
     overridden: bool
+    # str 종류의 선택지. 모델 이름은 자유 입력이 아니라 이 배포가 아는 모델 중 하나다.
+    choices: list[str] | None = None
 
 
 class EnvOnlySettingResponse(BaseModel):
@@ -227,6 +229,7 @@ class EnvOnlySettingResponse(BaseModel):
     key: str
     label: str
     reason: str
+    group: str
 
 
 class SettingsResponse(BaseModel):

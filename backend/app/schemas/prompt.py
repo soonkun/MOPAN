@@ -65,6 +65,8 @@ class PromptResponse(BaseModel):
     text: str
     version_count: int
     updated_at: datetime
+    # 코드에 내장된 기본값만 있고 저장된 행이 없는 이름. 화면은 날짜 대신 "내장 기본값"을 쓴다.
+    builtin: bool = False
     # What this template costs in cl100k tokens, and the ceiling a save is
     # refused above. Both are on the response rather than in the client, because
     # the browser cannot count cl100k tokens and the ceiling is a backend

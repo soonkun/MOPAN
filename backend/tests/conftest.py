@@ -21,6 +21,11 @@ from app.main import create_app
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 TABLES_IN_DELETE_ORDER = (
+    "research_runs",
+    "folders",
+    "research_instructions",
+    "research_projects",
+    "llm_models",
     "attachments",
     # Before `messages`, which it points at. Truncated per test like every other
     # row a test writes - and `app_settings` below is the one that MATTERS: a

@@ -1,4 +1,6 @@
 import bisect
+import logging
+import os
 import re
 from collections import Counter, defaultdict, deque
 from itertools import zip_longest
@@ -8,6 +10,8 @@ import pdfplumber
 
 from app.rag.blocks import Block, ParsedDocument
 from app.rag.parsers.base import Parser, ParseFailure
+
+logger = logging.getLogger("mopan.parsers")
 
 MAX_HEADING_CHARS = 80
 MAX_HEADING_WORDS = 12
@@ -35,7 +39,7 @@ CID_TOKEN = re.compile(r"\(cid:\d+\)")
 CID_GARBAGE_RATIO = 0.2
 CID_MIN_TEXT_CHARS = 1000
 CID_FAILURE_MESSAGE = (
-    "이 PDF는 글자 정보(폰트의 문자 매핑)가 없어 텍스트를 추출할 수 없습니다. "
+    "이 PDF는 글자 정보(폰트의 문자 매핑)가 없고 OCR로도 글자를 읽어내지 못했습니다. "
     "PDF 뷰어에서 '인쇄 > PDF로 저장'으로 다시 만든 파일이나, 텍스트 복사가 되는 "
     "원본 PDF를 올려 주세요."
 )
@@ -338,6 +342,143 @@ def _page_lines(page) -> list[_Line]:
     return lines
 
 
+def _blocks_from_pages(pages: list[list[_Line]], section_marker: re.Pattern[str] | None) -> list[Block]:
+    """줄 목록(페이지별)에서 블록을 만든다. pdfplumber·pdfium·OCR 세 경로가 공유한다."""
+    # Weighted by characters, not by lines: a document's body size is the
+    # one most of its TEXT is set in, and a title page of one-word lines
+    # outvotes a page of prose under a per-line count.
+    weighted = Counter()
+    for page_lines in pages:
+        for line in page_lines:
+            weighted[round(line.size, 1)] += len(line.text)
+    body_size = weighted.most_common(1)[0][0] if weighted else 0.0
+    repeats = Counter((line.band, line.text) for page_lines in pages for line in page_lines)
+    furniture = {key for key, count in repeats.items() if count >= FURNITURE_MIN_PAGES}
+    recent: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=FURNITURE_MEMORY))
+
+    blocks: list[Block] = []
+    current_section: str | None = None
+
+    for page_number, page_lines in enumerate(pages, start=1):
+        paragraph: list[_Line] = []
+        texts = [line.text for line in page_lines]
+
+        for index, (line, next_text) in enumerate(
+            zip_longest(page_lines, texts[1:], fillvalue="")
+        ):
+            if (line.band, line.text) in furniture:
+                # The publisher printed this section name on this page, so
+                # it is authoritative for it - re-asserting it here is what
+                # takes the section back from an in-page heuristic hit on
+                # the page before. But it only carries NEW information where
+                # it changes, so only then does it emit a block.
+                seen = line.text in recent[line.band]
+                recent[line.band].append(line.text)
+                current_section = line.text
+                if seen:
+                    continue
+            # A folio never repeats verbatim, so the furniture rule cannot
+            # catch it; its position can. First or last line of the page.
+            elif PAGE_NUMBER.match(line.text) and index in (0, len(page_lines) - 1):
+                continue
+            elif not (
+                _is_font_heading(line, body_size)
+                or _is_heading(line.text, next_text, section_marker)
+            ):
+                paragraph.append(line)
+                continue
+
+            _flush(blocks, paragraph, page_number, current_section)
+            current_section = line.text
+            blocks.append(
+                Block(
+                    text=line.text,
+                    block_type="heading",
+                    page=page_number,
+                    section=current_section,
+                )
+            )
+
+        _flush(blocks, paragraph, page_number, current_section)
+
+    return blocks
+
+
+def _lines_from_text(text: str) -> list[_Line]:
+    """폰트 정보 없는 텍스트 한 페이지를 줄로. band 0·크기 0 - 반복 머리글(furniture)
+    판정은 (band, text)로 계속 동작하고, 글꼴 기반 제목 판정만 빠진다."""
+    return [
+        _Line(band=0, text=t, size=0.0, bold=False, ends_blank=False)
+        for t in (raw.strip() for raw in text.splitlines())
+        if t
+    ]
+
+
+def _pdfium_pages(path: str) -> list[list[_Line]]:
+    import pypdfium2 as pdfium
+
+    doc = pdfium.PdfDocument(path)
+    pages: list[list[_Line]] = []
+    try:
+        for i in range(len(doc)):
+            page = doc[i]
+            textpage = page.get_textpage()
+            try:
+                pages.append(_lines_from_text(textpage.get_text_range()))
+            finally:
+                # 해제 순서가 중요하다(textpage → page → doc): 거꾸로 두면 pdfium이
+                # 이미 닫힌 부모를 건드려 세그폴트가 난다.
+                textpage.close()
+                page.close()
+    finally:
+        doc.close()
+    return pages
+
+
+OCR_DPI = 200
+OCR_LANG = "kor+eng"
+# ponytail: 프로세스 풀 크기 상한. 워커 노드는 72코어지만 tesseract는 페이지당 3~5초라
+# 16개면 350쪽이 2분 안이다. 더 빨라야 하면 OCR_WORKERS 환경변수로.
+OCR_WORKERS = min(16, os.cpu_count() or 4)
+
+
+def _ocr_one_page(args: tuple[str, int]) -> str:
+    import pypdfium2 as pdfium
+    import pytesseract
+
+    path, index = args
+    doc = pdfium.PdfDocument(path)
+    try:
+        page = doc[index]
+        try:
+            image = page.render(scale=OCR_DPI / 72).to_pil()
+        finally:
+            page.close()
+    finally:
+        doc.close()
+    return pytesseract.image_to_string(image, lang=OCR_LANG, config="--psm 6")
+
+
+def _ocr_pages(path: str) -> list[list[_Line]]:
+    """스캔 PDF를 로컬 tesseract로 읽는다. 토큰·외부 호출 0. 페이지 병렬."""
+    import multiprocessing
+    import pypdfium2 as pdfium
+    from concurrent.futures import ProcessPoolExecutor
+
+    doc = pdfium.PdfDocument(path)
+    try:
+        count = len(doc)
+    finally:
+        doc.close()
+    workers = int(os.environ.get("OCR_WORKERS", OCR_WORKERS))
+    # spawn, not fork: 이 함수는 pdfium이 로드된 비동기 워커(arq) 안에서 불린다. fork로
+    # 복제된 자식이 부모의 pdfium 상태를 물려받아 세그폴트로 워커를 통째로 죽였다(실측).
+    ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=max(1, min(workers, count)), mp_context=ctx) as pool:
+        texts = list(pool.map(_ocr_one_page, [(path, i) for i in range(count)]))
+    return [_lines_from_text(t) for t in texts]
+
+
 class PdfParser(Parser):
     def parse(self, path: str, section_marker: re.Pattern[str] | None = None) -> ParsedDocument:
         with pdfplumber.open(path) as pdf:
@@ -347,65 +488,28 @@ class PdfParser(Parser):
                 # 854 pages of cached pdfminer objects do not fit in a worker.
                 page.flush_cache()
                 page.get_textmap.cache_clear()
-
-        # Weighted by characters, not by lines: a document's body size is the
-        # one most of its TEXT is set in, and a title page of one-word lines
-        # outvotes a page of prose under a per-line count.
-        weighted = Counter()
-        for page_lines in pages:
-            for line in page_lines:
-                weighted[round(line.size, 1)] += len(line.text)
-        body_size = weighted.most_common(1)[0][0] if weighted else 0.0
-        repeats = Counter((line.band, line.text) for page_lines in pages for line in page_lines)
-        furniture = {key for key, count in repeats.items() if count >= FURNITURE_MIN_PAGES}
-        recent: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=FURNITURE_MEMORY))
-
-        blocks: list[Block] = []
-        current_section: str | None = None
-
-        for page_number, page_lines in enumerate(pages, start=1):
-            paragraph: list[_Line] = []
-            texts = [line.text for line in page_lines]
-
-            for index, (line, next_text) in enumerate(
-                zip_longest(page_lines, texts[1:], fillvalue="")
-            ):
-                if (line.band, line.text) in furniture:
-                    # The publisher printed this section name on this page, so
-                    # it is authoritative for it - re-asserting it here is what
-                    # takes the section back from an in-page heuristic hit on
-                    # the page before. But it only carries NEW information where
-                    # it changes, so only then does it emit a block.
-                    seen = line.text in recent[line.band]
-                    recent[line.band].append(line.text)
-                    current_section = line.text
-                    if seen:
-                        continue
-                # A folio never repeats verbatim, so the furniture rule cannot
-                # catch it; its position can. First or last line of the page.
-                elif PAGE_NUMBER.match(line.text) and index in (0, len(page_lines) - 1):
-                    continue
-                elif not (
-                    _is_font_heading(line, body_size)
-                    or _is_heading(line.text, next_text, section_marker)
-                ):
-                    paragraph.append(line)
-                    continue
-
-                _flush(blocks, paragraph, page_number, current_section)
-                current_section = line.text
-                blocks.append(
-                    Block(
-                        text=line.text,
-                        block_type="heading",
-                        page=page_number,
-                        section=current_section,
-                    )
-                )
-
-            _flush(blocks, paragraph, page_number, current_section)
-
+        blocks = _blocks_from_pages(pages, section_marker)
         joined = "\n".join(block.text for block in blocks)
-        if len(joined) >= CID_MIN_TEXT_CHARS and cid_garbage_ratio(joined) > CID_GARBAGE_RATIO:
-            raise ParseFailure(CID_FAILURE_MESSAGE)
+        garbage = len(joined) >= CID_MIN_TEXT_CHARS and cid_garbage_ratio(joined) > CID_GARBAGE_RATIO
+        # 절반 넘는 쪽이 글자 0인 PDF = 스캔본(표지 한 쪽만 텍스트인 경우 포함). 짧지만
+        # 글자가 있는 정상 문서(한 쪽 메모)는 여기 걸리지 않는다.
+        blank_pages = sum(1 for page_lines in pages if not "".join(l.text for l in page_lines).strip())
+        mostly_blank = bool(pages) and blank_pages / len(pages) > 0.5
+        if garbage or mostly_blank:
+            # 글자 매핑이 깨졌거나(cid 쓰레기) 글자가 거의 없는(스캔본) PDF. 거절하지 않고
+            # 두 단계 폴백을 탄다(소유자 요구 2026-09-08: "안 되면 경우에 맞게 되게 만들어야지").
+            # ① pdfium은 pdfminer가 (cid:N)으로 뱉는 폰트를 곧잘 읽는다 - 디자인심사기준
+            #    473쪽이 그 경우였다. ② 그것도 비면 페이지를 그려 로컬 OCR(tesseract kor)로
+            #    읽는다 - 출원방식심사기준 347쪽. 셋 중 가장 많은 글자를 낸 경로를 쓴다.
+            #    짧은 문서(한 쪽 메모)는 정당하므로 글자가 0일 때만 거절한다.
+            candidates = [("pdfplumber", [] if garbage else blocks)]
+            alt = _blocks_from_pages(_pdfium_pages(path), section_marker)
+            candidates.append(("pdfium", alt))
+            if len("".join(b.text for b in alt)) < CID_MIN_TEXT_CHARS:
+                candidates.append(("ocr", _blocks_from_pages(_ocr_pages(path), section_marker)))
+            source, blocks = max(candidates, key=lambda c: len("".join(b.text for b in c[1])))
+            if not "".join(b.text for b in blocks).strip():
+                raise ParseFailure(CID_FAILURE_MESSAGE)
+            if source != "pdfplumber":
+                logger.info("pdf text recovered via %s: %d blocks", source, len(blocks))
         return ParsedDocument(blocks=blocks)

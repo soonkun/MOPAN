@@ -27,6 +27,8 @@ logger = logging.getLogger("mopan.settings")
 
 RETRIEVAL = "retrieval"
 CHUNKING = "chunking"
+INTENT = "intent"
+DOCUMENTS = "documents"
 
 # Applies to the WHOLE chunking group and is repeated on screen, because an admin
 # who raises CHUNK_SIZE and expects the corpus to re-chunk will be wrong for a
@@ -50,14 +52,24 @@ class SettingSpec:
 
     key: str
     field: str
-    kind: type[int] | type[float]
+    kind: type[int] | type[float] | type[str] | type[bool]
     minimum: float
     maximum: float
     group: str
     label: str
     help: str
 
-    def parse(self, raw: str) -> int | float:
+    def parse(self, raw: str) -> int | float | str | bool:
+        # str·bool은 범위가 없다. 화면은 select로 그리고(관측성 라우터가 choices를
+        # 실어 보냄), 모델 이름의 오타는 게이트가 search로 강등하므로 안전하다.
+        if self.kind is str:
+            return raw.strip()
+        if self.kind is bool:
+            if raw.strip().lower() in ("true", "1", "on", "yes"):
+                return True
+            if raw.strip().lower() in ("false", "0", "off", "no"):
+                return False
+            raise ValueError(f"{self.key} 값은 true 또는 false여야 합니다.")
         try:
             value = self.kind(raw)
         except (TypeError, ValueError) as exc:
@@ -193,6 +205,48 @@ RUNTIME_SAFE_SETTINGS: dict[str, SettingSpec] = {
             ),
         ),
         SettingSpec(
+            key="INTENT_GATE",
+            field="intent_gate",
+            kind=bool,
+            minimum=0,
+            maximum=1,
+            group=INTENT,
+            label="의도 게이트 사용",
+            help=(
+                "질문을 검색하기 전에 '문서를 찾아야 하는 질문인가, 인사·잡담·시스템 질문인가'를 "
+                "값싼 모델 한 번으로 가립니다. 잡담이면 문서 검색 없이 답하고 근거-없음 경고도 "
+                "붙지 않습니다. 판정이 실패하면 항상 검색으로 강등되므로 꺼진 것과 같은 동작이 됩니다."
+            ),
+        ),
+        SettingSpec(
+            key="INTENT_MODEL",
+            field="intent_model",
+            kind=str,
+            minimum=0,
+            maximum=1,
+            group=INTENT,
+            label="의도 분류 모델",
+            help=(
+                "의도 게이트가 쓰는 모델입니다. 질문마다 한 번, 한 단어(chat/search)만 답하게 하므로 "
+                "값싼 모델이 맞습니다. 비워 두면 '질문 다시 쓰기' 모델(QUERY_EXPANSION_MODEL)을 "
+                "그대로 씁니다. 판정 기준(프롬프트)은 프롬프트 관리의 intent_agent에서 고칩니다."
+            ),
+        ),
+        SettingSpec(
+            key="DOCUMENT_STALE_DAYS",
+            field="document_stale_days",
+            kind=int,
+            minimum=30,
+            maximum=3650,
+            group=DOCUMENTS,
+            label="점검 필요 기준(일)",
+            help=(
+                "시행일(없으면 등록일)이 이 일수를 넘은 현행 문서를 문서 탐색기에서 '점검 필요'로 표시합니다. "
+                "규정은 개정 주기가 있어 오래된 현행본은 사람이 현행화 여부를 확인해야 합니다. "
+                "표시만 하며 검색에는 영향이 없습니다."
+            ),
+        ),
+        SettingSpec(
             key="SEMANTIC_SIMILARITY_THRESHOLD",
             field="semantic_similarity_threshold",
             kind=float,
@@ -221,12 +275,16 @@ class EnvOnlySetting:
     key: str
     label: str
     reason: str
+    # 어느 설정 카테고리 밑에 접혀 보이는가. 임베딩 모델·차원은 색인(문서 분할) 쪽,
+    # 나머지는 검색 방식이다.
+    group: str = RETRIEVAL
 
 
 ENV_ONLY_SETTINGS: list[EnvOnlySetting] = [
     EnvOnlySetting(
         key="EMBEDDING_MODEL",
         label="임베딩 모델",
+        group=CHUNKING,
         reason=(
             "이 값을 바꾸면 이미 저장된 모든 임베딩과 새 질문의 임베딩이 서로 다른 공간에 놓여 검색이 "
             "조용히 무의미해집니다. 전체 문서를 다시 색인해야 하므로 환경변수로만 바꿉니다."
@@ -244,6 +302,7 @@ ENV_ONLY_SETTINGS: list[EnvOnlySetting] = [
     EnvOnlySetting(
         key="EMBEDDING_DIM",
         label="임베딩 차원",
+        group=CHUNKING,
         reason=(
             "chunks.embedding 컬럼의 실제 차원과 같아야 합니다. 바꾸려면 마이그레이션과 전체 재색인이 "
             "필요하고, 불일치하면 서버가 준비 상태 점검에서 기동을 거부합니다. 환경변수로만 바꿉니다."
@@ -257,15 +316,6 @@ ENV_ONLY_SETTINGS: list[EnvOnlySetting] = [
             "저장된 색인은 청크를 쓸 때 설정되어 있던 토크나이저로 만들어져 있어서, 이 값을 바꾸면 "
             "scripts/backfill_tsv.py 로 전체를 다시 색인해야 합니다. 다시 색인하지 않으면 질문과 "
             "색인이 서로 다른 방식으로 쪼개져 키워드 검색이 아무것도 찾지 못합니다."
-        ),
-    ),
-    EnvOnlySetting(
-        key="INTENT_GATE",
-        label="의도 게이트",
-        reason=(
-            "켜짐/꺼짐 값이라 이 화면의 숫자 입력 칸으로는 다룰 수 없습니다. 인사말 같은 대화형 "
-            "발화를 검색 전에 골라내 문서 검색 없이 답하게 하는 판정 한 번(값싼 completion)이며, "
-            "판정이 실패하면 항상 검색으로 강등되므로 꺼진 것과 같은 동작이 됩니다."
         ),
     ),
     EnvOnlySetting(

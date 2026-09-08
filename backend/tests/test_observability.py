@@ -437,11 +437,11 @@ async def test_the_api_key_can_be_neither_read_nor_written(owner, db, app):
         "SPARSE_TOKENIZER",
         # 켜짐/꺼짐 - 숫자 입력 칸으로 다룰 수 없는 값. 측정과 함께 바꾸는
         # 배포 결정이라 환경변수로만 바꾼다. app/retrieval/collapse.py 참조.
+        # (INTENT_GATE는 2026-09-08 편집 가능 설정으로 옮겨 여기 없다.)
         "RETRIEVAL_COLLAPSE",
         # 어휘 빈도표(scripts/build_lexeme_df.py)가 먼저 있어야 켤 수 있는 값.
         "SPARSE_DF_TRIM",
         # 대화형 발화를 검색 전에 골라내는 판정. 실패는 항상 검색으로 강등.
-        "INTENT_GATE",
         # 사례 서술을 첫 검색 전에 용어 질의로 다시 쓰는 단계. 측정 후 켠다.
         "RETRIEVAL_RECAST",
         # 후속 발화를 이력에 비추어 자립형 검색 질문으로 압축. 실패=원문.

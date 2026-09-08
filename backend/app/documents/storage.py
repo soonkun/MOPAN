@@ -1,3 +1,4 @@
+import hashlib
 import shutil
 from pathlib import Path
 
@@ -25,7 +26,7 @@ async def save_upload_stream(
     extension: str,
     upload: UploadFile,
     max_bytes: int,
-) -> tuple[Path, int]:
+) -> tuple[Path, int, str]:
     """Stream to disk in 1MB pieces, aborting the moment the running total passes
     max_bytes. Reading the whole body into memory first turns a 5GB POST into an
     OOM kill before any size check can run."""
@@ -33,6 +34,7 @@ async def save_upload_stream(
     await to_thread.run_sync(lambda: target.parent.mkdir(parents=True, exist_ok=True))
 
     total = 0
+    digest = hashlib.sha256()  # 중복 감지(0021): 조각을 쓰면서 같은 패스에서 해시한다.
     handle = await to_thread.run_sync(lambda: target.open("wb"))
     try:
         while True:
@@ -42,6 +44,7 @@ async def save_upload_stream(
             total += len(piece)
             if total > max_bytes:
                 raise UploadTooLarge(f"업로드가 최대 {max_bytes}바이트를 초과했습니다.")
+            digest.update(piece)
             await to_thread.run_sync(handle.write, piece)
     except BaseException:
         await to_thread.run_sync(handle.close)
@@ -50,7 +53,7 @@ async def save_upload_stream(
     else:
         await to_thread.run_sync(handle.close)
 
-    return target, total
+    return target, total, digest.hexdigest()
 
 
 async def read_upload(path: Path | str) -> bytes:
