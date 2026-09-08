@@ -196,7 +196,9 @@ async def expand_query(
         # temperature 0: the same question must expand to the same variants, or
         # every eval number on this stage is noise.
         result = await asyncio.wait_for(
-            llm_provider.chat(messages, temperature=0.0, tools=None, model=model),
+            # 질의 다시 쓰기는 추론이 필요 없다. gpt-5.6 계열(재시도 모델 luna)은 effort 없이 부르면
+            # 기본 추론이 켜져 8초 제한을 넘겼다(실측 TimeoutError) - minimal(5.6은 none으로 적응).
+            llm_provider.chat(messages, temperature=0.0, tools=None, model=model, reasoning_effort="minimal"),
             timeout,
         )
     except Exception:

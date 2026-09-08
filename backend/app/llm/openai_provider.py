@@ -252,6 +252,12 @@ class OpenAIProvider(LLMProvider):
         effort = adapt_reasoning_effort(
             model_name, request.pop("reasoning_effort", None), has_tools=bool(tools)
         )
+        # 로컬 "생각하는" 모델(gemma4 등, Ollama)은 effort가 없으면 생각 토큰을 먼저 길게 쓴다 - 실측:
+        # 도구 심의 200토큰이 전부 reasoning이고 내용·도구 호출 0, 상한이 없으면 수 분. Ollama는
+        # reasoning_effort "none"으로 생각을 끈다(think:false는 무시). 추론 모델로 표시되지 않은 로컬
+        # 모델에는 항상 none을 명시한다 - 사용자가 고른 추론 수준은 표시된 모델에서만 의미가 있다.
+        if effort is None and self._is_local(model_name) and not self._is_reasoning(model_name):
+            effort = "none"
         if effort is not None:
             # extra_body로: 이 컨테이너의 openai SDK는 reasoning_effort를 명명
             # 인자로 모른다(실측 TypeError). extra_body는 버전 무관하게 요청

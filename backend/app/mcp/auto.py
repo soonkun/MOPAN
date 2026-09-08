@@ -164,6 +164,8 @@ async def deliberate_and_run(
             temperature=0.0,
             tools=specs,
             model=model,
+            # 심의는 "부를까 말까" 한 줄이다. 상한이 없으면 생각하는 모델이 수 분을 끈다(실측).
+            max_tokens=400,
         )
     except Exception:
         logger.warning("tool deliberation failed; answering without tools", exc_info=True)
