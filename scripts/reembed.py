@@ -153,10 +153,10 @@ async def main() -> int:
                 sql_text("CREATE INDEX IF NOT EXISTS ix_chunks_embedding ON chunks USING hnsw (embedding vector_cosine_ops)")
             )
             await session.commit()
-            print(f"NOW also set EMBEDDING_PROFILE={args.profile} (the ORM reads the width from .env).")
-        print(f"NOW set EMBEDDING_MODEL={args.model} and EMBEDDING_DIM={args.dim} in .env,")
-        print("then: docker compose build backend worker")
-        print("      docker compose up -d --force-recreate --no-deps backend worker")
+        if args.profile:
+            print(f"NOW set EMBEDDING_PROFILE={args.profile} in .env, then restart backend and worker.")
+        else:
+            print(f"NOW set EMBEDDING_MODEL={args.model} and EMBEDDING_DIM={args.dim} in .env, then restart backend and worker.")
 
     await engine.dispose()
     return 0

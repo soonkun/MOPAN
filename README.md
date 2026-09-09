@@ -270,6 +270,44 @@ docs/             설계 문서와 화면 기록
 포맷 하나를 더 붙이는 일은 `app/rag/parsers/__init__.py`의 딕셔너리 한 줄과
 `app/documents/validation.py`의 허용 목록 항목이 전부입니다.
 
+### 임베딩 모델은 네 가지 프로필 중 하나를 고릅니다
+
+`EMBEDDING_PROFILE` 한 줄이 제공자·모델·차원을 정하고, 고급 설정 > 문서 분할 카드에 네
+프로필이 순위와 배지(로컬 GPU / API 비용 발생 / 문서 외부 전송 / 비중국)와 함께 보입니다.
+기본 권장은 1순위 qwen3입니다 — 같은 코퍼스에서 OpenAI 3-large보다 앵커 적중이 높았고
+(0.759 대 0.713, 87문항) 문서가 서버 밖으로 나가지 않으며 토큰 비용이 0입니다. 로컬
+프로필은 미리 받아 두지 않고 처음 고른 순간 Ollama가 내려받습니다.
+
+| 순위 | 프로필 | 모델 | 차원 | 어디서 | 비고 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `qwen3` | qwen3-embedding:8b | 1536 (MRL 축소) | 로컬 GPU | 한국어 검색 실측 1위, GGUF 가중치만 있어 코드 실행 없음 |
+| 2 | `openai` | text-embedding-3-large | 1536 | OpenAI API | 토큰 비용 발생, 문서가 외부로 전송됨 |
+| 3 | `bge-m3` | bge-m3 | 1024 | 로컬 GPU | 컬럼 폭 변경 동반 |
+| 4 | `arctic` | snowflake-arctic-embed2 | 1024 | 로컬 GPU | 비중국 모델이 필요할 때 |
+
+재순위기(`RERANK_MODEL`)와 키워드 검색(Postgres 전문 검색)은 프로필과 무관하게 같은 방식으로
+붙습니다 — 프로필은 덴스 갈래만 바꿉니다. 전체 재임베딩은 11,326 청크 기준 로컬 GPU에서
+약 9분이며, 절차는 [설정](#설정)의 경고 상자에 있습니다.
+
+### 로컬 GPU 모델, 딥 리서치, 폴더형 문서 관리, 감시 폴더
+
+2026-09-08~09에 들어온 것들입니다. 상세 설계는 `docs/superpowers/plans/2026-09-08-*.md`에,
+운영 메모는 [docs/이어받기.md](docs/이어받기.md)에 있습니다.
+
+- **모델 관리**: `LOCAL_LLM_BASE_URL`에 Ollama를 두면 그곳의 모델이 답변 모델 목록에
+  자동으로 올라옵니다. 관리자는 설정 > 모델에서 사용자에게 보일 모델을 토글로 정하고
+  기본 모델을 지정합니다. GPT-5 계열은 추론 깊이 4단(none/low/medium/high)을 모델 아래에서
+  고릅니다.
+- **딥 리서치**: 입력창의 망원경 아이콘. 계획 → 수집 → 공백 점검 → 종합을 백그라운드
+  작업으로 돌리고 단계별 진행과 실제 인용된 출처만 보여 줍니다.
+- **문서 탐색기**: 폴더 안에 폴더, 문서 버전(개정본 올리면 이전 판은 보존되고 검색은
+  현행본만), 동일 파일 재업로드 차단(sha256), 오래된 문서 표시(`DOCUMENT_STALE_DAYS`).
+  질문 시 폴더를 골라 범위를 좁힐 수 있습니다.
+- **감시 폴더**: `INGEST_WATCH_DIR`에 파일을 넣어 두면 워커가 주기적으로(기본 2분) 새
+  파일과 바뀐 파일을 찾아 색인합니다. 하위 폴더는 그대로 폴더 트리가 됩니다.
+- **PDF OCR 폴백**: 글자를 뽑을 수 없는 PDF(폰트 매핑 깨짐, 스캔본)는 tesseract(kor)로
+  넘어갑니다. OCR은 서버 CPU에서 돌고 토큰을 쓰지 않습니다.
+
 ### 기본 설치에서는 잠들어 있는 것
 
 **문서 구조 인식**(`self_contained` / `reference_dependent` 판정), **조상 맥락을 앞에 붙이는
@@ -300,7 +338,9 @@ docs/             설계 문서와 화면 기록
 | `REDIS_URL` | `redis://127.0.0.1:6379/0` | 세션과 작업 큐 |
 | `SESSION_TTL_SECONDS` | `86400` | Redis 세션 |
 | `ANSWER_MODEL` / `ANSWER_MODELS` | `gpt-4o` / 빈 목록 | 뒤쪽은 사용자가 고를 수 있는 모델 허용 목록. 비우면 기본값 하나만 |
-| `EMBEDDING_MODEL` / `EMBEDDING_DIM` | `text-embedding-3-small` / `1536` | **아래 경고를 보십시오** |
+| `EMBEDDING_PROFILE` | 빈 값 | `qwen3` / `openai` / `bge-m3` / `arctic`. 지정하면 `EMBEDDING_PROVIDER`·`EMBEDDING_MODEL`·`EMBEDDING_DIM`을 한 번에 정합니다. **바꾸는 절차는 아래** |
+| `EMBEDDING_MODEL` / `EMBEDDING_DIM` | `text-embedding-3-small` / `1536` | 프로필을 쓰지 않을 때만 직접 지정 |
+| `LOCAL_LLM_BASE_URL` | 빈 값 | Ollama의 OpenAI 호환 주소(`http://127.0.0.1:11434/v1`). 로컬 답변 모델과 로컬 임베딩이 이 주소를 씁니다 |
 | `CHUNKING_STRATEGY` | `semantic` | `semantic`(구조 + 임베딩 병합) 또는 `fixed`(문자 창) |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `150` | 문자 단위. `0 <= overlap < size` |
 | `RETRIEVAL_TOP_N` | `6` | 프롬프트까지 가는 청크 수 |
@@ -322,10 +362,19 @@ MCP·워크플로우·첨부 관련 한도(`MCP_*`, `WORKFLOW_MAX_*`, `ORCHESTRA
 `docker-compose.yml`이 `DATABASE_URL`·`REDIS_URL`·`UPLOAD_DIR`을 서비스마다 컨테이너
 호스트명으로 덮어쓰므로, Docker로 돌릴 때 이 셋은 건드리지 않습니다.
 
-> **`EMBEDDING_MODEL`이나 `EMBEDDING_DIM`을 바꾸려면 `chunks.embedding` 컬럼 폭을 바꾸는
-> 새 Alembic 마이그레이션과 전체 문서 재색인이 함께 필요합니다.** 기존 벡터는 변환되지
-> 않습니다. `EMBEDDING_DIM`이 컬럼과 어긋나면 앱이 부팅을 거부합니다 — 조용한 검색 실패를
-> 요란한 부팅 실패로 바꾸려는 것입니다.
+> **임베딩 모델을 바꾸면 기존 벡터는 전부 무효입니다.** 다른 모델의 벡터는 같은 공간에
+> 있지 않으므로 변환이 아니라 재계산이 필요합니다. 절차는 세 줄입니다.
+>
+> ```
+> PYTHONPATH=backend .venv/bin/python scripts/reembed.py --profile bge-m3          # 비용·소요 추정(쓰지 않음)
+> PYTHONPATH=backend .venv/bin/python scripts/reembed.py --profile bge-m3 --apply  # 전부 다시 임베딩
+> # .env 의 EMBEDDING_PROFILE=bge-m3 로 바꾸고 backend·worker 재시작
+> ```
+>
+> 차원이 다른 프로필(1024)로 가면 스크립트가 `chunks.embedding` 컬럼 폭과 HNSW 인덱스를
+> 함께 바꿉니다. 로컬 프로필의 모델이 Ollama에 없으면 스크립트와 앱 기동이 알아서
+> 내려받습니다(4~5 GB, 한 번). `EMBEDDING_DIM`이 컬럼과 어긋나면 앱이 부팅을 거부합니다 —
+> 조용한 검색 실패를 요란한 부팅 실패로 바꾸려는 것입니다.
 
 **`localhost`가 아니라 `127.0.0.1`인 이유:** Compose는 Postgres와 Redis를 IPv4로만
 공개하는데 Windows에서 `localhost`는 `::1`을 먼저 찾습니다. 그래서 연결마다 실패한 IPv6
