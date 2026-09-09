@@ -52,6 +52,15 @@ export default function DocumentsPage() {
   const [moveOpen, setMoveOpen] = useState(false);
   const [treeOpen, setTreeOpen] = useState(false);
   useBodyScrollLock(treeOpen || moveOpen);
+  // 모바일 폴더 시트는 제목 줄 바로 아래까지 올라온다. 제목은 페이지와 함께 스크롤되므로
+  // 여는 순간의 위치를 재서 시트의 top으로 쓴다(body 잠금으로 열린 동안은 움직이지 않음).
+  const headerRef = useRef<HTMLDivElement>(null);
+  const [sheetTop, setSheetTop] = useState(0);
+  const openTree = () => {
+    const bottom = headerRef.current?.getBoundingClientRect().bottom ?? 0;
+    setSheetTop(Math.max(8, Math.round(bottom)));
+    setTreeOpen(true);
+  };
   const [folderDialog, setFolderDialog] = useState<{ mode: "new" | "rename"; collectionId: string; parentId: string | null; folder?: Folder } | null>(null);
   const [folderName, setFolderName] = useState("");
   const [deleteFolder, setDeleteFolder] = useState<Folder | null>(null);
@@ -232,9 +241,9 @@ export default function DocumentsPage() {
 
   return (
     <PageShell>
-      <div className="flex flex-wrap items-center gap-2">
+      <div ref={headerRef} className="flex flex-wrap items-center gap-2">
         <h1 className="flex-1 text-center text-headline font-medium md:flex-none md:text-left">문서</h1>
-        <button type="button" onClick={() => setTreeOpen(true)} className="btn-tonal btn-compact md:hidden">
+        <button type="button" onClick={openTree} className="btn-tonal btn-compact md:hidden">
           폴더
         </button>
       </div>
@@ -353,8 +362,8 @@ export default function DocumentsPage() {
       {/* 모바일 폴더 시트 */}
       {treeOpen && (
         <div className="fixed inset-0 z-30 md:hidden" role="dialog" aria-label="폴더">
-          <button type="button" aria-label="닫기" onClick={() => setTreeOpen(false)} className="absolute inset-0 bg-black/40" />
-          <div className="absolute inset-x-0 bottom-0 flex h-[60dvh] flex-col rounded-t-lg bg-surface p-4 pb-8">
+          <button type="button" aria-label="닫기" onClick={() => setTreeOpen(false)} className="motion-scrim absolute inset-0 bg-black/40" />
+          <div style={{ top: sheetTop }} className="motion-bottom-sheet absolute inset-x-0 bottom-0 flex flex-col rounded-t-lg bg-surface p-4 pb-8 shadow-lg">
             <div className="mb-2 flex shrink-0 items-center justify-between">
               <span className="text-title font-medium">폴더</span>
               <button type="button" onClick={() => setTreeOpen(false)} className="btn-text btn-compact">닫기</button>
