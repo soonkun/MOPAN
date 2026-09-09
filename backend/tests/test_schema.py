@@ -111,6 +111,8 @@ NULLABLE_FK_EXCEPTIONS = {
     # 폴더 트리(0020): 루트 폴더의 parent_id, 컬렉션 루트에 있는 문서의 folder_id는 NULL이 곧 뜻이다.
     ("folders", "parent_id"),
     ("documents", "folder_id"),
+    # 감시 폴더 장부(0022): 중복·미지원 파일은 문서가 없고, 문서가 지워지면 SET NULL로 남는다.
+    ("ingest_files", "document_id"),
 }
 
 

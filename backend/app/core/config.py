@@ -104,6 +104,10 @@ class Settings(BaseSettings):
     # behaviour.
     answer_models: list[str] = []
     embedding_model: str = "text-embedding-3-small"
+    # openai | local. local이면 LOCAL_LLM_BASE_URL(Ollama /v1)의 임베딩을 쓴다(2026-09-09 실측:
+    # qwen3-embedding:8b, dimensions=1536 축소 지원, 초당 21청크, 한국어 분별력 bge-m3보다 뚜렷).
+    # EMBEDDING_MODEL·DIM과 같은 이유로 env 전용 - 바꾸면 scripts/reembed.py로 전체 재임베딩.
+    embedding_provider: Literal["openai", "local"] = "openai"
     embedding_dim: int = 1536
     embedding_batch_size: int = 128
     embedding_batch_chars: int = 200_000
@@ -256,6 +260,14 @@ class Settings(BaseSettings):
     # steps에 적는다 - "읽지 않은 것은 출처가 아니다".
     research_evidence_token_budget: int = 60_000
     research_max_concurrent: int = 2
+    # 감시 폴더 색인(2026-09-09): 이 디렉터리(하위 포함)의 문서 파일을 주기적으로 훑어 등록·색인한다.
+    # 대용량을 터널(trycloudflare) 업로드로 넣을 수 없어서 - 서버 파일시스템에 두면 워커가 읽는다.
+    # 파일은 복사하지 않고 원본 경로를 storage_path로 참조한다. 비면 꺼짐.
+    ingest_watch_dir: str = ""
+    # 그 파일들이 들어갈 분류 이름(없으면 만든다). 하위 디렉터리는 그 분류의 폴더 트리로 비춘다.
+    ingest_watch_collection: str = "감시 폴더"
+    # 스캔 주기(분). 0이면 자동 스캔 없음(관리자 화면의 '지금 스캔'만).
+    ingest_scan_interval_minutes: int = 2
     # 문서 관리(계획 4단계): 시행일(없으면 등록일)이 이 일수보다 오래된 현행 문서를 "점검 필요"로 표시한다.
     # 규정은 개정 주기가 있어 오래된 현행본은 현행화 여부를 사람이 확인해야 한다. 기본 3년.
     document_stale_days: int = 1095

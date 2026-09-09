@@ -55,6 +55,7 @@ class OpenAIProvider(LLMProvider):
         embedding_dim: int | None = None,
         local_base_url: str = "",
         local_api_key: str = "ollama",
+        embedding_provider: str = "openai",
     ):
         # Both are admin-configurable, so an invalid value is reachable from
         # configuration. Unvalidated, batch_size <= 0 degrades to one request per
@@ -81,6 +82,10 @@ class OpenAIProvider(LLMProvider):
         )
         self.local_model_names: set[str] = set()
         self.reasoning_model_names: set[str] | None = None
+        # 임베딩을 어느 클라이언트로 보내는가. local이면 Ollama /v1/embeddings(dimensions 지원).
+        if embedding_provider == "local" and self.local_client is None:
+            raise ValueError("EMBEDDING_PROVIDER=local requires LOCAL_LLM_BASE_URL")
+        self.embedding_provider = embedding_provider
         self.embedding_model = embedding_model
         self.answer_model = answer_model
         self.batch_size = batch_size
@@ -170,12 +175,16 @@ class OpenAIProvider(LLMProvider):
             # would return 1536-wide vectors that happen to match EMBEDDING_DIM
             # while being a different model's - which the width check below
             # cannot catch.
+            # 로컬(Ollama)도 받는다: qwen3-embedding 같은 MRL 모델은 dimensions로 축소된 벡터를 낸다
+            # (실측 2026-09-09: 8b 기본 4096 → 1536). 안 받는 모델이면 폭 검사가 잡는다.
+            local = self.embedding_provider == "local"
             extra = (
                 {"dimensions": self.embedding_dim}
                 if self.embedding_dim is not None
-                and self.embedding_model.startswith("text-embedding-3-")
+                and (local or self.embedding_model.startswith("text-embedding-3-"))
                 else {}
             )
+            embed_client = self.local_client if local else self.client
             for batch in self._batches(texts):
                 # 분당 토큰 한도(429)는 오류가 아니라 큰 표를 올린 날의 정상
                 # 상태다 - 창은 길어야 60초면 되살아난다. SDK 내부 재시도
@@ -185,7 +194,7 @@ class OpenAIProvider(LLMProvider):
                 # 실패한다 - 인내는 한도에만, 장애에는 아니다.
                 for attempt in range(_RATE_LIMIT_TRIES):
                     try:
-                        response = await self.client.embeddings.create(
+                        response = await embed_client.embeddings.create(
                             model=self.embedding_model, input=batch, **extra
                         )
                         break

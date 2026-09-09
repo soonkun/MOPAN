@@ -6,6 +6,7 @@ import { apiFetch, errorMessage } from "@/lib/api";
 import PageShell from "@/components/layout/PageShell";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import BrandingSection from "@/components/settings/BrandingSection";
+import IngestSection from "@/components/settings/IngestSection";
 import ModelsSection from "@/components/settings/ModelsSection";
 import type { RuntimeSetting, SettingsPayload } from "@/lib/types";
 
@@ -268,6 +269,7 @@ export default function SettingsPage() {
                   and a button, and one column left two thirds of every card empty
                   on a wide screen. items-start so an error banner does not stretch
                   the neighbour. */}
+              {current.id === "documents" && <IngestSection />}
               <div className="grid gap-3 2xl:grid-cols-2 2xl:items-start">
                 {rows.map((setting) => (
                   <SettingRow key={setting.key} setting={setting} onSaved={load} />

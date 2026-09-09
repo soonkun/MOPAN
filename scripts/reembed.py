@@ -50,6 +50,8 @@ async def main() -> int:
     parser.add_argument("--dim", type=int, required=True)
     parser.add_argument("--batch", type=int, default=256)
     parser.add_argument("--apply", action="store_true", help="actually write")
+
+    parser.add_argument("--local", action="store_true", help="LOCAL_LLM_BASE_URL(Ollama)의 임베딩 모델로 (예: qwen3-embedding:8b)")
     args = parser.parse_args()
 
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -88,9 +90,12 @@ async def main() -> int:
             settings.openai_api_key,
             args.model,
             settings.answer_model,
-            timeout=settings.llm_timeout_seconds,
+            timeout=max(settings.llm_timeout_seconds, 300.0) if args.local else settings.llm_timeout_seconds,
             max_retries=settings.llm_max_retries,
             embedding_dim=args.dim,
+            local_base_url=settings.local_llm_base_url if args.local else "",
+            local_api_key=settings.local_llm_api_key,
+            embedding_provider="local" if args.local else "openai",
         )
 
         started = time.perf_counter()

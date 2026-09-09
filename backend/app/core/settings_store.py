@@ -300,6 +300,25 @@ ENV_ONLY_SETTINGS: list[EnvOnlySetting] = [
         ),
     ),
     EnvOnlySetting(
+        key="EMBEDDING_PROVIDER",
+        label="임베딩 제공자",
+        reason=(
+            "openai / local 중 하나이며 EMBEDDING_MODEL과 한 몸입니다. 바꾸면 저장된 모든 임베딩이 다른 공간에 놓여 "
+            "검색이 조용히 무의미해지므로 scripts/reembed.py로 전체 재임베딩한 뒤 환경변수로 바꿉니다. "
+            "local은 서버 GPU의 Ollama 임베딩 모델(qwen3-embedding:8b, 1536차원 축소)을 씁니다."
+        ),
+        group=CHUNKING,
+    ),
+    EnvOnlySetting(
+        key="INGEST_WATCH_DIR",
+        label="감시 폴더",
+        reason=(
+            "서버 파일시스템 경로라 화면에서 다룰 값이 아닙니다. 이 디렉터리의 문서를 주기적으로 훑어 등록·색인하며 "
+            "하위 디렉터리는 분류의 폴더 트리로 비춥니다. 상태와 '지금 스캔'은 이 카테고리 위의 카드에 있습니다."
+        ),
+        group="documents",
+    ),
+    EnvOnlySetting(
         key="EMBEDDING_DIM",
         label="임베딩 차원",
         group=CHUNKING,

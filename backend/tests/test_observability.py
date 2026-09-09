@@ -428,6 +428,8 @@ async def test_the_api_key_can_be_neither_read_nor_written(owner, db, app):
         assert app.state.settings.openai_api_key not in serialised
     assert {item["key"] for item in body["env_only"]} == {
         "EMBEDDING_MODEL",
+        "EMBEDDING_PROVIDER",
+        "INGEST_WATCH_DIR",
         "EMBEDDING_DIM",
         # off/targeted/blanket - a choice, not a number, so it has no editable
         # spec and appears here instead. See app/core/settings_store.py.

@@ -2,7 +2,7 @@ import asyncio
 import logging
 import uuid
 
-from arq import func
+from arq import cron, func
 
 from arq.connections import RedisSettings
 from sqlalchemy import select
@@ -50,6 +50,7 @@ async def startup(ctx: dict) -> None:
         embedding_dim=settings.embedding_dim,
         local_base_url=settings.local_llm_base_url,
         local_api_key=settings.local_llm_api_key,
+        embedding_provider=settings.embedding_provider,
     )
 
 
@@ -191,9 +192,39 @@ async def run_research(ctx: dict, run_id: str) -> None:
 RESEARCH_TIMEOUT = 1800
 
 
+async def scan_watch_dir_job(ctx: dict) -> dict:
+    """감시 폴더 스캔(app/documents/watch.py). 크론과 관리자 '지금 스캔'이 같은 함수를 부른다."""
+    from app.documents.service import enqueue_document_processing, make_arq_pool
+    from app.documents.watch import scan_watch_dir
+
+    settings = ctx["settings"]
+    if not settings.ingest_watch_dir:
+        return {"skipped": "INGEST_WATCH_DIR not set"}
+    pool = await make_arq_pool(settings)
+    try:
+        async with ctx["sessionmaker"]() as db:
+            return await scan_watch_dir(db, settings, lambda did: enqueue_document_processing(pool, did))
+    finally:
+        await pool.aclose()
+
+
+def _watch_cron():
+    """INGEST_SCAN_INTERVAL_MINUTES마다. 0이면 크론 없음. arq cron은 분 집합으로 받는다."""
+    settings = get_settings()
+    if not settings.ingest_watch_dir or settings.ingest_scan_interval_minutes <= 0:
+        return []
+    step = max(1, min(settings.ingest_scan_interval_minutes, 60))
+    return [cron(scan_watch_dir_job, name="scan_watch_dir", minute=set(range(0, 60, step)), run_at_startup=True, timeout=1800, max_tries=1)]
+
+
 class WorkerSettings:
     # 리서치는 문서 파이프라인보다 오래 걸리고, 실패해도 다시 돌리면 안 된다(비용) - 별도 func 설정.
-    functions = [process_document, func(run_research, timeout=RESEARCH_TIMEOUT, max_tries=1)]
+    functions = [
+        process_document,
+        func(run_research, timeout=RESEARCH_TIMEOUT, max_tries=1),
+        func(scan_watch_dir_job, name="scan_watch_dir", timeout=1800, max_tries=1),
+    ]
+    cron_jobs = _watch_cron()
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)

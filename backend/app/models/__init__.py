@@ -9,6 +9,7 @@ from app.models.conversation import Conversation
 from app.models.document import DOCUMENT_STATUSES, TERMINAL_STATUSES, Document
 from app.models.feedback import FEEDBACK_RATINGS, MessageFeedback
 from app.models.folder import MAX_FOLDER_DEPTH, Folder
+from app.models.ingest_file import INGEST_STATUSES, IngestFile
 from app.models.llm_model import MODEL_PROVIDERS, LlmModel
 from app.models.mcp import (
     DEFAULT_RISK_LEVEL,
@@ -37,6 +38,7 @@ from app.models.workflow import (
 )
 
 __all__ = [
+    "IngestFile",
     "Folder",
     "ResearchProject",
     "ResearchInstruction",

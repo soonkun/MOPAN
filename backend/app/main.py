@@ -57,6 +57,7 @@ async def lifespan(app: FastAPI):
         embedding_dim=settings.embedding_dim,
         local_base_url=settings.local_llm_base_url,
         local_api_key=settings.local_llm_api_key,
+        embedding_provider=settings.embedding_provider,
     )
     # 동봉 MCP 자동 등록. 실패해도 기동은 계속된다(seed 안에서 삼킨다).
     from app.llm.catalog import discover_local_models, load_catalog
@@ -146,6 +147,7 @@ def create_app() -> FastAPI:
     from app.research.router import router as research_router
     from app.documents.folders import router as folders_router
     from app.documents.versions import router as versions_router
+    from app.documents.ingest_router import router as ingest_router
     from app.observability.router import router as observability_router
     from app.prompts.router import router as prompts_router
     from app.users.router import router as users_router
@@ -158,6 +160,7 @@ def create_app() -> FastAPI:
     # documents_router보다 먼저: /documents/search가 /documents/{document_id}에 UUID로 잡히지 않게.
     app.include_router(folders_router)
     app.include_router(versions_router)
+    app.include_router(ingest_router)
     app.include_router(documents_router)
     app.include_router(mcp_router)
     app.include_router(models_router)
