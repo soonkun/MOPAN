@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { apiFetch, errorMessage } from "@/lib/api";
 import PageShell from "@/components/layout/PageShell";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import type { ResearchProject, User } from "@/lib/types";
 
@@ -13,6 +14,9 @@ export default function ResearchPage() {
   const [projects, setProjects] = useState<ResearchProject[] | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // 카드마다 ⋮ 메뉴 → 삭제(확인 창). 사이드바의 대화 메뉴와 같은 모양·같은 절차.
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ResearchProject | null>(null);
 
   useEffect(() => {
     apiFetch<ResearchProject[]>("/api/research/projects").then(setProjects).catch((err) => setLoadError(errorMessage(err)));
@@ -48,11 +52,8 @@ export default function ResearchPage() {
       ) : (
         <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {projects.map((p) => (
-            <li key={p.id}>
-              <Link
-                href={`/research/${p.id}`}
-                className="block h-full rounded-md bg-surface-container-low p-4 transition-colors duration-150 hover:bg-surface-container"
-              >
+            <li key={p.id} className="relative flex h-full flex-col rounded-md bg-surface-container-low transition-colors duration-150 hover:bg-surface-container">
+              <Link href={`/research/${p.id}`} className="block flex-1 p-4 pr-12">
                 <h2 className="text-title font-medium text-on-surface">{p.name}</h2>
                 {p.description && <p className="mt-1 text-body text-on-surface-variant">{p.description}</p>}
                 <p className="mt-3 text-caption text-on-surface-variant">
@@ -62,9 +63,60 @@ export default function ResearchPage() {
                   {p.collection_ids.length > 0 ? ` · 분류 ${p.collection_ids.length}개` : " · 전체 분류"}
                 </p>
               </Link>
+              {isAdmin && (
+                <>
+                  <button
+                    type="button"
+                    aria-label={`방 메뉴: ${p.name}`}
+                    aria-expanded={menuFor === p.id}
+                    onClick={() => setMenuFor(menuFor === p.id ? null : p.id)}
+                    className="absolute right-2 top-3 flex h-8 w-8 items-center justify-center rounded-full text-on-surface-variant transition-colors duration-150 hover:bg-surface-container-highest"
+                  >
+                    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
+                      <circle cx="12" cy="5" r="1.6" />
+                      <circle cx="12" cy="12" r="1.6" />
+                      <circle cx="12" cy="19" r="1.6" />
+                    </svg>
+                  </button>
+                  {menuFor === p.id && (
+                    <div className="mx-3 mb-3 flex flex-col rounded-md bg-surface-container py-1">
+                      <Link
+                        href={`/research/${p.id}`}
+                        onClick={() => setMenuFor(null)}
+                        className="px-4 py-2 text-left text-label text-on-surface transition-colors duration-150 hover:bg-surface-container-high"
+                      >
+                        열기 · 지침 수정
+                      </Link>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMenuFor(null);
+                          setDeleteTarget(p);
+                        }}
+                        className="px-4 py-2 text-left text-label text-error transition-colors duration-150 hover:bg-surface-container-high"
+                      >
+                        삭제
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
             </li>
           ))}
         </ul>
+      )}
+      {deleteTarget && (
+        <ConfirmDialog
+          title="방 삭제"
+          message={`'${deleteTarget.name}' 방을 지웁니다. 지침 이력과 실행 ${deleteTarget.run_count}회의 보고서가 함께 사라지고 되돌릴 수 없습니다.`}
+          confirmLabel="삭제"
+          onConfirm={async () => {
+            await apiFetch(`/api/research/projects/${deleteTarget.id}`, { method: "DELETE" });
+            setProjects((prev) => prev?.filter((x) => x.id !== deleteTarget.id) ?? prev);
+            setDeleteTarget(null);
+          }}
+          onClose={() => setDeleteTarget(null)}
+        />
       )}
     </PageShell>
   );
