@@ -206,6 +206,9 @@ export default function SettingsPage() {
   function choose(id: string) {
     setActive(id);
     window.history.replaceState(null, "", `#${id}`);
+    // 선택지가 다른 카테고리에서 바뀐다 - 모델 관리에서 켠 모델이 의도 분류기 목록에
+    // 나와야 한다. 한 번 받은 payload를 들고 있지 말고 카테고리를 옮길 때 다시 받는다.
+    void load();
   }
 
   // API가 아는 group 중 CATEGORIES에 없는 것은 키 그대로 뒤에 붙인다.
