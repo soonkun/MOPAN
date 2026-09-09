@@ -46,8 +46,9 @@ PRICES = {"text-embedding-3-small": 0.02, "text-embedding-3-large": 0.13}
 
 async def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--dim", type=int, required=True)
+    parser.add_argument("--profile", help="임베딩 프로필 키(qwen3/openai/bge-m3/arctic) - 지정 시 --model/--dim/--local 자동")
+    parser.add_argument("--model")
+    parser.add_argument("--dim", type=int)
     parser.add_argument("--batch", type=int, default=256)
     parser.add_argument("--apply", action="store_true", help="actually write")
 
