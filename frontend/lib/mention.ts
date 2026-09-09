@@ -58,11 +58,8 @@ export function mentionAt(
 
 /** `GET /api/tools` into rows this composer can actually act on.
  *
- * The `rag` entry arrives as ONE row carrying the deployment's collections, and
- * is expanded here into one row per collection: "부를 수 있는 것" for retrieval is
- * a corpus, not the search function. A deployment with no collections still gets
- * the single unscoped row, because searching everything is a real thing to ask
- * for.
+ * The `rag` entry is skipped: retrieval runs on every question, so it is not a
+ * thing to "call". Only MCP servers and workflows are offered.
  *
  * A workflow or an MCP row whose id this client does not hold is DROPPED rather
  * than shown: `/api/tools` and the two id-carrying lists are fetched separately,
@@ -78,42 +75,10 @@ export function mentionEntries(
   const entries: MentionEntry[] = [];
   for (const callable of callables) {
     if (callable.kind === "rag") {
-      if (callable.collections.length === 0) {
-        entries.push({
-          key: "rag",
-          kind: "rag",
-          name: callable.name,
-          description: callable.description,
-          riskLevel: callable.risk_level,
-          ref: callable.ref,
-        });
-        continue;
-      }
-      for (const collection of callable.collections) {
-        entries.push({
-          key: `rag:${collection.id}`,
-          kind: "rag",
-          name: collection.name,
-          description: "이 분류 안에서만 근거를 찾습니다.",
-          riskLevel: callable.risk_level,
-          ref: callable.ref,
-          collectionId: collection.id,
-        });
-        // 폴더 항목(계획 3단계): "분류 / 폴더 경로". 입력한 글자로 걸러지므로 폴더가 많아도 된다.
-        for (const folder of collection.folders ?? []) {
-          entries.push({
-            key: `rag:${collection.id}:${folder.id}`,
-            kind: "rag",
-            name: `${collection.name} / ${folder.path_label}`,
-            description: "이 폴더(하위 폴더 포함) 안에서만 근거를 찾습니다.",
-            riskLevel: callable.risk_level,
-            ref: callable.ref,
-            collectionId: collection.id,
-            folderId: folder.id,
-            folderLabel: folder.path_label,
-          });
-        }
-      }
+      // 문서 검색은 @로 부르는 대상이 아니다 - 모든 질문이 기본으로 타는 전역 단계다(소유자 결정
+      // 2026-09-09). 분류·폴더 범위는 문서 화면과 + 메뉴가 맡는다. 여기서는 도구(MCP 서버)와
+      // 워크플로우만 보인다.
+      continue;
     } else if (callable.kind === "mcp") {
       // 서버 단위 한 줄로 접는다. 도구별 행("생활정보/current_weather" 셋)은
       // 사용자에게 서버 내부 구조를 외우라는 요구였고, + 메뉴에서 이미 기각된

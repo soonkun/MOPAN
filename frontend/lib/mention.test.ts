@@ -6,8 +6,8 @@
 //
 // What it covers is the part of `@` that has rules rather than markup: where a
 // token starts and ends - the email case is a real question a user types - and
-// the expansion of ONE `rag` entry into one row per collection, which is the
-// only place the menu invents rows the API did not send.
+// which callables become rows: MCP servers collapse to one row each, workflows
+// need an id this client holds, and the rag entry is left out on purpose.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -41,20 +41,9 @@ const RAG = {
   ],
 };
 
-test("the one rag entry becomes one row per collection", () => {
-  const rows = mentionEntries([RAG], [], []);
-  assert.deepEqual(
-    rows.map((r) => [r.name, r.collectionId, r.ref]),
-    [
-      ["비료", "c1", "rag"],
-      ["농약", "c2", "rag"],
-    ],
-  );
-});
-
-test("a deployment with no collections still offers the unscoped search", () => {
-  const rows = mentionEntries([{ ...RAG, collections: [] }], [], []);
-  assert.deepEqual(rows.map((r) => [r.name, r.collectionId]), [["문서 검색", undefined]]);
+test("the rag entry is not offered - retrieval is global, not a thing to @", () => {
+  assert.deepEqual(mentionEntries([RAG], [], []), []);
+  assert.deepEqual(mentionEntries([{ ...RAG, collections: [] }], [], []), []);
 });
 
 test("a row whose id this client does not hold is dropped, not shown", () => {
@@ -125,9 +114,25 @@ test("two tools on one server collapse into one @ row", () => {
 });
 
 test("the query filters by name, not by description", () => {
-  const rows = mentionEntries([RAG], [], []);
-  assert.deepEqual(filterEntries(rows, "농").map((r) => r.name), ["농약"]);
-  // The description of every rag row contains 근거; no row matches on it.
+  const callables = ["농약정보", "생활정보"].map((name) => ({
+    kind: "mcp" as const,
+    ref: `mcp:${name}/lookup`,
+    name: `${name}/lookup`,
+    description: "근거를 찾습니다.",
+    risk_level: "read" as const,
+    collections: [],
+  }));
+  const tools = ["농약정보", "생활정보"].map((server, i) => ({
+    id: `t${i}`,
+    server_name: server,
+    name: "lookup",
+    description: "근거를 찾습니다.",
+    risk_level: "read" as const,
+    input_schema: {},
+  }));
+  const rows = mentionEntries(callables, [], tools);
+  assert.deepEqual(filterEntries(rows, "농").map((r) => r.name), ["농약정보"]);
+  // Every description contains 근거; no row matches on it.
   assert.deepEqual(filterEntries(rows, "근거"), []);
   assert.equal(filterEntries(rows, "  ").length, 2);
 });
