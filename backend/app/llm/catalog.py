@@ -176,3 +176,40 @@ async def discover_local_models(db: AsyncSession, settings: Settings, *, timeout
         await db.commit()
         logger.info("discovered %d local models: %s", len(added), ", ".join(added))
     return added
+
+
+def ollama_root(base_url: str) -> str:
+    """OpenAI 호환 주소(…/v1)에서 Ollama 고유 API의 루트를 얻는다."""
+    root = base_url.rstrip("/")
+    return root[: -len("/v1")] if root.endswith("/v1") else root
+
+
+async def pin_local_models(base_url: str, chat_models: list[str], embedding_model: str | None) -> list[str]:
+    """켜 둔 로컬 모델을 GPU에 올리고 내려가지 않게 한다(keep_alive=-1).
+
+    Ollama는 5분 동안 요청이 없으면 모델을 내린다. 실사고(2026-09-09 21:29): 세 모델이 전부
+    내려간 상태에서 "안녕?"이 들어오자 의도 분류기(gemma4:e4b)의 콜드 로드가 8초 게이트를 넘겨
+    search로 강등되고, 답변 모델(26b)도 6초를 더 로드한 뒤 인사말에 RAG를 돌렸다. 메모리는
+    넉넉하므로(B200 183GB×2) 켜 둔 모델은 상주시킨다. 절대 raise하지 않는다 - 로컬 서버가
+    없으면 기동은 그대로 계속된다. 돌아오는 값은 로그용(고정된 모델 이름들)."""
+    root = ollama_root(base_url)
+    if not root:
+        return []
+    pinned: list[str] = []
+    # 로드 자체가 모델당 수 초라 timeout은 넉넉히. 하나 실패해도 다음 모델은 시도한다.
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        for name in chat_models:
+            try:
+                (await client.post(f"{root}/api/generate", json={"model": name, "keep_alive": -1})).raise_for_status()
+                pinned.append(name)
+            except Exception:
+                logger.warning("could not pin local model %s", name, exc_info=True)
+        if embedding_model:
+            try:
+                (await client.post(f"{root}/api/embed", json={"model": embedding_model, "input": [], "keep_alive": -1})).raise_for_status()
+                pinned.append(embedding_model)
+            except Exception:
+                logger.warning("could not pin embedding model %s", embedding_model, exc_info=True)
+    if pinned:
+        logger.info("pinned local models on GPU (keep_alive=-1): %s", ", ".join(pinned))
+    return pinned

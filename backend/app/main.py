@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -60,18 +61,29 @@ async def lifespan(app: FastAPI):
         embedding_provider=settings.embedding_provider,
     )
     # 동봉 MCP 자동 등록. 실패해도 기동은 계속된다(seed 안에서 삼킨다).
-    from app.llm.catalog import discover_local_models, load_catalog
+    from app.llm.catalog import discover_local_models, load_catalog, pin_local_models
     from app.mcp.seed import seed_bundled_servers
 
     async with app.state.sessionmaker() as session:
         await seed_bundled_servers(session, settings)
         # 로컬 GPU 모델 발견(실패해도 부팅은 산다) + 프로바이더 라우팅 정보(app/llm/catalog.py).
         await discover_local_models(session, settings)
-        (await load_catalog(session, settings)).apply_to_provider(app.state.llm_provider)
+        catalog = await load_catalog(session, settings)
+        catalog.apply_to_provider(app.state.llm_provider)
     if settings.embedding_provider == "local":
         # 선택된 프로필의 모델만 내려받는다(쓰지 않을 모델을 배포마다 심지 않는다).
         from app.llm.embedding_profiles import ensure_local_embedding_model
         logger.info("embedding model %s: %s", settings.embedding_model, await ensure_local_embedding_model(settings.local_llm_base_url, settings.embedding_model))
+    if settings.local_llm_base_url:
+        # 켜 둔 로컬 모델을 GPU에 상주시킨다(pin_local_models 주석 참조). 로드는 수십 초가 걸릴 수
+        # 있어 기동을 막지 않고 뒤에서 돈다. 요청은 그 사이에도 받는다(첫 요청이 로드를 기다릴 뿐).
+        app.state.pin_task = asyncio.create_task(
+            pin_local_models(
+                settings.local_llm_base_url,
+                [m.id for m in catalog.enabled if m.provider == "local"],
+                settings.embedding_model if settings.embedding_provider == "local" else None,
+            )
+        )
 
     try:
         yield
