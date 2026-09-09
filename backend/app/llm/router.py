@@ -110,6 +110,60 @@ async def update_model(
     return _to_response(catalog.get(model_id))
 
 
+class EmbeddingProfileResponse(BaseModel):
+    key: str
+    rank: int
+    label: str
+    provider: str
+    model: str
+    dim: int
+    origin: str
+    badges: list[str]
+    note: str
+    current: bool
+    local_present: bool | None  # 로컬 프로필만. None = Ollama 응답 없음/해당 없음
+
+
+class EmbeddingStatus(BaseModel):
+    profile: str | None
+    provider: str
+    model: str
+    dim: int
+    chunk_count: int
+    switch_command: str
+    profiles: list[EmbeddingProfileResponse]
+
+
+@router.get("/embedding", response_model=EmbeddingStatus)
+async def embedding_status(
+    admin: User = Depends(require_admin),
+    settings: Settings = Depends(get_app_settings),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """임베딩 프로필 카드. 바꾸는 버튼은 없다 - 전환은 재임베딩을 동반하는 배포 절차다."""
+    from sqlalchemy import func, select
+
+    from app.llm.embedding_profiles import current_profile_key, local_model_present, ordered_profiles
+    from app.models.chunk import Chunk
+
+    current = settings.embedding_profile or current_profile_key(settings.embedding_provider, settings.embedding_model)
+    count = await db.scalar(select(func.count(Chunk.id)).where(Chunk.embedding.is_not(None))) or 0
+    items = []
+    for p in ordered_profiles():
+        present = None
+        if p.provider == "local" and settings.local_llm_base_url:
+            present = await local_model_present(settings.local_llm_base_url, p.model, timeout=2.0)
+        items.append(EmbeddingProfileResponse(
+            key=p.key, rank=p.rank, label=p.label, provider=p.provider, model=p.model, dim=p.dim, origin=p.origin,
+            badges=list(p.badges), note=p.note, current=(p.key == current), local_present=present,
+        ))
+    return EmbeddingStatus(
+        profile=current, provider=settings.embedding_provider, model=settings.embedding_model, dim=settings.embedding_dim,
+        chunk_count=count, switch_command="python scripts/reembed.py --profile <key> --apply  →  .env EMBEDDING_PROFILE=<key>  →  재시작",
+        profiles=items,
+    )
+
+
 @router.post("/refresh", response_model=RefreshResponse)
 async def refresh_local_models(
     admin: User = Depends(require_admin),

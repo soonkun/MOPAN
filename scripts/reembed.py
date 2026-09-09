@@ -54,6 +54,17 @@ async def main() -> int:
     parser.add_argument("--local", action="store_true", help="LOCAL_LLM_BASE_URL(Ollama)의 임베딩 모델로 (예: qwen3-embedding:8b)")
     args = parser.parse_args()
 
+    if args.profile:
+        from app.llm.embedding_profiles import PROFILES
+
+        profile = PROFILES.get(args.profile)
+        if profile is None:
+            print(f"unknown profile {args.profile!r}; one of {sorted(PROFILES)}")
+            return 2
+        args.model, args.dim, args.local = profile.model, profile.dim, profile.provider == "local"
+    if not args.model or not args.dim:
+        print("--model and --dim are required unless --profile is given")
+        return 2
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     from sqlalchemy import select, update
@@ -98,6 +109,23 @@ async def main() -> int:
             embedding_provider="local" if args.local else "openai",
         )
 
+        # 로컬 프로필: 모델이 없으면 여기서 내려받는다(수 GB, 한 번).
+        if args.local:
+            from app.llm.embedding_profiles import ensure_local_embedding_model
+
+            print(f"local model {args.model}: {await ensure_local_embedding_model(settings.local_llm_base_url, args.model)}")
+        # 차원이 다른 프로필(1024)로 바꾸면 컬럼 폭을 함께 바꾼다. HNSW 인덱스는 폭에 묶여 있어 지우고 다시 만든다.
+        # 기존 벡터는 새 공간과 무관하므로 NULL로 비우고 아래에서 전부 다시 채운다.
+        from sqlalchemy import text as sql_text
+
+        current_dim = await session.scalar(
+            sql_text("SELECT atttypmod FROM pg_attribute WHERE attrelid = 'chunks'::regclass AND attname = 'embedding'")
+        )
+        if current_dim != args.dim:
+            print(f"embedding column is vector({current_dim}); switching to vector({args.dim}) (index rebuilt after re-embed)")
+            await session.execute(sql_text("DROP INDEX IF EXISTS ix_chunks_embedding"))
+            await session.execute(sql_text(f"ALTER TABLE chunks ALTER COLUMN embedding TYPE vector({int(args.dim)}) USING NULL"))
+            await session.commit()
         started = time.perf_counter()
         done = 0
         for start in range(0, len(rows), args.batch):
@@ -118,6 +146,13 @@ async def main() -> int:
             print(f"  {done}/{len(rows)}", end="\r")
 
         print(f"\nre-embedded {done} chunks in {time.perf_counter() - started:.1f}s")
+        if current_dim != args.dim:
+            print("rebuilding ix_chunks_embedding (hnsw, cosine)...")
+            await session.execute(
+                sql_text("CREATE INDEX IF NOT EXISTS ix_chunks_embedding ON chunks USING hnsw (embedding vector_cosine_ops)")
+            )
+            await session.commit()
+            print(f"NOW also set EMBEDDING_PROFILE={args.profile} (the ORM reads the width from .env).")
         print(f"NOW set EMBEDDING_MODEL={args.model} and EMBEDDING_DIM={args.dim} in .env,")
         print("then: docker compose build backend worker")
         print("      docker compose up -d --force-recreate --no-deps backend worker")

@@ -109,6 +109,9 @@ class Settings(BaseSettings):
     # EMBEDDING_MODEL·DIM과 같은 이유로 env 전용 - 바꾸면 scripts/reembed.py로 전체 재임베딩.
     embedding_provider: Literal["openai", "local"] = "openai"
     embedding_dim: int = 1536
+    # 임베딩 프로필(app/llm/embedding_profiles.py): qwen3 | openai | bge-m3 | arctic. 지정하면 위 세 값
+    # (provider·model·dim)을 프로필이 정한다. 비면 세 값을 그대로 쓴다(구 배포 호환).
+    embedding_profile: str = ""
     embedding_batch_size: int = 128
     embedding_batch_chars: int = 200_000
     llm_timeout_seconds: float = 30.0
@@ -646,6 +649,17 @@ class Settings(BaseSettings):
         # A relative UPLOAD_DIR resolves differently for the API (run from backend/)
         # and the worker. Anchor it so both processes agree.
         return value if value.is_absolute() else (REPO_ROOT / value).resolve()
+
+    @model_validator(mode="after")
+    def _apply_embedding_profile(self):
+        if self.embedding_profile:
+            from app.llm.embedding_profiles import PROFILES
+
+            profile = PROFILES.get(self.embedding_profile)
+            if profile is None:
+                raise ValueError(f"EMBEDDING_PROFILE must be one of {sorted(PROFILES)}, got {self.embedding_profile!r}")
+            self.embedding_provider, self.embedding_model, self.embedding_dim = profile.provider, profile.model, profile.dim
+        return self
 
     @model_validator(mode="after")
     def _finalise(self) -> "Settings":

@@ -429,6 +429,7 @@ async def test_the_api_key_can_be_neither_read_nor_written(owner, db, app):
     assert {item["key"] for item in body["env_only"]} == {
         "EMBEDDING_MODEL",
         "EMBEDDING_PROVIDER",
+        "EMBEDDING_PROFILE",
         "INGEST_WATCH_DIR",
         "EMBEDDING_DIM",
         # off/targeted/blanket - a choice, not a number, so it has no editable

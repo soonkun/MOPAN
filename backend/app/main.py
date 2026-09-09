@@ -68,6 +68,10 @@ async def lifespan(app: FastAPI):
         # 로컬 GPU 모델 발견(실패해도 부팅은 산다) + 프로바이더 라우팅 정보(app/llm/catalog.py).
         await discover_local_models(session, settings)
         (await load_catalog(session, settings)).apply_to_provider(app.state.llm_provider)
+    if settings.embedding_provider == "local":
+        # 선택된 프로필의 모델만 내려받는다(쓰지 않을 모델을 배포마다 심지 않는다).
+        from app.llm.embedding_profiles import ensure_local_embedding_model
+        logger.info("embedding model %s: %s", settings.embedding_model, await ensure_local_embedding_model(settings.local_llm_base_url, settings.embedding_model))
 
     try:
         yield

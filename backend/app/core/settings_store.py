@@ -300,6 +300,16 @@ ENV_ONLY_SETTINGS: list[EnvOnlySetting] = [
         ),
     ),
     EnvOnlySetting(
+        key="EMBEDDING_PROFILE",
+        label="임베딩 프로필",
+        reason=(
+            "qwen3 / openai / bge-m3 / arctic 중 하나. 문서와 질문이 같은 모델·차원에 있어야 검색이 되므로 화면에서 "
+            "바꿀 수 없고, scripts/reembed.py --profile <key> --apply 로 전체 재임베딩한 뒤 환경변수를 바꿉니다. "
+            "현재 프로필과 선택지는 이 카테고리 위의 카드에 있습니다."
+        ),
+        group=CHUNKING,
+    ),
+    EnvOnlySetting(
         key="EMBEDDING_PROVIDER",
         label="임베딩 제공자",
         reason=(

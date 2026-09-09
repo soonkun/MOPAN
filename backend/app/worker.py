@@ -39,6 +39,9 @@ async def startup(ctx: dict) -> None:
     ctx["settings"] = settings
     ctx["engine"] = engine
     ctx["sessionmaker"] = make_sessionmaker(engine)
+    if settings.embedding_provider == "local":
+        from app.llm.embedding_profiles import ensure_local_embedding_model
+        logger.info("embedding model %s: %s", settings.embedding_model, await ensure_local_embedding_model(settings.local_llm_base_url, settings.embedding_model))
     ctx["llm_provider"] = OpenAIProvider(
         api_key=settings.openai_api_key,
         embedding_model=settings.embedding_model,
