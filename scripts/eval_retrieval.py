@@ -111,6 +111,9 @@ DENSE_MODELS = {
     "large1536": "text-embedding-3-large",
     "bgem3": "BAAI/bge-m3",
     "bgem3ko": "dragonkue/BGE-m3-ko",
+    # 지금 배포된 임베딩 그대로: 코퍼스는 chunks.embedding, 질문만 배포 프로바이더(OpenAI 또는
+    # 로컬 Ollama)로 임베딩. 재임베딩 비용 0. 실제 이름은 실행 시 settings.embedding_model로 바뀐다.
+    "deployed": "<deployed>",
 }
 TRUNCATE = {"large1536": 1536}
 
@@ -396,12 +399,18 @@ async def embed_openai(model: str, texts: list[str], settings) -> tuple[dict[str
     if missing:
         billed = sum(count_tokens(t) for t in missing)
         print(f"  embedding {len(missing)} text(s) against {model} (~{billed} tokens)")
+        # 배포 모델이 로컬(Ollama)이면 그 클라이언트로 - dimensions 축소까지 배포와 같게.
+        deployed_local = model == settings.embedding_model and settings.embedding_provider == "local"
         provider = OpenAIProvider(
             settings.openai_api_key,
             model,
             settings.answer_model,
-            timeout=settings.llm_timeout_seconds,
+            timeout=max(settings.llm_timeout_seconds, 300.0) if deployed_local else settings.llm_timeout_seconds,
             max_retries=settings.llm_max_retries,
+            embedding_dim=settings.embedding_dim if deployed_local else None,
+            local_base_url=settings.local_llm_base_url if deployed_local else "",
+            local_api_key=settings.local_llm_api_key,
+            embedding_provider="local" if deployed_local else "openai",
         )
         for start in range(0, len(missing), 256):
             batch = missing[start : start + 256]
@@ -912,7 +921,7 @@ async def main() -> int:
         dense_vectors: dict[str, dict[str, list[float]]] = {}
         query_cost: dict[str, float] = {}
         for name in dense_names:
-            model = DENSE_MODELS[name]
+            model = settings.embedding_model if name == "deployed" else DENSE_MODELS[name]
             rate = PRICES.get(model, (0.0, 0.0))[0]
             for unit in units:
                 key = f"{name}:{unit}"
@@ -920,7 +929,7 @@ async def main() -> int:
                 print(f"dense arm {key} ({model}, {len(body)} vectors):")
                 if name in ("bgem3", "bgem3ko"):
                     vecs = embed_local(model, body + questions_text)
-                elif name == "small" and unit == "chunk" and model == settings.embedding_model:
+                elif unit == "chunk" and model == settings.embedding_model and name in ("small", "deployed"):
                     # The corpus side is ALREADY EMBEDDED with this model and
                     # sitting in chunks.embedding. Re-embedding it to compare
                     # against a candidate would bill for vectors the product
@@ -1322,7 +1331,7 @@ async def _embed_one(dense_name, text_, settings):
     granularity the CORPUS was indexed at.
     """
     dense_name = dense_name.split(":", 1)[0]
-    model = DENSE_MODELS[dense_name]
+    model = settings.embedding_model if dense_name == "deployed" else DENSE_MODELS[dense_name]
     if dense_name in ("bgem3", "bgem3ko"):
         return embed_local(model, [text_])[text_]
     vectors, _ = await embed_openai(model, [text_], settings)
