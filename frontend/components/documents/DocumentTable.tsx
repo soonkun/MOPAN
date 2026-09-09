@@ -105,7 +105,7 @@ export default function DocumentTable({
   return (
     <DataTable caption="등록된 문서 목록">
         <thead>
-          <tr className="bg-surface-container-low text-label font-medium text-on-surface-variant">
+          <tr className="whitespace-nowrap bg-surface-container-low text-label font-medium text-on-surface-variant">
             {selectable && (
               <th scope="col" className="w-8 px-3 py-3">
                 <input type="checkbox" checked={allChecked} onChange={(e) => onToggleAll(e.target.checked)} aria-label="전체 선택" />
