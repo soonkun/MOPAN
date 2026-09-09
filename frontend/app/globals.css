@@ -105,6 +105,11 @@
 
 body {
   @apply bg-surface text-on-surface text-body antialiased;
+  /* 한국어 줄바꿈: 어절 단위로만 자른다(keep-all) - 기본값은 음절 사이 어디서나 잘라
+     "…습니" / "다."처럼 한 글자가 다음 줄에 남았다(소유자 지적 2026-09-09). 한 어절이 줄보다
+     길면(경로, URL) 그때만 아무 데서나 자른다(overflow-wrap: anywhere) - 넘치지 않는다. */
+  word-break: keep-all;
+  overflow-wrap: anywhere;
 }
 
 /* §8 Focus. One rule for every control on every page - the UA default ring is

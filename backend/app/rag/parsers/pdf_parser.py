@@ -45,6 +45,36 @@ CID_FAILURE_MESSAGE = (
 )
 
 
+# 매핑이 깨진 폰트의 두 번째 얼굴: pdfium은 (cid:N) 대신 엉뚱한 글자를 낸다 - "㞃シ㇯㘏 ㅣ◿"
+# (출원방식심사기준 346쪽 중 300쪽 남짓, 실사고 2026-09-09: 그 쓰레기가 근거로 인용됐다).
+# (cid:N)은 ASCII라 '읽을 수 있는 글자'로 세어지므로 먼저 한 글자짜리 쓰레기로 바꾼다.
+# 한국어 문서 기준 - 한글·한자·라틴·전각·일반 기호를 읽을 수 있는 글자로 본다.
+READABLE_CHAR = re.compile(
+    r"[가-힣ㄱ-ㆎ一-鿿　-〿＀-￯‐-‧\x20-\x7e\u00a0-\u00ff·※○●□■◎△▲▽▼◇◆★☆→←↑↓]"
+)
+READABLE_MIN_RATIO = 0.6
+# 이보다 짧은 쪽(표지, 그림만 있는 쪽)은 판정하지 않는다 - 몇 글자로는 비율이 의미가 없다.
+READABLE_MIN_CHARS = 40
+
+
+def readable_ratio(text: str) -> float:
+    """공백을 뺀 글자 중 읽을 수 있는 글자의 비율. (cid:N) 토큰은 글자 하나짜리 쓰레기로 친다."""
+    # 목차의 점선 리더("ooooooo", "........")는 한 글자로 접는다 - 리더 300자가 쓰레기 40자를
+    # 읽을 수 있는 쪽으로 위장시켰다(출원방식심사기준 7~8쪽 실측).
+    collapsed = re.sub(r"(\S)\1{2,}", r"\1", CID_TOKEN.sub("\ufffd", text))
+    chars = [c for c in collapsed if not c.isspace()]
+    if not chars:
+        return 1.0
+    return sum(1 for c in chars if READABLE_CHAR.match(c)) / len(chars)
+
+
+def _page_unreadable(lines: "list[_Line]") -> bool:
+    text = "".join(line.text for line in lines)
+    if sum(1 for c in text if not c.isspace()) < READABLE_MIN_CHARS:
+        return False
+    return readable_ratio(text) < READABLE_MIN_RATIO
+
+
 def cid_garbage_ratio(text: str) -> float:
     """추출 텍스트에서 (cid:NNNN) 토큰이 차지하는 문자 비율."""
     if not text:
@@ -459,24 +489,20 @@ def _ocr_one_page(args: tuple[str, int]) -> str:
     return pytesseract.image_to_string(image, lang=OCR_LANG, config="--psm 6")
 
 
-def _ocr_pages(path: str) -> list[list[_Line]]:
-    """스캔 PDF를 로컬 tesseract로 읽는다. 토큰·외부 호출 0. 페이지 병렬."""
+def _ocr_pages(path: str, indices: list[int]) -> dict[int, list[_Line]]:
+    """지정한 쪽만 로컬 tesseract로 읽는다. 토큰·외부 호출 0. 페이지 병렬."""
     import multiprocessing
-    import pypdfium2 as pdfium
     from concurrent.futures import ProcessPoolExecutor
 
-    doc = pdfium.PdfDocument(path)
-    try:
-        count = len(doc)
-    finally:
-        doc.close()
+    if not indices:
+        return {}
     workers = int(os.environ.get("OCR_WORKERS", OCR_WORKERS))
     # spawn, not fork: 이 함수는 pdfium이 로드된 비동기 워커(arq) 안에서 불린다. fork로
     # 복제된 자식이 부모의 pdfium 상태를 물려받아 세그폴트로 워커를 통째로 죽였다(실측).
     ctx = multiprocessing.get_context("spawn")
-    with ProcessPoolExecutor(max_workers=max(1, min(workers, count)), mp_context=ctx) as pool:
-        texts = list(pool.map(_ocr_one_page, [(path, i) for i in range(count)]))
-    return [_lines_from_text(t) for t in texts]
+    with ProcessPoolExecutor(max_workers=max(1, min(workers, len(indices))), mp_context=ctx) as pool:
+        texts = list(pool.map(_ocr_one_page, [(path, i) for i in indices]))
+    return {i: _lines_from_text(t) for i, t in zip(indices, texts, strict=True)}
 
 
 class PdfParser(Parser):
@@ -488,28 +514,40 @@ class PdfParser(Parser):
                 # 854 pages of cached pdfminer objects do not fit in a worker.
                 page.flush_cache()
                 page.get_textmap.cache_clear()
-        blocks = _blocks_from_pages(pages, section_marker)
-        joined = "\n".join(block.text for block in blocks)
-        garbage = len(joined) >= CID_MIN_TEXT_CHARS and cid_garbage_ratio(joined) > CID_GARBAGE_RATIO
-        # 절반 넘는 쪽이 글자 0인 PDF = 스캔본(표지 한 쪽만 텍스트인 경우 포함). 짧지만
-        # 글자가 있는 정상 문서(한 쪽 메모)는 여기 걸리지 않는다.
-        blank_pages = sum(1 for page_lines in pages if not "".join(l.text for l in page_lines).strip())
-        mostly_blank = bool(pages) and blank_pages / len(pages) > 0.5
-        if garbage or mostly_blank:
-            # 글자 매핑이 깨졌거나(cid 쓰레기) 글자가 거의 없는(스캔본) PDF. 거절하지 않고
-            # 두 단계 폴백을 탄다(소유자 요구 2026-09-08: "안 되면 경우에 맞게 되게 만들어야지").
-            # ① pdfium은 pdfminer가 (cid:N)으로 뱉는 폰트를 곧잘 읽는다 - 디자인심사기준
-            #    473쪽이 그 경우였다. ② 그것도 비면 페이지를 그려 로컬 OCR(tesseract kor)로
-            #    읽는다 - 출원방식심사기준 347쪽. 셋 중 가장 많은 글자를 낸 경로를 쓴다.
-            #    짧은 문서(한 쪽 메모)는 정당하므로 글자가 0일 때만 거절한다.
-            candidates = [("pdfplumber", [] if garbage else blocks)]
-            alt = _blocks_from_pages(_pdfium_pages(path), section_marker)
-            candidates.append(("pdfium", alt))
-            if len("".join(b.text for b in alt)) < CID_MIN_TEXT_CHARS:
-                candidates.append(("ocr", _blocks_from_pages(_ocr_pages(path), section_marker)))
-            source, blocks = max(candidates, key=lambda c: len("".join(b.text for b in c[1])))
-            if not "".join(b.text for b in blocks).strip():
+        # 쪽 단위 복구. 폰트는 쪽마다 다르므로 문서 전체 비율로 판정하면 일부 쪽만 깨진 문서
+        # (디자인심사기준 29청크)는 그대로 통과하고, 전체가 깨진 문서는 멀쩡한 쪽까지 다시 읽는다.
+        # 순서: pdfminer가 못 읽은 쪽 → pdfium(같은 폰트를 곧잘 읽는다) → 그래도 못 읽으면 그 쪽만
+        # OCR(tesseract, 토큰 0). 글자가 거의 없는 쪽이 절반을 넘으면 스캔본이라 빈 쪽도 OCR한다.
+        # 거절하지 않는다(소유자 요구 2026-09-08: "안 되면 경우에 맞게 되게 만들어야지").
+        def _text(lines: list[_Line]) -> str:
+            return "".join(line.text for line in lines)
+
+        blank_idx = [i for i, page_lines in enumerate(pages) if not _text(page_lines).strip()]
+        mostly_blank = bool(pages) and len(blank_idx) / len(pages) > 0.5
+        bad_idx = [i for i, page_lines in enumerate(pages) if _page_unreadable(page_lines)]
+        if bad_idx or mostly_blank:
+            via_pdfium = 0
+            if bad_idx:
+                alt = _pdfium_pages(path)
+                still_bad = []
+                for i in bad_idx:
+                    if i < len(alt) and _text(alt[i]).strip() and not _page_unreadable(alt[i]):
+                        pages[i] = alt[i]
+                        via_pdfium += 1
+                    else:
+                        still_bad.append(i)
+                bad_idx = still_bad
+            targets = sorted(set(bad_idx) | (set(blank_idx) if mostly_blank else set()))
+            via_ocr = 0
+            for i, lines in _ocr_pages(path, targets).items():
+                if _text(lines).strip():
+                    pages[i] = lines
+                    via_ocr += 1
+            logger.info(
+                "pdf text recovered per page: pdfium=%d ocr=%d (of %d pages, %d unreadable, %d blank)",
+                via_pdfium, via_ocr, len(pages), len(bad_idx) + via_pdfium, len(blank_idx),
+            )
+            if not any(_text(page_lines).strip() for page_lines in pages):
                 raise ParseFailure(CID_FAILURE_MESSAGE)
-            if source != "pdfplumber":
-                logger.info("pdf text recovered via %s: %d blocks", source, len(blocks))
+        blocks = _blocks_from_pages(pages, section_marker)
         return ParsedDocument(blocks=blocks)

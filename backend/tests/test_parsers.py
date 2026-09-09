@@ -589,3 +589,24 @@ def test_csv_parses_utf8_and_cp949_alike(tmp_path):
     cp949.write_bytes("품목명,용도\n델타메트린,살충제\n".encode("cp949"))
     parsed = get_parser("csv").parse(str(cp949))
     assert parsed.blocks[0].text == "품목명: 델타메트린 | 용도: 살충제"
+
+
+def test_readable_ratio_catches_wrong_glyph_and_cid_garbage():
+    """pdfium이 매핑 깨진 폰트를 읽으면 나오는 엉뚱한 글자(출원방식심사기준 50쪽 실물)와
+    pdfminer의 (cid:N) 둘 다 '읽을 수 없는 쪽'으로 잡혀야 한다. 정상 한국어·한자 섞인 본문은 통과."""
+    from app.rag.parsers.pdf_parser import READABLE_MIN_RATIO, _lines_from_text, _page_unreadable, readable_ratio
+
+    wrong_glyphs = "㈃㶟 㞃シ㇯㘏 ㅣ◿ 㞃シ ☐Ⳅⳓ⪓ ㎧㡏⬃ ⪨㹃Ộ≄㞃シoⳓ⪓oㅛㄿⳇ㚔oⳓ㳷 ㆓ⳓ⾷ ᛧ㽃 ⬃⌿ ῷᱻ ⪨㹃シ❧ᱻ"
+    assert readable_ratio(wrong_glyphs) < READABLE_MIN_RATIO
+    assert _page_unreadable(_lines_from_text(wrong_glyphs))
+    cid = "(cid:12803)(cid:20)(cid:15775)(cid:3)(cid:14211)(cid:12471)(cid:12783)(cid:13839)(cid:3)(cid:12643)(cid:9727) " * 4
+    assert _page_unreadable(_lines_from_text(cid))
+    normal = "상표등록출원·심사·이의신청·심판 및 再審에 관한 서류는 外部에 반출할 수 없다. (상21600) 1) 비밀누설죄 A. B."
+    assert readable_ratio(normal) > 0.95
+    assert not _page_unreadable(_lines_from_text(normal))
+    # 짧은 쪽(표지 몇 글자)은 판정 대상이 아니다 - 비율이 낮아도 그대로 둔다.
+    assert not _page_unreadable(_lines_from_text("㞃シ㇯"))
+    assert readable_ratio("") == 1.0
+    # 목차 쪽: 점선 리더가 아무리 길어도 쓰레기 글자를 가리지 못한다.
+    toc = "㈃㶟 㞃シ㇯㘏 ㅣ◿ 㞃シㄿ ㉬⌿ " + "o" * 300 + " 㞃シ☐Ⳅⳓ⪓ " + "." * 200
+    assert _page_unreadable(_lines_from_text(toc))

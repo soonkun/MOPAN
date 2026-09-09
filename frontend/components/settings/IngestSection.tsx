@@ -93,7 +93,7 @@ export default function IngestSection() {
       ) : (
         <>
           <p className="text-caption text-on-surface-variant">
-            <code>{status.watch_dir}</code> → 분류 &lsquo;{status.collection}&rsquo;
+            <code className="break-all">{status.watch_dir}</code> → 분류 &lsquo;{status.collection}&rsquo;
             {status.interval_minutes > 0 ? ` · ${status.interval_minutes}분마다 자동 스캔` : " · 자동 스캔 꺼짐"}
             {status.last_scanned_at && ` · 마지막 ${new Date(status.last_scanned_at).toLocaleString()}`}
           </p>
