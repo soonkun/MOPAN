@@ -388,7 +388,7 @@ export default function Sidebar() {
     // in one class. 280px per §6.
     <nav
       aria-label="주 메뉴"
-      className="flex h-full w-sidebar flex-col gap-1 bg-surface-container-low p-3"
+      className="flex h-full w-sidebar flex-col gap-2 bg-surface-container-low p-3"
     >
       {/* §2: the gradient is allowed on the wordmark and nowhere else on this
           screen. */}
@@ -396,7 +396,9 @@ export default function Sidebar() {
         {/* 가져다 쓰는 사람의 이름이 먼저다. 브랜딩이 비어 있을 때만 MOPAN. */}
         <span className="text-gradient-brand">{branding?.app_title || "MOPAN"}</span>
       </div>
-      {navLinks.map(navLink)}
+      {/* 세 묶음(주 메뉴 / 관리 / 대화 기록)은 각각 한 장의 카드다 - 바탕(surface-container-low)
+          위에 lowest 카드를 올려 톤으로 구분한다. 선 없이 구분감을 내는 §1의 방식. */}
+      <div className="flex flex-col gap-0.5 rounded-xl bg-surface-container-lowest p-1.5">{navLinks.map(navLink)}</div>
 
       {/* `user` is null until /api/auth/me lands, so a non-admin never sees this
           appear and then vanish. flex-col on the wrapper because the links are
@@ -405,18 +407,24 @@ export default function Sidebar() {
       {user?.role === "admin" && (
         // 접히는 관리 묶음. 휴대폰에서 관리 여섯 줄이 대화 기록을 화면 밖으로 밀어냈다(실사고).
         // 기본은 접힘, 관리 화면 안에 있으면 펼침(현재 위치가 보여야 한다), 사용자가 바꾼 상태는
-        // 이 브라우저에 남긴다.
-        <details
-          open={adminOpen}
-          onToggle={(e) => rememberAdminOpen(e.currentTarget.open)}
-          className="group mt-4"
-        >
-          <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-1 text-caption tracking-wide text-on-surface-variant [&::-webkit-details-marker]:hidden">
-            관리
+        // 이 브라우저에 남긴다. <details>가 아닌 이유: 열림을 부드럽게 만들 수 없다 - 여기서는
+        // grid-template-rows 0fr↔1fr 전환으로 내용 높이를 재지 않고도 슥 펼친다.
+        <div className="rounded-xl bg-surface-container-lowest p-1.5">
+          <button
+            type="button"
+            onClick={() => rememberAdminOpen(!adminOpen)}
+            aria-expanded={adminOpen}
+            aria-controls="sidebar-admin-links"
+            className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-caption tracking-wide text-on-surface-variant transition-colors duration-150 hover:bg-surface-container"
+          >
+            <span className="flex items-center gap-2">
+              관리
+              <span className="rounded-full bg-surface-container-high px-1.5 text-[11px] leading-4">{adminLinks.length}</span>
+            </span>
             <svg
               aria-hidden="true"
               viewBox="0 0 24 24"
-              className="h-4 w-4 transition-transform duration-150 group-open:rotate-180"
+              className={`h-4 w-4 transition-transform duration-200 ${adminOpen ? "rotate-180" : ""}`}
               fill="none"
               stroke="currentColor"
               strokeWidth="2"
@@ -425,17 +433,25 @@ export default function Sidebar() {
             >
               <path d="m6 9 6 6 6-6" />
             </svg>
-          </summary>
-          <div className="mt-1 flex flex-col gap-1">{adminLinks.map(navLink)}</div>
-        </details>
+          </button>
+          <div
+            id="sidebar-admin-links"
+            className={`grid transition-[grid-template-rows] duration-200 ease-out ${
+              adminOpen ? "[grid-template-rows:1fr]" : "[grid-template-rows:0fr]"
+            }`}
+          >
+            <div className="min-h-0 overflow-hidden">
+              <div className="flex flex-col gap-0.5 pt-1">{adminLinks.map(navLink)}</div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* relative: 이 스크롤 영역 안의 sr-only(absolute) 요소가 뷰포트에 앵커되어
           문서를 늘리는 것을 막는다 - app-main의 같은 수정과 같은 기전. */}
-      <div className="relative mt-6 flex-1 overflow-y-auto">
-        <div className="mb-1 px-4 text-caption tracking-wide text-on-surface-variant">
-          대화 기록
-        </div>
+      <div className="flex min-h-0 flex-1 flex-col rounded-xl bg-surface-container-lowest p-1.5">
+        <div className="px-3 py-2 text-caption tracking-wide text-on-surface-variant">대화 기록</div>
+        <div className="relative min-h-0 flex-1 overflow-y-auto">
         {error && <ErrorBanner message={error} />}
         {!error && conversations?.length === 0 && (
           <p className="px-4 py-2 text-caption text-on-surface-variant">아직 대화가 없습니다.</p>
@@ -566,6 +582,7 @@ export default function Sidebar() {
             </div>
           );
         })}
+        </div>
       </div>
 
       {/* The one surviving divider in the sidebar: it separates the account
