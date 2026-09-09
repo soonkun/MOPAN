@@ -2,6 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
+import PageHeader from "@/components/layout/PageHeader";
 import PageShell from "@/components/layout/PageShell";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import DataTable from "@/components/ui/DataTable";
@@ -160,7 +161,7 @@ export default function PromptsPage() {
 
   return (
     <PageShell>
-      <h1 className="text-center text-headline font-medium md:text-left">프롬프트 관리</h1>
+      <PageHeader title="프롬프트 관리" />
       <ErrorBanner message={loadError} />
 
       <form onSubmit={handleCreate} className="space-y-3 rounded-md bg-surface-container-low p-6">

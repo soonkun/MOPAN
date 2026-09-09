@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { apiFetch, errorMessage } from "@/lib/api";
+import PageHeader from "@/components/layout/PageHeader";
 import PageShell from "@/components/layout/PageShell";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import ErrorBanner from "@/components/ui/ErrorBanner";
@@ -26,14 +27,16 @@ export default function ResearchPage() {
 
   return (
     <PageShell>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="flex-1 text-center text-headline font-medium md:flex-none md:text-left">딥 리서치</h1>
-        {isAdmin && (
-          <Link href="/research/new" className="btn-filled">
-            새 방
-          </Link>
-        )}
-      </div>
+      <PageHeader
+        title="딥 리서치"
+        actions={
+          isAdmin && (
+            <Link href="/research/new" className="btn-filled btn-compact">
+              새 방
+            </Link>
+          )
+        }
+      />
       <p className="notice">
         질문 하나를 여러 갈래의 검색 질의로 나눠 등록된 문서를 읽고, 빈 곳을 한 번 더 찾은 뒤, 실제로 인용한 근거만
         출처로 붙인 보고서를 만듭니다. 몇 분이 걸리며 화면을 떠나도 계속 진행됩니다.

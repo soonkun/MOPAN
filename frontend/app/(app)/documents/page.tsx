@@ -5,6 +5,7 @@ import { ApiError, apiFetch, downloadDocument, errorMessage } from "@/lib/api";
 import DocumentTable, { STATUS_LABEL, TERMINAL, type SortKey } from "@/components/documents/DocumentTable";
 import FolderTree, { type TreeSelection } from "@/components/documents/FolderTree";
 import UploadDropzone from "@/components/documents/UploadDropzone";
+import PageHeader from "@/components/layout/PageHeader";
 import PageShell from "@/components/layout/PageShell";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import ErrorBanner from "@/components/ui/ErrorBanner";
@@ -241,11 +242,15 @@ export default function DocumentsPage() {
 
   return (
     <PageShell>
-      <div ref={headerRef} className="flex flex-wrap items-center gap-2">
-        <h1 className="flex-1 text-center text-headline font-medium md:flex-none md:text-left">문서</h1>
-        <button type="button" onClick={openTree} className="btn-tonal btn-compact md:hidden">
-          폴더
-        </button>
+      <div ref={headerRef}>
+        <PageHeader
+          title="문서"
+          actions={
+            <button type="button" onClick={openTree} className="btn-tonal btn-compact md:hidden">
+              폴더
+            </button>
+          }
+        />
       </div>
       <ErrorBanner message={error} />
       {notice && <p className="notice">{notice}</p>}

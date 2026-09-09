@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
+import PageHeader from "@/components/layout/PageHeader";
 import PageShell from "@/components/layout/PageShell";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import DataTable from "@/components/ui/DataTable";
@@ -112,15 +113,23 @@ export default function UsersPage() {
 
   return (
     <PageShell>
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div className="w-full text-center md:w-auto md:text-left">
-          <h1 className="text-headline font-medium">사용자 관리</h1>
-          {users && (
-            <p className="mt-1 text-caption text-on-surface-variant">
-              총 {users.length}명 · 활성 {users.filter((u) => u.is_active).length}명
-            </p>
-          )}
-        </div>
+      <PageHeader
+        title="사용자 관리"
+        subtitle={users && `총 ${users.length}명 · 활성 ${users.filter((u) => u.is_active).length}명`}
+        actions={
+          <button
+            type="button"
+            onClick={() => {
+              setAddOpen((open) => !open);
+              setAddError(null);
+            }}
+            className="btn-filled btn-compact"
+          >
+            사용자 추가
+          </button>
+        }
+      />
+      <div className="flex flex-wrap items-center gap-2">
         <div className="flex flex-wrap items-center gap-2">
           {users !== null && users.length > 0 && (
             <input
@@ -132,16 +141,6 @@ export default function UsersPage() {
               className="field h-9 w-64 max-w-full"
             />
           )}
-          <button
-            type="button"
-            onClick={() => {
-              setAddOpen((open) => !open);
-              setAddError(null);
-            }}
-            className="btn-filled btn-compact"
-          >
-            사용자 추가
-          </button>
         </div>
       </div>
       <ErrorBanner message={loadError} />

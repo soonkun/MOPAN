@@ -183,19 +183,18 @@ export default function DocumentDetailPage({ params }: { params: Promise<{ id: s
 
   return (
     <PageShell>
-      <div className="flex flex-wrap items-center gap-2">
-        {/* 목록으로 - 워크플로우 편집기의 ‹와 같은 규칙. 모바일에서는 떠 있는
-            햄버거 옆에 서도록 pl-12가 자리를 비켜 준다. */}
+      {/* 머리 줄 규칙은 PageHeader와 같다(햄버거 자리 pl-12, 높이 min-h-10). */}
+      <div className="flex min-h-10 items-center gap-2 pl-12 md:pl-0">
         <Link
           href="/documents"
           aria-label="문서 목록으로"
-          className="icon-btn ml-12 h-9 w-9 shrink-0 md:ml-0"
+          className="icon-btn h-9 w-9 shrink-0"
         >
           <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
             <path d="m15 6-6 6 6 6" />
           </svg>
         </Link>
-        <h1 className="min-w-0 flex-1 break-all text-headline font-medium">{doc?.filename ?? "문서"}</h1>
+        <h1 className="min-w-0 flex-1 truncate text-headline font-medium" title={doc?.filename}>{doc?.filename ?? "문서"}</h1>
         {doc && (
           // The accessible name carries the filename: "다운로드" alone would be
           // the same name this control has on every other document. 모바일은

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { apiFetch, errorMessage } from "@/lib/api";
+import PageHeader from "@/components/layout/PageHeader";
 import PageShell from "@/components/layout/PageShell";
 import ErrorBanner from "@/components/ui/ErrorBanner";
 import BrandingSection from "@/components/settings/BrandingSection";
@@ -226,7 +227,7 @@ export default function SettingsPage() {
 
   return (
     <PageShell>
-      <h1 className="text-center text-headline font-medium md:text-left">고급 설정</h1>
+      <PageHeader title="고급 설정" />
       <ErrorBanner message={loadError} />
 
       {/* 데스크톱: 왼쪽 세로 목록 + 오른쪽 내용. 모바일: 위쪽 가로 스크롤 칩 + 아래 내용.

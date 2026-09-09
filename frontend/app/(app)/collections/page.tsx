@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, errorMessage } from "@/lib/api";
+import PageHeader from "@/components/layout/PageHeader";
 import PageShell from "@/components/layout/PageShell";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import DataTable from "@/components/ui/DataTable";
@@ -166,7 +167,7 @@ export default function CollectionsPage() {
 
   return (
     <PageShell>
-      <h1 className="text-center text-headline font-medium md:text-left">분류 관리</h1>
+      <PageHeader title="분류 관리" />
       <ErrorBanner message={loadError} />
 
       {/* `user === null` is "not loaded yet", not "not an admin" - branching on

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { apiFetch, errorMessage } from "@/lib/api";
+import PageHeader from "@/components/layout/PageHeader";
 import PageShell from "@/components/layout/PageShell";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import ErrorBanner from "@/components/ui/ErrorBanner";
@@ -39,12 +40,14 @@ export default function WorkflowsPage() {
 
   return (
     <PageShell>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="flex-1 text-center text-headline font-medium md:flex-none md:text-left">워크플로우</h1>
-        <Link href="/workflows/new" className="btn-filled">
-          새 워크플로우
-        </Link>
-      </div>
+      <PageHeader
+        title="워크플로우"
+        actions={
+          <Link href="/workflows/new" className="btn-filled btn-compact">
+            새 워크플로우
+          </Link>
+        }
+      />
       <ErrorBanner message={loadError} />
 
       {workflows === null ? (
