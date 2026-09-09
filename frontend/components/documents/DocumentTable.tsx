@@ -152,7 +152,7 @@ export default function DocumentTable({
                 <Link
                   href={`/documents/${doc.id}`}
                   title={doc.filename}
-                  className="block max-w-xs truncate hover:underline"
+                  className="line-clamp-2 block min-w-[9rem] max-w-xs break-all hover:underline"
                 >
                   {doc.filename}
                 </Link>
@@ -167,12 +167,12 @@ export default function DocumentTable({
                   </span>
                 )}
               </td>
-              {showFolder && <td className="px-3 py-3 text-on-surface-variant">{doc.folder_path ?? "(루트)"}</td>}
-              <td className="px-3 py-3 text-on-surface-variant">{doc.collection_name ?? "-"}</td>
+              {showFolder && <td className="px-3 py-3 text-on-surface-variant"><span className="line-clamp-2 max-w-[10rem]" title={doc.folder_path ?? undefined}>{doc.folder_path ?? "(루트)"}</span></td>}
+              <td className="px-3 py-3 text-on-surface-variant"><span className="line-clamp-2 max-w-[8rem]">{doc.collection_name ?? "-"}</span></td>
               <td className="px-3 py-3 text-on-surface-variant">
                 {FILE_TYPE_LABEL[doc.file_type] ?? doc.file_type}
               </td>
-              <td className="px-3 py-3 text-on-surface-variant">{doc.uploader_email ?? "-"}</td>
+              <td className="px-3 py-3 text-on-surface-variant"><span className="line-clamp-2 max-w-[10rem] break-all" title={doc.uploader_email ?? undefined}>{doc.uploader_email ?? "-"}</span></td>
               <td className="px-3 py-3 text-on-surface-variant">
                 {new Date(doc.created_at).toLocaleDateString()}
               </td>
