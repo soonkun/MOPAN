@@ -7,6 +7,7 @@ import { apiFetch, errorMessage } from "@/lib/api";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import AccountMenu from "@/components/layout/AccountMenu";
 import ErrorBanner from "@/components/ui/ErrorBanner";
+import { useBodyScrollLock } from "@/components/ui/useBodyScrollLock";
 import type {
   Branding, Conversation, User } from "@/lib/types";
 
@@ -209,12 +210,11 @@ export default function Sidebar() {
     // <main> still held 4 focusable elements. It is set from here with
     // setAttribute rather than as a JSX prop because `open` lives in this
     // client component while <main> is rendered by (app)/layout.tsx, which is
-    // a server component. The body lock is the pointer half of the same bug:
-    // the drawer is `fixed`, so without it the page behind scrolls on touch.
+    // a server component. The body lock (useBodyScrollLock below) is the
+    // pointer half of the same bug: the drawer is `fixed`, so without it the
+    // page behind scrolls on touch.
     const main = document.getElementById("app-main");
     main?.setAttribute("inert", "");
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setOpen(false);
@@ -239,10 +239,10 @@ export default function Sidebar() {
     return () => {
       document.removeEventListener("keydown", onKeyDown);
       main?.removeAttribute("inert");
-      document.body.style.overflow = previousOverflow;
       toggleRef.current?.focus();
     };
   }, [open]);
+  useBodyScrollLock(open);
 
   // `md:hidden` only stops the drawer from being *displayed* above 768px; the
   // state stays true, so resizing 390 -> 1280 -> 390 with it open brought the

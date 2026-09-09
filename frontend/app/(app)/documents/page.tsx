@@ -8,6 +8,7 @@ import UploadDropzone from "@/components/documents/UploadDropzone";
 import PageShell from "@/components/layout/PageShell";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import ErrorBanner from "@/components/ui/ErrorBanner";
+import { useBodyScrollLock } from "@/components/ui/useBodyScrollLock";
 import type { Collection, DocumentItem, Folder, User } from "@/lib/types";
 
 /** 문서 탐색기 (계획 2026-09-08-document-folders 1단계). 왼쪽 트리(분류 → 폴더), 오른쪽
@@ -50,6 +51,7 @@ export default function DocumentsPage() {
   const [deleteTargets, setDeleteTargets] = useState<DocumentItem[] | null>(null);
   const [moveOpen, setMoveOpen] = useState(false);
   const [treeOpen, setTreeOpen] = useState(false);
+  useBodyScrollLock(treeOpen || moveOpen);
   const [folderDialog, setFolderDialog] = useState<{ mode: "new" | "rename"; collectionId: string; parentId: string | null; folder?: Folder } | null>(null);
   const [folderName, setFolderName] = useState("");
   const [deleteFolder, setDeleteFolder] = useState<Folder | null>(null);
@@ -352,12 +354,12 @@ export default function DocumentsPage() {
       {treeOpen && (
         <div className="fixed inset-0 z-30 md:hidden" role="dialog" aria-label="폴더">
           <button type="button" aria-label="닫기" onClick={() => setTreeOpen(false)} className="absolute inset-0 bg-black/40" />
-          <div className="absolute inset-x-0 bottom-0 max-h-[80vh] overflow-y-auto rounded-t-lg bg-surface p-4 pb-8">
-            <div className="mb-2 flex items-center justify-between">
+          <div className="absolute inset-x-0 bottom-0 flex h-[60dvh] flex-col rounded-t-lg bg-surface p-4 pb-8">
+            <div className="mb-2 flex shrink-0 items-center justify-between">
               <span className="text-title font-medium">폴더</span>
               <button type="button" onClick={() => setTreeOpen(false)} className="btn-text btn-compact">닫기</button>
             </div>
-            {tree}
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">{tree}</div>
           </div>
         </div>
       )}
@@ -366,7 +368,7 @@ export default function DocumentsPage() {
       {moveOpen && (
         <div className="fixed inset-0 z-30" role="dialog" aria-label="이동할 폴더">
           <button type="button" aria-label="닫기" onClick={() => setMoveOpen(false)} className="absolute inset-0 bg-black/40" />
-          <div className="absolute inset-x-0 bottom-0 max-h-[80vh] overflow-y-auto rounded-t-lg bg-surface p-4 pb-8 sm:inset-auto sm:left-1/2 sm:top-1/2 sm:w-[28rem] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-lg">
+          <div className="absolute inset-x-0 bottom-0 max-h-[80vh] overflow-y-auto overscroll-contain rounded-t-lg bg-surface p-4 pb-8 sm:inset-auto sm:left-1/2 sm:top-1/2 sm:w-[28rem] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-lg">
             <p className="mb-2 text-title font-medium">{selected.size}개를 어디로 옮길까요?</p>
             <p className="mb-3 text-caption text-on-surface-variant">다른 분류로 옮기면 청킹 방식이 달라 그 문서를 다시 색인합니다. 확인을 한 번 더 묻습니다.</p>
             <FolderTree
