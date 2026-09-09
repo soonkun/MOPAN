@@ -313,6 +313,28 @@ export default function Sidebar() {
     { href: "/research", label: "딥 리서치" },
   ];
 
+  const onAdminPage = ["/collections", "/users", "/prompts", "/mcp", "/workflows", "/settings"].some((h) =>
+    pathname.startsWith(h),
+  );
+  const [adminOpen, setAdminOpen] = useState(false);
+  useEffect(() => {
+    let stored: string | null = null;
+    try {
+      stored = localStorage.getItem("sidebar.adminOpen");
+    } catch {
+      /* 저장소 막힌 브라우저 - 기본값으로 */
+    }
+    setAdminOpen(stored === null ? onAdminPage : stored === "1");
+  }, [onAdminPage]);
+  function rememberAdminOpen(next: boolean) {
+    setAdminOpen(next);
+    try {
+      localStorage.setItem("sidebar.adminOpen", next ? "1" : "0");
+    } catch {
+      /* 기억 못 해도 동작은 한다 */
+    }
+  }
+
   // Rendered only for an admin. All three screens are admin-only on the server too -
   // every endpoint behind them answers 403 관리자 권한이 필요합니다. - so this is
   // about not offering a link that leads to a refusal, not about access.
@@ -381,10 +403,31 @@ export default function Sidebar() {
           <a> elements: as direct children of this flex column they stack on
           their own, but inside a plain div they would run side by side. */}
       {user?.role === "admin" && (
-        <div className="mt-4">
-          <div className="mb-1 px-4 text-caption tracking-wide text-on-surface-variant">관리</div>
-          <div className="flex flex-col gap-1">{adminLinks.map(navLink)}</div>
-        </div>
+        // 접히는 관리 묶음. 휴대폰에서 관리 여섯 줄이 대화 기록을 화면 밖으로 밀어냈다(실사고).
+        // 기본은 접힘, 관리 화면 안에 있으면 펼침(현재 위치가 보여야 한다), 사용자가 바꾼 상태는
+        // 이 브라우저에 남긴다.
+        <details
+          open={adminOpen}
+          onToggle={(e) => rememberAdminOpen(e.currentTarget.open)}
+          className="group mt-4"
+        >
+          <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-1 text-caption tracking-wide text-on-surface-variant [&::-webkit-details-marker]:hidden">
+            관리
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 24 24"
+              className="h-4 w-4 transition-transform duration-150 group-open:rotate-180"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="m6 9 6 6 6-6" />
+            </svg>
+          </summary>
+          <div className="mt-1 flex flex-col gap-1">{adminLinks.map(navLink)}</div>
+        </details>
       )}
 
       {/* relative: 이 스크롤 영역 안의 sr-only(absolute) 요소가 뷰포트에 앵커되어
