@@ -678,7 +678,11 @@ export default function Sidebar() {
           // 상단 예약 띠(pt-12)를 없앤 대가로 내용이 이 밑을 지나간다 - 그림자
           // 한 겹이 버튼을 지나가는 글자와 갈라 준다. (토큰 색은 alpha 변형이
           // 없어 /80 같은 투명도 수식은 조용히 무시된다 - 쓰지 말 것.)
-          className="icon-btn fixed left-4 top-6 z-20 bg-surface-container text-title shadow-md md:hidden"
+          // 세로 위치는 CSS 변수로 - 머리 줄이 있는 화면(워크플로우 편집기)은 그 줄의 중심에
+          // 맞춘다. 없으면 PageShell의 py-6과 같은 24px(실사고: 편집기에서 머리 줄 아래로
+          // 삐져나오며 '뒤로' 버튼과 붙어 보였다).
+          style={{ top: "var(--hamburger-top, 1.5rem)" }}
+          className="icon-btn fixed left-4 z-20 bg-surface-container text-title shadow-md md:hidden"
           onClick={() => setOpen(true)}
         >
           ☰
