@@ -381,7 +381,7 @@ export default function WorkflowEditorPage() {
           maxLength={200}
           placeholder="워크플로우 이름"
           aria-label="워크플로우 이름"
-          className="h-9 min-w-0 flex-1 rounded-sm bg-transparent px-2 text-title font-medium text-on-surface outline-none placeholder:text-on-surface-variant focus-visible:bg-surface-container sm:max-w-md"
+          className="h-9 min-w-[6rem] flex-1 rounded-sm bg-transparent px-2 text-title font-medium text-on-surface outline-none placeholder:text-on-surface-variant focus-visible:bg-surface-container sm:max-w-md"
         />
         {dirty && <span className="shrink-0 text-caption text-primary">저장 안 됨</span>}
         {!draft.enabled && (
@@ -390,20 +390,21 @@ export default function WorkflowEditorPage() {
           </span>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-2">
-          {/* 편집 도구: 되돌리기·다시하기·정렬. 아이콘만, 툴팁이 이름. */}
-          <button type="button" onClick={undo} disabled={!canUndo} aria-label="되돌리기 (Ctrl+Z)" title="되돌리기 (Ctrl+Z)" className="icon-btn h-9 w-9 disabled:opacity-40">
+          {/* 편집 도구: 되돌리기·다시하기·정렬. 아이콘만, 툴팁이 이름. 모바일에서는
+              머리 줄이 좁아 아래 막대로 내려간다(같은 핸들러). */}
+          <button type="button" onClick={undo} disabled={!canUndo} aria-label="되돌리기 (Ctrl+Z)" title="되돌리기 (Ctrl+Z)" className="icon-btn hidden h-9 w-9 disabled:opacity-40 sm:flex">
             <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
               <path d="M9 14 4 9l5-5" />
               <path d="M4 9h10a6 6 0 0 1 0 12h-3" />
             </svg>
           </button>
-          <button type="button" onClick={redo} disabled={!canRedo} aria-label="다시하기 (Ctrl+Shift+Z)" title="다시하기 (Ctrl+Shift+Z)" className="icon-btn h-9 w-9 disabled:opacity-40">
+          <button type="button" onClick={redo} disabled={!canRedo} aria-label="다시하기 (Ctrl+Shift+Z)" title="다시하기 (Ctrl+Shift+Z)" className="icon-btn hidden h-9 w-9 disabled:opacity-40 sm:flex">
             <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
               <path d="m15 14 5-5-5-5" />
               <path d="M20 9H10a6 6 0 0 0 0 12h3" />
             </svg>
           </button>
-          <button type="button" onClick={() => changeGraph(autoLayout(graph))} aria-label="자동 정렬" title="자동 정렬 - 실행 순서대로 열을 맞춥니다" className="icon-btn h-9 w-9">
+          <button type="button" onClick={() => changeGraph(autoLayout(graph))} aria-label="자동 정렬" title="자동 정렬 - 실행 순서대로 열을 맞춥니다" className="icon-btn hidden h-9 w-9 sm:flex">
             <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
               <rect x="3" y="4" width="6" height="6" rx="1.5" />
               <rect x="15" y="4" width="6" height="6" rx="1.5" />
@@ -501,7 +502,7 @@ export default function WorkflowEditorPage() {
               }}
               aria-label="워크플로우 설정"
               aria-expanded={panel === "settings"}
-              className={`flex h-10 flex-1 items-center justify-center gap-2 rounded-md px-2.5 text-label sm:flex-none sm:justify-start sm:shadow-menu sm:px-3 ${
+              className={`flex h-10 flex-1 items-center justify-center gap-1.5 rounded-md px-2 text-label sm:flex-none sm:justify-start sm:gap-2 sm:px-3 sm:shadow-menu sm:px-3 ${
                 panel === "settings"
                   ? "bg-primary-container text-on-primary-container"
                   : "bg-surface-container text-on-surface hover:bg-surface-container-high"
@@ -522,7 +523,7 @@ export default function WorkflowEditorPage() {
               }}
               aria-label="도구"
               aria-expanded={paletteOpen}
-              className={`flex h-10 flex-1 items-center justify-center gap-2 rounded-md px-2.5 text-label sm:flex-none sm:justify-start sm:shadow-menu sm:px-3 ${
+              className={`flex h-10 flex-1 items-center justify-center gap-1.5 rounded-md px-2 text-label sm:flex-none sm:justify-start sm:gap-2 sm:px-3 sm:shadow-menu sm:px-3 ${
                 paletteOpen
                   ? "bg-primary-container text-on-primary-container"
                   : "bg-surface-container text-on-surface hover:bg-surface-container-high"
@@ -543,7 +544,7 @@ export default function WorkflowEditorPage() {
               title={selection ? undefined : "캔버스에서 노드나 간선을 누르면 열립니다."}
               aria-label="노드"
               aria-expanded={panel === "selection"}
-              className={`flex h-10 flex-1 items-center justify-center gap-2 rounded-md px-2.5 text-label sm:flex-none sm:justify-start sm:shadow-menu disabled:opacity-50 sm:px-3 ${
+              className={`flex h-10 flex-1 items-center justify-center gap-1.5 rounded-md px-2 text-label sm:flex-none sm:justify-start sm:gap-2 sm:px-3 sm:shadow-menu disabled:opacity-50 sm:px-3 ${
                 panel === "selection"
                   ? "bg-primary-container text-on-primary-container"
                   : "bg-surface-container text-on-surface hover:bg-surface-container-high"
@@ -555,11 +556,47 @@ export default function WorkflowEditorPage() {
               </svg>
               <span>노드</span>
             </button>
+            {/* 모바일 전용: 편집 도구 셋. 데스크톱은 머리 줄에 있다. */}
+            <span className="mx-0.5 w-px self-stretch bg-outline-variant sm:hidden" aria-hidden="true" />
+            <button type="button" onClick={undo} disabled={!canUndo} aria-label="되돌리기" className="icon-btn h-10 w-9 disabled:opacity-40 sm:hidden">
+              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 14 4 9l5-5" />
+                <path d="M4 9h10a6 6 0 0 1 0 12h-3" />
+              </svg>
+            </button>
+            <button type="button" onClick={redo} disabled={!canRedo} aria-label="다시하기" className="icon-btn h-10 w-9 disabled:opacity-40 sm:hidden">
+              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="m15 14 5-5-5-5" />
+                <path d="M20 9H10a6 6 0 0 0 0 12h3" />
+              </svg>
+            </button>
+            <button type="button" onClick={() => changeGraph(autoLayout(graph))} aria-label="자동 정렬" className="icon-btn h-10 w-9 sm:hidden">
+              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                <rect x="3" y="4" width="6" height="6" rx="1.5" />
+                <rect x="15" y="4" width="6" height="6" rx="1.5" />
+                <rect x="15" y="14" width="6" height="6" rx="1.5" />
+                <path d="M9 7h6M9 7c3 0 3 10 6 10" />
+              </svg>
+            </button>
           </div>
 
-          {/* 수납 패널 - 도구 서랍과 같은 자리(레일 옆)에서 열린다. */}
+          {/* 수납 패널 - 도구 서랍과 같은 자리(레일 옆)에서 열린다. 모바일은 아래에서
+              올라오는 시트: 손잡이 줄과 닫기 버튼이 있고, 높이는 화면의 절반 남짓. */}
           {(panel === "settings" || (panel === "selection" && selection)) && (
-            <div className="pointer-events-auto absolute inset-x-3 bottom-16 top-auto z-10 flex max-h-[62%] overflow-hidden rounded-md shadow-menu sm:inset-x-auto sm:bottom-3 sm:left-3 sm:top-[9.75rem] sm:max-h-none sm:w-80 sm:max-w-[calc(100%-1.5rem)]">
+            <div className="pointer-events-auto absolute inset-x-0 bottom-[3.75rem] top-auto z-10 flex max-h-[56%] flex-col overflow-hidden rounded-t-xl bg-surface-container-low shadow-dialog sm:inset-x-auto sm:bottom-3 sm:left-3 sm:top-[9.75rem] sm:max-h-none sm:w-80 sm:max-w-[calc(100%-1.5rem)] sm:flex-row sm:rounded-md sm:shadow-menu">
+              <div className="flex shrink-0 items-center justify-between px-3 pt-2 sm:hidden">
+                <span className="mx-auto h-1 w-10 rounded-full bg-outline-variant" aria-hidden="true" />
+                <button
+                  type="button"
+                  onClick={() => setPanel(null)}
+                  aria-label="패널 닫기"
+                  className="icon-btn absolute right-2 top-1.5 h-8 w-8"
+                >
+                  <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                    <path d="M6 6l12 12M18 6 6 18" />
+                  </svg>
+                </button>
+              </div>
               <Inspector
                 graph={graph}
                 onChangeGraph={changeGraph}

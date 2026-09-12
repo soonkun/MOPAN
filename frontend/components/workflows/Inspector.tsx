@@ -713,7 +713,7 @@ export default function Inspector({
   return (
     <aside
       aria-label="설정"
-      className="flex h-full w-full shrink-0 flex-col overflow-y-auto border-l border-outline-variant bg-surface-container-low sm:w-80"
+      className="flex min-h-0 w-full flex-1 flex-col overflow-y-auto bg-surface-container-low sm:h-full sm:w-80 sm:shrink-0 sm:border-l sm:border-outline-variant"
     >
       {node ? (
         <NodePanel

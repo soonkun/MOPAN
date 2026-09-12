@@ -647,7 +647,8 @@ export default function EditorCanvas({
       />
 
       {/* 줌 콘트롤. */}
-      <div className="absolute bottom-4 right-4 flex items-center gap-1 rounded-md bg-surface-container p-1 shadow-menu">
+      {/* 확대·축소. 모바일은 아래 막대와 겹치지 않게 오른쪽 위. */}
+      <div className="absolute right-3 top-3 flex items-center gap-1 rounded-md bg-surface-container p-1 shadow-menu sm:bottom-4 sm:right-4 sm:top-auto">
         <button
           type="button"
           onClick={() => {
