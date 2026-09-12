@@ -1,4 +1,5 @@
 import Sidebar from "@/components/layout/Sidebar";
+import ViewportFit from "@/components/layout/ViewportFit";
 
 // .app-shell is 100dvh with a 100vh fallback, not min-h-screen. The sidebar is a full-height column with a
 // scrolling history region and a footer pinned under it, and `main`'s
@@ -10,6 +11,7 @@ import Sidebar from "@/components/layout/Sidebar";
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="app-shell flex">
+      <ViewportFit />
       <Sidebar />
       {/* pt-12가 예약하던 상단 띠는 소유자 지적으로 없앴다("햄버거 마크만 떠
           있으면 되는 거 아닌가?" - 모바일 화면 3rem이 흰 띠로 죽어 있었다).

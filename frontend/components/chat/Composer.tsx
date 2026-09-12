@@ -368,6 +368,10 @@ export default function Composer({
     if (listening) {
       // stop()은 지금까지 인식된 것을 확정하고 onend를 부른다 - 입력은 거기서.
       recognitionRef.current?.stop();
+      // 지금이 사용자 제스처(탭) 안이다 - iOS는 이 안에서만 자판을 올린다. onend는
+      // 나중에 비동기로 오므로 거기서 focus()해도 자판은 안 뜬다(실사고: 받아적은
+      // 문장을 고치려 해도 자판이 안 올라옴).
+      textareaRef.current?.focus();
       return;
     }
     const w = window as unknown as Record<string, unknown>;
@@ -410,6 +414,10 @@ export default function Composer({
     };
     recognitionRef.current = recognition;
     setListening(true);
+    // 듣는 동안은 포커스를 놓는다. 마이크 버튼의 mousedown이 포커스를 지키는 바람에
+    // 입력창이 "포커스된 채 자판만 내려간" 상태가 됐고, iOS는 이미 포커스된 요소를
+    // 탭해도 자판을 다시 올리지 않는다. 놓아 두면 다음 탭이 새 포커스라 자판이 뜬다.
+    textareaRef.current?.blur();
     recognition.start();
   }
   // The `@…` being typed: where its `@` is, and what has been typed after it.

@@ -140,6 +140,20 @@ body {
   .app-shell {
     height: 100vh;
     height: 100dvh;
+    /* ViewportFit(components/layout/ViewportFit.tsx)이 키보드 위에 실제로 보이는
+       높이·시작점을 심는다. 없으면 위 dvh 그대로. transform은 셸 안의 fixed 요소
+       (햄버거, 드로어)의 기준을 셸로 바꾸므로 그것들도 보이는 영역을 따라간다. */
+    height: var(--vvh, 100dvh);
+    transform: translateY(var(--vvt, 0px));
+  }
+
+  /* 앱 셸이 떠 있는 동안 문서 자체는 스크롤하지 않는다 - 스크롤은 전부 셸 안에서
+     일어난다. 로그인·가입 화면(auth-shell)은 이 클래스가 없어 그대로 문서 스크롤. */
+  html.app-locked,
+  html.app-locked body {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
   }
 
   /* Same reason, min-height, for the two auth pages. */
