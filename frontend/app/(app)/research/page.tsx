@@ -38,8 +38,9 @@ export default function ResearchPage() {
         }
       />
       <p className="notice">
-        질문 하나를 여러 갈래의 검색 질의로 나눠 등록된 문서를 읽고, 빈 곳을 한 번 더 찾은 뒤, 실제로 인용한 근거만
-        출처로 붙인 보고서를 만듭니다. 몇 분이 걸리며 화면을 떠나도 계속 진행됩니다.
+        방마다 지침(무엇을 어떤 관점으로 쓸지)이 있습니다. 요청이나 첨부한 계획서를 여러 검색 관점으로 나눠 등록된 문서를 읽고,
+        빈 관점을 한 번 더 찾은 뒤, 실제로 인용한 근거만 출처로 붙인 보고서를 만들어 PDF로 내려받습니다. 몇 분이 걸리며 화면을
+        떠나도 계속됩니다.
       </p>
       <ErrorBanner message={loadError} />
       {projects === null ? (
@@ -48,8 +49,7 @@ export default function ResearchPage() {
         <div className="rounded-md bg-surface-container-low p-6">
           <p className="text-body text-on-surface">아직 방이 없습니다.</p>
           <p className="mt-2 text-caption text-on-surface-variant">
-            예: “상표 출원 전 검토” 방에는 유사상품·류 구분 관점의 지침을, “규정 개정 영향 분석” 방에는 조항 인용을
-            요구하는 지침을 둡니다. {isAdmin ? "오른쪽 위 ‘새 방’으로 만듭니다." : "관리자가 방을 만들면 여기에 보입니다."}
+            ‘과제 중복성 검토’·‘신규과제 발굴’·‘과제 계획서 초안’ 템플릿으로 시작하거나 빈 방에 지침을 직접 씁니다. {isAdmin ? "오른쪽 위 ‘새 방’으로 만듭니다." : "관리자가 방을 만들면 여기에 보입니다."}
           </p>
         </div>
       ) : (
@@ -57,10 +57,13 @@ export default function ResearchPage() {
           {projects.map((p) => (
             <li key={p.id} className="relative flex h-full flex-col rounded-md bg-surface-container-low transition-colors duration-150 hover:bg-surface-container">
               <Link href={`/research/${p.id}`} className="block flex-1 p-4 pr-12">
-                <h2 className="text-title font-medium text-on-surface">{p.name}</h2>
+                <h2 className="text-title font-medium text-on-surface">
+                  {p.name}
+                  {p.template_id === "duplication" && <span className="ml-2 rounded-full bg-primary-container px-2 py-0.5 text-caption font-normal text-on-primary-container">중복성 검토</span>}
+                </h2>
                 {p.description && <p className="mt-1 text-body text-on-surface-variant">{p.description}</p>}
                 <p className="mt-3 text-caption text-on-surface-variant">
-                  실행 {p.run_count}회
+                  보고서 {p.run_count}건
                   {p.last_run_at && ` · 마지막 ${new Date(p.last_run_at).toLocaleDateString()}`}
                   {p.model && ` · ${p.model}`}
                   {p.collection_ids.length > 0 ? ` · 분류 ${p.collection_ids.length}개` : " · 전체 분류"}
@@ -88,7 +91,7 @@ export default function ResearchPage() {
                         onClick={() => setMenuFor(null)}
                         className="px-4 py-2 text-left text-label text-on-surface transition-colors duration-150 hover:bg-surface-container-high"
                       >
-                        열기 · 지침 수정
+                        열기
                       </Link>
                       <button
                         type="button"

@@ -32,6 +32,8 @@ from app.models.research import ResearchInstruction, ResearchProject, ResearchRu
 from app.research.prompts import (
     NO_EVIDENCE_REPORT,
     gap_messages,
+    planner_messages,
+    scope_digest,
     synthesis_messages,
 )
 from app.retrieval.evidence import Evidence
@@ -41,6 +43,9 @@ logger = logging.getLogger("mopan.research")
 PLANNER_PROMPT = "research_planner"
 GAP_PROMPT = "research_gap"
 SYNTHESIS_PROMPT = "research_synthesis"
+SCOPE_PROMPT = "research_scope"
+# 검토 대상 요약을 뽑을 때 읽는 첨부 앞부분. 계획서의 목표·대상·방법은 앞쪽에 있다.
+SCOPE_INPUT_CHARS = 16_000
 
 MAX_GAP_QUERIES = 3
 MAX_INPUT_CHARS = 30_000
@@ -156,11 +161,37 @@ def source_dict(n: int, h: Evidence) -> dict:
     }
 
 
-def build_user_input(prompt: str, attachment_text: str | None) -> str:
+def build_user_input(prompt: str, attachment_text: str | None, scope: dict | None = None) -> str:
+    """종합 단계의 '사용자 요청' - 요청문 + (첨부가 있으면) 검토 대상 요약 + 첨부 본문."""
     parts = [prompt.strip()]
+    digest = scope_digest(scope)
+    if digest:
+        parts.append(f"## 검토 대상 요약 (첨부에서 추출)\n{digest}")
     if attachment_text and attachment_text.strip():
         parts.append(f"## 첨부 자료 내용\n{attachment_text.strip()}")
     return "\n\n".join(p for p in parts if p)[:MAX_INPUT_CHARS]
+
+
+def planner_input(prompt: str, scope: dict | None, attachment_text: str | None) -> str:
+    """플래너가 읽는 것. 첨부가 있으면 30,000자 본문이 아니라 검토 대상 요약이다 - 하위 질의는
+    과제의 목표·대상·방법·산출물에서 나와야 하고, 본문 전체를 주면 앞부분(표지·목차)에 끌린다."""
+    digest = scope_digest(scope)
+    if digest:
+        return f"{prompt.strip()}\n\n## 검토 대상 요약\n{digest}"
+    if attachment_text and attachment_text.strip():
+        return f"{prompt.strip()}\n\n## 첨부 자료(앞부분)\n{attachment_text.strip()[:4000]}"
+    return prompt.strip()
+
+
+def group_by_document(ranked: list[Evidence]) -> list[Evidence]:
+    """점수순 목록을 문서별로 묶는다(문서의 첫 등장 순서 유지). 중복성 검토는 청크가 아니라
+    '기존 과제 하나'를 단위로 비교해야 하므로, 같은 문서의 근거가 번호상 이웃해야 모델이
+    과제별로 읽는다. 점수 상위 문서가 먼저 온다는 성질은 그대로다."""
+    order: dict[str, int] = {}
+    for h in ranked:
+        key = str(h.metadata.get("document_id") or h.metadata.get("filename") or h.ref)
+        order.setdefault(key, len(order))
+    return sorted(ranked, key=lambda h: order[str(h.metadata.get("document_id") or h.metadata.get("filename") or h.ref)])
 
 
 class Runner:
@@ -233,11 +264,14 @@ class Runner:
             prompt_text, attachment_text = run.prompt, run.attachment_text
             budget = clamp_budget(project.budget if project else None)
             project_name = project.name if project else ""
+            planner_hint = (project.planner_hint if project else None) or ""
             model = run.model or (project.model if project else None) or self.settings.answer_model
             effort = run.reasoning_effort or (project.reasoning_effort if project else None)
             gap_model = (project.gap_model if project else None) or self.settings.query_expansion_model
         try:
-            await self._pipeline(prompt_text, attachment_text, budget, project_name, instruction or "", model, effort, gap_model)
+            await self._pipeline(
+                prompt_text, attachment_text, budget, project_name, instruction or "", model, effort, gap_model, planner_hint
+            )
         except ResearchCancelled:
             logger.info("research run cancelled", extra={"extra_fields": {"run_id": str(self.run_id)}})
         except Exception as exc:
@@ -251,20 +285,56 @@ class Runner:
                     run.usage = self.usage
                     await db.commit()
 
-    async def _pipeline(self, prompt, attachment_text, budget, project_name, instructions, model, effort, gap_model) -> None:
-        user_input = build_user_input(prompt, attachment_text)
+    async def _scope(self, attachment_text: str, gap_model: str) -> dict | None:
+        """0. 검토 대상 요약 - 첨부(과제 계획서)를 먼저 읽어 목표·대상·방법·산출물·핵심어를 뽑는다.
+        실패하면 None(첨부 본문으로 계획한다). 결과는 행에 저장해 화면의 '검토 대상' 카드가 된다."""
+        await self._step("scoping", "첨부 문서를 읽어 검토 대상을 정리하는 중", status="planning")
+        scope_prompt = await get_prompt(SCOPE_PROMPT)
+        try:
+            raw = await self._json(
+                scope_prompt.text, attachment_text[:SCOPE_INPUT_CHARS], model=gap_model, max_tokens=1200, timeout=PLANNER_TIMEOUT
+            )
+        except Exception as exc:
+            logger.warning("research scoping failed; planning from raw attachment: %s", exc)
+            await self._step("warning", "검토 대상 정리에 실패해 첨부 본문으로 계획합니다")
+            return None
+        scope = {k: raw.get(k) for k in ("title", "goals", "targets", "methods", "outputs", "prior_work", "keywords")}
+        if not scope_digest(scope):
+            return None
+        async with self.sessionmaker() as db:
+            run = await db.get(ResearchRun, self.run_id, with_for_update=True)
+            if run is not None:
+                run.scope = scope
+                await db.commit()
+        title = str(scope.get("title") or "").strip()
+        await self._step("scoped", (f"검토 대상: {title} · " if title else "") + f"핵심어 {len(scope.get('keywords') or [])}개")
+        return scope
+
+    async def _pipeline(
+        self, prompt, attachment_text, budget, project_name, instructions, model, effort, gap_model, planner_hint=""
+    ) -> None:
+        # 0. 검토 대상 요약(첨부가 있을 때만)
+        scope = await self._scope(attachment_text, gap_model) if attachment_text and attachment_text.strip() else None
+        user_input = build_user_input(prompt, attachment_text, scope)
         # 1. 계획
         await self._step("planning", "검색 계획 수립 중", status="planning")
         planner = await get_prompt(PLANNER_PROMPT)
         try:
-            raw = await self._json(planner.text, user_input, model=gap_model, max_tokens=1024, timeout=PLANNER_TIMEOUT)
+            system, user = planner_messages(planner.text, planner_hint, planner_input(prompt, scope, attachment_text))
+            raw = await self._json(system, user, model=gap_model, max_tokens=1024, timeout=PLANNER_TIMEOUT)
             sub_queries = clean_queries(raw.get("sub_queries"))[: budget["sub_queries"]]
         except Exception as exc:
             logger.warning("research plan failed; single-query fallback: %s", exc)
             sub_queries = []
         if not sub_queries:
             sub_queries = [prompt[:200].strip()]
-        await self._step("planned", f"하위 질의 {len(sub_queries)}개: " + " / ".join(sub_queries))
+        await self._step("planned", f"검색 관점 {len(sub_queries)}개: " + " / ".join(sub_queries))
+        # 관점은 계획이 서는 순간 화면에 보여야 한다 - 끝날 때까지 기다리지 않는다.
+        async with self.sessionmaker() as db:
+            run = await db.get(ResearchRun, self.run_id, with_for_update=True)
+            if run is not None:
+                run.sub_queries = list(sub_queries)
+                await db.commit()
         # 2. 검색
         pool: dict[str, Evidence] = {}
         for i, q in enumerate(sub_queries, 1):
@@ -306,7 +376,7 @@ class Runner:
                 break
         all_queries = sub_queries + gap_queries
         # 4. 종합
-        ranked = rank_sources(pool, budget["max_evidence_chunks"])
+        ranked = group_by_document(rank_sources(pool, budget["max_evidence_chunks"]))
         block, sources, dropped = evidence_block(ranked, self.settings.research_evidence_token_budget)
         if dropped:
             await self._step("budget", f"토큰 예산으로 근거 {dropped}건을 뒤에서 잘랐습니다 (읽지 않은 것은 출처에 넣지 않음)")

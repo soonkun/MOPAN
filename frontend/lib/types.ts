@@ -433,9 +433,32 @@ export interface ResearchProject {
   collection_ids: string[];
   instructions: string;
   instruction_version: number;
+  /** 플래너의 관점 예시 한 줄(하위 질의를 어느 축으로 나눌지). */
+  planner_hint: string | null;
+  /** 어느 지침 템플릿에서 태어났는지(GET /api/research/templates의 id). */
+  template_id: string | null;
   run_count: number;
   last_run_at: string | null;
   created_at: string;
+}
+
+export interface ResearchTemplate {
+  id: string;
+  name: string;
+  description: string;
+  planner_hint: string;
+  instructions: string;
+}
+
+/** 첨부(과제 계획서)를 먼저 읽어 뽑은 검토 대상 요약. 첨부 없는 실행은 null. */
+export interface ResearchScope {
+  title?: string | null;
+  goals?: string[];
+  targets?: string[];
+  methods?: string[];
+  outputs?: string[];
+  prior_work?: string[];
+  keywords?: string[];
 }
 
 export interface ResearchInstruction {
@@ -469,6 +492,7 @@ export interface ResearchRun extends ResearchRunSummary {
   attachment_name: string | null;
   reasoning_effort: string | null;
   usage: Record<string, number>;
+  scope: ResearchScope | null;
 }
 
 /** 관리자 모델 레지스트리 한 행 (GET /api/admin/models). .env 목록의 모델은 from_env. */

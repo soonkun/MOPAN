@@ -167,3 +167,113 @@ def test_research_prompts_are_registered_with_their_own_text():
     assert _FALLBACK_PROMPTS["research_gap"].text == GAP_SYSTEM_PROMPT
     assert _FALLBACK_PROMPTS["research_synthesis"].text == SYNTHESIS_SYSTEM_PROMPT
     assert "sub_queries" in PLANNER_SYSTEM_PROMPT and "steps" not in PLANNER_SYSTEM_PROMPT
+
+
+# --- 재설계(2026-09-13): 검토 대상 요약 · 관점 힌트 · 문서별 묶음 · 템플릿 · PDF ---------------
+
+
+async def test_an_attachment_is_scoped_first_and_the_plan_reads_the_scope(db, test_sessionmaker, project):
+    """첨부가 있으면 0단계로 검토 대상 요약을 뽑아 행에 저장하고, 플래너는 30,000자 본문이
+    아니라 그 요약을 읽는다. 방의 관점 힌트는 플래너 시스템 프롬프트 끝에 붙는다."""
+    p, run, _ = project
+    async with test_sessionmaker() as s:
+        prj = await s.get(ResearchProject, p.id)
+        prj.planner_hint = "관점 예시: 산출물, 검증 방법"
+        r = await s.get(ResearchRun, run.id)
+        r.attachment_text = "과제명: 복숭아 선발모형 개발\n" + "본문 " * 5000
+        r.attachment_name = "계획서.pdf"
+        await s.commit()
+    provider = ScriptedProvider([
+        '{"title": "복숭아 선발모형 개발", "goals": ["선발모형 개발"], "targets": ["복숭아"], "methods": ["표현형 DB"], "outputs": ["모형"], "prior_work": [], "keywords": ["복숭아", "선발모형"]}',
+        '{"sub_queries": ["복숭아 선발모형", "사과 육종 데이터베이스"]}',
+        '{"sub_queries": []}',
+        "## 1. 검토 대상 요약\n복숭아 [1]\n\n## 요약\n보통",
+    ])
+    hits = {"복숭아 선발모형": [ev("a", "d1", "s", 0.9)], "사과 육종 데이터베이스": [ev("b", "d2", "s", 0.8)]}
+
+    async def retrieve(q, k):
+        return hits.get(q, [])
+
+    result = await _run(test_sessionmaker, run.id, provider, retrieve)
+    assert result.status == "done"
+    assert result.scope["title"] == "복숭아 선발모형 개발" and result.scope["keywords"] == ["복숭아", "선발모형"]
+    stages = [s["stage"] for s in result.steps]
+    assert stages[:2] == ["scoping", "scoped"]
+    planner_system, planner_user = provider.calls[1][0][0].content, provider.calls[1][0][1].content
+    assert planner_system.rstrip().endswith("- 관점 예시: 산출물, 검증 방법")
+    assert "검토 대상 요약" in planner_user and "본문 본문 본문" not in planner_user
+    synthesis_user = provider.calls[3][0][1].content
+    assert "## 검토 대상 요약 (첨부에서 추출)" in synthesis_user and "## 첨부 자료 내용" in synthesis_user
+
+
+def test_group_by_document_keeps_a_documents_chunks_together():
+    from app.research.service import group_by_document
+
+    ranked = [ev("1", "d1", "a", 0.9), ev("2", "d2", "a", 0.8), ev("3", "d1", "b", 0.7), ev("4", "d3", "a", 0.6)]
+    assert [e.metadata["chunk_id"] for e in group_by_document(ranked)] == ["1", "3", "2", "4"]
+
+
+def test_scope_digest_and_scope_prompt_registered():
+    from app.chat.prompt import _FALLBACK_PROMPTS
+    from app.research.prompts import SCOPE_SYSTEM_PROMPT, planner_messages, scope_digest
+
+    assert _FALLBACK_PROMPTS["research_scope"].text == SCOPE_SYSTEM_PROMPT
+    assert scope_digest(None) == "" and scope_digest({"goals": []}) == ""
+    d = scope_digest({"title": "T", "goals": ["g1", " "], "keywords": ["k"]})
+    assert d == "- 과제명: T\n- 연구 목표: g1\n- 핵심어: k"
+    assert planner_messages("BASE", "", "q") == ("BASE", "q")
+    assert planner_messages("BASE\n", "힌트", "q")[0] == "BASE\n- 힌트"
+
+
+def test_templates_carry_the_full_duplication_manual():
+    from app.research.templates import TEMPLATES, get_template
+
+    dup = get_template("duplication")
+    assert dup is not None and len(dup.instructions) > 10_000
+    assert "개선방향 종합표" in dup.instructions and "세부과업별 조정안" in dup.instructions
+    assert {t.id for t in TEMPLATES} == {"duplication", "discovery", "proposal"}
+    assert get_template("nope") is None
+
+
+async def test_templates_and_pdf_endpoints(client, db, test_sessionmaker):
+    await client.post("/api/auth/register", json={"email": "adm@example.com", "password": "pw123456"})
+    from sqlalchemy import select
+
+    admin = await db.scalar(select(User).where(User.email == "adm@example.com"))
+    admin.role = "admin"
+    await db.commit()
+    await client.post("/api/auth/login", json={"email": "adm@example.com", "password": "pw123456"})
+
+    templates = (await client.get("/api/research/templates")).json()
+    assert [t["id"] for t in templates] == ["duplication", "discovery", "proposal"]
+
+    created = await client.post("/api/research/projects", json={"name": "중복성", "template_id": "duplication"})
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["template_id"] == "duplication" and body["planner_hint"].startswith("관점 예시")
+    assert "개선방향 종합표" in body["instructions"] and body["instruction_version"] == 1
+    assert (await client.post("/api/research/projects", json={"name": "x", "template_id": "nope"})).status_code == 400
+
+    # PDF: 보고서가 있는 실행만, 출처 부록 포함
+    async with test_sessionmaker() as s:
+        run = ResearchRun(
+            project_id=uuid.UUID(body["id"]), prompt="q", created_by=admin.id, status="done",
+            report="## 결과\n중복 [1]", sources=[{"index": 1, "filename": "d1.pdf", "page": 3, "snippet": "x"}],
+        )
+        s.add(run)
+        await s.commit()
+        rid = run.id
+    pdf = await client.get(f"/api/research/runs/{rid}/pdf")
+    assert pdf.status_code == 200 and pdf.headers["content-type"] == "application/pdf"
+    assert pdf.content[:4] == b"%PDF" and "filename*=UTF-8''" in pdf.headers["content-disposition"]
+    assert (await client.get(f"/api/research/runs/{uuid.uuid4()}/pdf")).status_code == 404
+
+
+def test_room_instructions_replace_the_generic_synthesis_base():
+    """지침이 있으면 base(범용 구성)는 프롬프트에 없어야 한다 - 있으면 모델이 그 구성을 따른다(실사고)."""
+    from app.research.prompts import EVIDENCE_RULES, synthesis_messages
+
+    system, user = synthesis_messages("BASE 범용 구성", "# 중복성 매뉴얼\n## 10. 종합 보고서 구성", "요청", "[1] 근거")
+    assert system.startswith("# 중복성 매뉴얼") and "BASE" not in system and EVIDENCE_RULES in system
+    assert synthesis_messages("BASE 범용 구성", "  ", "요청", "[1]")[0].startswith("BASE 범용 구성")
+    assert user.startswith("## 사용자 요청\n요청")

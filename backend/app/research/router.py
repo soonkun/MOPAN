@@ -8,6 +8,8 @@ from pathlib import Path
 
 from arq import ArqRedis
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -30,6 +32,7 @@ from app.models.research import (
 from app.models.user import User
 from app.rag.parsers import get_parser
 from app.rag.parsers.base import ParseFailure
+from app.research.templates import TEMPLATES, get_template
 
 logger = logging.getLogger("mopan.research")
 router = APIRouter(prefix="/api/research", tags=["research"])
@@ -44,6 +47,9 @@ class ProjectBody(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=2000)
     instructions: str | None = Field(default=None, max_length=20000)
+    # 템플릿(app/research/templates.py)에서 만들 때. 지침·관점·설명을 비운 항목은 템플릿 값으로 채운다.
+    template_id: str | None = Field(default=None, max_length=40)
+    planner_hint: str | None = Field(default=None, max_length=1000)
     budget: dict | None = None
     model: str | None = Field(default=None, max_length=100)
     reasoning_effort: str | None = Field(default=None, pattern="^(minimal|low|medium|high)$")
@@ -54,6 +60,7 @@ class ProjectBody(BaseModel):
 class ProjectPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=2000)
+    planner_hint: str | None = Field(default=None, max_length=1000)
     budget: dict | None = None
     model: str | None = Field(default=None, max_length=100)
     reasoning_effort: str | None = Field(default=None, pattern="^(minimal|low|medium|high|)$")
@@ -72,9 +79,19 @@ class ProjectResponse(BaseModel):
     collection_ids: list[uuid.UUID]
     instructions: str
     instruction_version: int
+    planner_hint: str | None
+    template_id: str | None
     run_count: int
     last_run_at: datetime | None
     created_at: datetime
+
+
+class TemplateResponse(BaseModel):
+    id: str
+    name: str
+    description: str
+    planner_hint: str
+    instructions: str
 
 
 class InstructionBody(BaseModel):
@@ -110,6 +127,7 @@ class RunResponse(RunSummary):
     attachment_name: str | None
     reasoning_effort: str | None
     usage: dict
+    scope: dict | None
 
 
 class RunPage(BaseModel):
@@ -148,6 +166,7 @@ async def _project_response(db: AsyncSession, project: ResearchProject) -> Proje
         id=project.id, name=project.name, description=project.description, budget=clamp_budget(project.budget),
         model=project.model, reasoning_effort=project.reasoning_effort, gap_model=project.gap_model,
         collection_ids=[uuid.UUID(c) for c in project.collection_ids], instructions=text, instruction_version=version,
+        planner_hint=project.planner_hint, template_id=project.template_id,
         run_count=count or 0, last_run_at=last, created_at=project.created_at,
     )
 
@@ -176,7 +195,7 @@ def _run_response(run: ResearchRun, email: str | None) -> RunResponse:
     return RunResponse(
         **_run_summary(run, email).model_dump(), steps=run.steps or [], report=run.report, sources=run.sources or [],
         sub_queries=run.sub_queries or [], error=run.error, attachment_name=run.attachment_name,
-        reasoning_effort=run.reasoning_effort, usage=run.usage or {},
+        reasoning_effort=run.reasoning_effort, usage=run.usage or {}, scope=run.scope,
     )
 
 
@@ -188,6 +207,15 @@ async def _validate_models(db: AsyncSession, settings: Settings, *names: str | N
 
 
 # --- projects ------------------------------------------------------------------
+
+@router.get("/templates", response_model=list[TemplateResponse])
+async def list_templates(user: User = Depends(get_current_user)):
+    """지침 템플릿. 방을 만들 때 고르거나 기존 방의 지침을 갈아 끼울 때 쓴다(app/research/templates.py)."""
+    return [
+        TemplateResponse(id=t.id, name=t.name, description=t.description, planner_hint=t.planner_hint, instructions=t.instructions)
+        for t in TEMPLATES
+    ]
+
 
 @router.get("/projects", response_model=list[ProjectResponse])
 async def list_projects(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session)):
@@ -203,10 +231,18 @@ async def create_project(
     settings: Settings = Depends(get_app_settings),
 ):
     await _validate_models(db, settings, payload.model, payload.gap_model)
+    template = get_template(payload.template_id) if payload.template_id else None
+    if payload.template_id and template is None:
+        raise HTTPException(status_code=400, detail="없는 템플릿입니다.")
+    instructions = (payload.instructions or "").strip() or (template.instructions if template else "")
     project = ResearchProject(
-        name=payload.name.strip(), description=payload.description, budget=clamp_budget(payload.budget),
+        name=payload.name.strip(),
+        description=payload.description or (template.description if template else None),
+        budget=clamp_budget(payload.budget),
         model=payload.model or None, reasoning_effort=payload.reasoning_effort, gap_model=payload.gap_model or None,
         collection_ids=[str(c) for c in (payload.collection_ids or [])], created_by=admin.id,
+        planner_hint=(payload.planner_hint or "").strip() or (template.planner_hint if template else None),
+        template_id=template.id if template else None,
     )
     db.add(project)
     try:
@@ -214,8 +250,8 @@ async def create_project(
     except IntegrityError:
         await db.rollback()
         raise HTTPException(status_code=409, detail="같은 이름의 방이 이미 있습니다.")
-    if payload.instructions and payload.instructions.strip():
-        await _add_instruction(db, project.id, payload.instructions.strip(), admin.id)
+    if instructions:
+        await _add_instruction(db, project.id, instructions, admin.id)
     await db.commit()
     await db.refresh(project)
     log_event(logger, "research_project_created", project_id=str(project.id), admin_id=str(admin.id))
@@ -244,6 +280,8 @@ async def update_project(
         fields["collection_ids"] = [str(c) for c in (fields["collection_ids"] or [])]
     if "reasoning_effort" in fields and not fields["reasoning_effort"]:
         fields["reasoning_effort"] = None
+    if "planner_hint" in fields:
+        fields["planner_hint"] = (fields["planner_hint"] or "").strip() or None
     for key, value in fields.items():
         setattr(project, key, value.strip() if key == "name" and value else value)
     try:
@@ -401,6 +439,38 @@ async def get_run(rid: uuid.UUID, user: User = Depends(get_current_user), db: As
     if row is None:
         raise HTTPException(status_code=404, detail="실행을 찾을 수 없습니다.")
     return _run_response(row[0], row[1])
+
+
+@router.get("/runs/{rid}/pdf")
+async def run_pdf(rid: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session)):
+    """보고서를 PDF 파일로. 서버에서 만든다(원본 CR-67: 브라우저 인쇄는 iOS에서 앱 화면이 찍혔다).
+    출처 목록을 부록으로 붙이고, 본문의 [n]은 그대로 남겨 부록과 대응시킨다."""
+    from app.research.pdf import PdfUnavailable, report_to_pdf
+
+    run = await db.get(ResearchRun, rid)
+    if run is None or not run.report:
+        raise HTTPException(status_code=404, detail="보고서가 없습니다.")
+    project = await db.get(ResearchProject, run.project_id)
+    title = f"{project.name if project else '리서치'} 보고서"
+    when = (run.finished_at or run.created_at).astimezone().strftime("%Y-%m-%d")
+    meta = " · ".join(x for x in (run.prompt[:80].replace("\n", " "), when, run.model or "") if x)
+    body = run.report
+    if run.sources:
+        lines = []
+        for c in run.sources:
+            where = " ".join(x for x in (c.get("filename") or "", f"p.{c['page']}" if c.get("page") else "", c.get("section") or "") if x)
+            lines.append(f"- [{c.get('index')}] {where}")
+        body = f"{body.rstrip()}\n\n## 출처\n\n" + "\n".join(lines)
+    try:
+        data = await run_in_threadpool(report_to_pdf, title, body, meta, "MOPAN 딥 리서치")
+    except PdfUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # 파일명은 ASCII 대체 + RFC 5987 한글 - 브라우저가 한글 이름으로 저장한다.
+    from urllib.parse import quote
+
+    filename = f"{title}-{when}.pdf"
+    headers = {"Content-Disposition": f"attachment; filename=\"report-{when}.pdf\"; filename*=UTF-8''{quote(filename)}"}
+    return Response(content=data, media_type="application/pdf", headers=headers)
 
 
 @router.post("/runs/{rid}/cancel", response_model=RunResponse, status_code=202)
