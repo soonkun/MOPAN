@@ -107,6 +107,43 @@ def parse_reference(value: object) -> Reference | None:
     return Reference(raw=value.strip(), segments=segments)
 
 
+# 템플릿 치환이 허용되는 유일한 자리: 모델 호출·텍스트 조합 노드의 본문. 도구 인자의
+# 템플릿 금지(위 docstring)는 "인자 스키마가 무엇인지 말할 수 없게 된다"는 논거였다. 여기
+# 결과는 인자가 아니라 모델이 읽을 글이거나 사람이 쓴 본문이므로 그 논거가 닿지 않는다.
+# 대신 참조 하나가 끌어오는 글자 수에 상한을 둔다(도구 결과 2MB가 프롬프트가 되지 않게).
+TEMPLATE_REF_CHARS = 8000
+TEMPLATE_RE = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
+
+
+def template_references(text: object) -> list[Reference]:
+    """본문 안의 모든 `{{a.b}}`. 저장 시 도달 가능성 검사에 쓴다. 문자열이 아니면 없다."""
+    if not isinstance(text, str):
+        return []
+    found: list[Reference] = []
+    for match in TEMPLATE_RE.finditer(text):
+        path = match.group(1)
+        segments = tuple(part.strip() for part in path.split("."))
+        if not segments or not all(SEGMENT_RE.match(part) for part in segments):
+            raise ExpressionError(BAD_PATH_MESSAGE.format(name=path[:100]))
+        found.append(Reference(raw=match.group(0), segments=segments))
+    return found
+
+
+def render_template(text: str, scope: dict) -> str:
+    """본문의 `{{...}}`를 값으로 바꾼 글. 구조(dict·list)가 걸리면 실패, 긴 값은 잘린다."""
+
+    def _one(match: re.Match[str]) -> str:
+        reference = Reference(raw=match.group(0), segments=tuple(p.strip() for p in match.group(1).split(".")))
+        resolved = _walk(scope, reference)
+        if resolved is None:
+            return ""
+        if not isinstance(resolved, str | int | float | bool):
+            raise ExpressionError(NOT_A_SCALAR_MESSAGE.format(name=reference.raw[:100]))
+        return str(resolved)[:TEMPLATE_REF_CHARS]
+
+    return TEMPLATE_RE.sub(_one, text)
+
+
 def references_in(value: object) -> list[Reference]:
     """Every reference inside an arguments object, one level of nesting deep.
 

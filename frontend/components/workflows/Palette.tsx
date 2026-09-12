@@ -14,6 +14,10 @@ import type { CallableTool, GraphNode } from "@/lib/types";
 
 const NODE_ITEMS: { kind: GraphNode["kind"]; label: string; hint: string }[] = [
   { kind: "tool", label: "도구", hint: "문서 검색·MCP·워크플로우 호출" },
+  { kind: "llm", label: "모델 호출", hint: "프롬프트로 모델을 부르고 글을 받음" },
+  { kind: "classify", label: "질문 분류", hint: "갈래 중 하나로 분류해 길을 고름" },
+  { kind: "extract", label: "정보 추출", hint: "글에서 항목을 뽑아 다음 노드에" },
+  { kind: "template", label: "텍스트 조합", hint: "앞 노드 값들을 글 하나로" },
   { kind: "branch", label: "분기", hint: "조건으로 참·거짓 갈래" },
 ];
 
@@ -51,7 +55,7 @@ export default function Palette({
   if (!open) return null;
 
   return (
-    <div className="pointer-events-auto absolute bottom-3 left-3 top-[9.75rem] z-10 flex w-60 max-w-[calc(100%-1.5rem)] flex-col rounded-md bg-surface-container shadow-menu">
+    <div className="pointer-events-auto absolute inset-x-3 bottom-16 top-auto z-10 flex max-h-[60%] flex-col rounded-md bg-surface-container shadow-menu sm:inset-x-auto sm:bottom-3 sm:left-3 sm:top-[9.75rem] sm:max-h-none sm:w-60 sm:max-w-[calc(100%-1.5rem)]">
       <div className="flex items-center justify-between gap-2 p-3 pb-2">
         <h2 className="text-label font-medium text-on-surface">도구 서랍</h2>
         <button

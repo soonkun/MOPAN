@@ -295,9 +295,40 @@ export interface Attachment {
  * `mcp:서버/도구`, `workflow:이름`. `collections` is RAG only, and EMPTY MEANS
  * THE WHOLE ALLOWED CATALOGUE - which the canvas says out loud rather than
  * drawing as an empty list. */
+export type GraphNodeKind = "input" | "tool" | "branch" | "answer" | "llm" | "classify" | "extract" | "template";
+
+/** A classify category - one outgoing edge per id. */
+export interface GraphCategory {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+/** An extract field - becomes `{{node.name}}` downstream. */
+export interface GraphField {
+  name: string;
+  type: "string" | "number" | "boolean";
+  description?: string;
+}
+
+/** Settings of the model/text nodes (`backend/app/workflow/graph.py:_parse_config`).
+ * `prompt`/`system`/`text` are templates: `{{a.b}}` anywhere inside is substituted -
+ * the one place templates are allowed, because the result is text for a model or
+ * a person, not a tool argument. */
+export interface GraphNodeConfig {
+  prompt?: string;
+  system?: string;
+  text?: string;
+  model?: string | null;
+  output_fields?: string[];
+  as_evidence?: boolean;
+  categories?: GraphCategory[];
+  fields?: GraphField[];
+}
+
 export interface GraphNode {
   id: string;
-  kind: "input" | "tool" | "branch" | "answer";
+  kind: GraphNodeKind;
   label?: string;
   x: number;
   y: number;
@@ -305,6 +336,7 @@ export interface GraphNode {
   collections?: string[];
   arguments?: Record<string, unknown>;
   condition?: GraphCondition | null;
+  config?: GraphNodeConfig;
 }
 
 /** A branch condition. JSON, not a string grammar - see
@@ -324,7 +356,8 @@ export interface GraphCondition {
 export interface GraphEdge {
   from: string;
   to: string;
-  when?: "true" | "false";
+  /** "true"/"false" leaving a branch; a category id leaving a classify node. */
+  when?: string;
 }
 
 export interface WorkflowGraph {
@@ -582,9 +615,11 @@ export interface PlanStep {
   id: string;
   /** The four node kinds. `rag` appears on traces written before Slice 6, where
    * a search step was its own kind rather than a `tool` node naming `rag`. */
-  kind: "input" | "tool" | "branch" | "answer" | "rag";
+  kind: GraphNodeKind | "rag";
   label: string;
   state: "running" | "done" | "failed" | "skipped" | "timeout";
+  /** What a model/text node produced, first 300 chars. Absent on tool nodes. */
+  output?: string | null;
   query?: string | null;
   collections?: string[];
   tool?: string | null;

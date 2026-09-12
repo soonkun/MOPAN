@@ -61,7 +61,10 @@ export default function TestRun({
             setSteps((prev) => (prev[prev.length - 1] === label ? prev : [...prev, label]));
           } else if (event.type === "step") {
             // 그래프 실행의 단계 프레임: running/done을 그대로 시간순으로.
-            setSteps((prev) => [...prev, `${event.label || event.id} — ${event.state}`]);
+            // 모델·텍스트 노드는 무엇을 냈는지까지 - 그래프를 눈 감고 고치지 않게.
+            const output = event.output ? ` · "${event.output.slice(0, 120)}${event.output.length > 120 ? "…" : ""}"` : "";
+            const detail = event.detail && event.state !== "done" ? ` · ${event.detail}` : "";
+            setSteps((prev) => [...prev, `${event.label || event.id} — ${event.state}${output}${detail}`]);
             onStep?.(event.id, event.state);
           } else if (event.type === "done") {
             conversationId = event.conversation_id;
@@ -91,7 +94,8 @@ export default function TestRun({
   return (
     <aside
       aria-label="실행해보기"
-      className="pointer-events-auto absolute bottom-3 right-3 top-3 z-20 flex w-96 max-w-[calc(100%-1.5rem)] flex-col rounded-md bg-surface-container shadow-menu"
+      // 모바일: 아래쪽 시트(레일 바 위), 데스크톱: 오른쪽 패널.
+      className="pointer-events-auto absolute inset-x-3 bottom-16 top-auto z-20 flex max-h-[60%] flex-col rounded-md bg-surface-container shadow-menu sm:inset-x-auto sm:bottom-3 sm:right-3 sm:top-3 sm:max-h-none sm:w-96 sm:max-w-[calc(100%-1.5rem)]"
     >
       <div className="flex items-center justify-between gap-2 p-3 pb-2">
         <h2 className="text-label font-medium text-on-surface">실행해보기</h2>

@@ -54,11 +54,26 @@ function portCenter(node: GraphNode, side: "in" | "out") {
 export function defaultWhen(
   graph: WorkflowGraph,
   from: string,
-): "true" | "false" | undefined {
+): string | undefined {
   const source = graph.nodes.find((n) => n.id === from);
+  if (source?.kind === "classify") {
+    // 아직 간선이 없는 첫 갈래. 전부 이어졌으면 첫 갈래를 다시 - 한 갈래에서 둘로 나갈 수도 있다.
+    const used = new Set(graph.edges.filter((e) => e.from === from).map((e) => e.when));
+    const categories = source.config?.categories ?? [];
+    return (categories.find((c) => !used.has(c.id)) ?? categories[0])?.id;
+  }
   if (source?.kind !== "branch") return undefined;
   const hasTrue = graph.edges.some((e) => e.from === from && e.when === "true");
   return hasTrue ? "false" : "true";
+}
+
+/** What an edge's `when` reads as on screen: 참/거짓, or the category's label. */
+export function whenLabel(graph: WorkflowGraph, edge: { from: string; when?: string }): string {
+  if (!edge.when) return "";
+  if (edge.when === "true") return "참";
+  if (edge.when === "false") return "거짓";
+  const source = graph.nodes.find((n) => n.id === edge.from);
+  return source?.config?.categories?.find((c) => c.id === edge.when)?.label || edge.when;
 }
 
 export default function EditorCanvas({
@@ -215,7 +230,7 @@ export default function EditorCanvas({
     const when = defaultWhen(graph, from);
     onChange(addEdge(graph, { from, to: target, ...(when ? { when } : {}) }));
     setStatus(
-      `${from} → ${target} 간선을 그었습니다.${when ? ` (${when === "true" ? "참" : "거짓"})` : ""}`,
+      `${from} → ${target} 간선을 그었습니다.${when ? ` (${whenLabel(graph, { from, when })})` : ""}`,
     );
   }
 
@@ -427,7 +442,7 @@ export default function EditorCanvas({
                     className="fill-on-surface-variant text-[11px]"
                     style={{ pointerEvents: "none" }}
                   >
-                    {edge.when === "true" ? "참" : "거짓"}
+                    {whenLabel(graph, edge)}
                   </text>
                 )}
                 {bad && (

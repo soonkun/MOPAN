@@ -10,6 +10,10 @@ export const KIND_HELP: Record<GraphNode["kind"], string> = {
   tool: "도구를 한 번 부릅니다. 문서 검색·MCP 도구·다른 워크플로우가 모두 여기입니다.",
   branch: "조건을 보고 나가는 간선 중 참 또는 거짓 하나를 고릅니다.",
   answer: "모인 근거로 답합니다. 그래프당 하나이며 지울 수 없습니다.",
+  llm: "프롬프트로 모델을 한 번 부릅니다. 앞 노드의 값을 {{노드.항목}}으로 프롬프트 안에 섞어 쓸 수 있고, 결과는 {{이노드.text}}로 다음 노드가 읽습니다.",
+  classify: "질문을 정해 둔 갈래 중 하나로 분류하고, 그 갈래의 간선만 엽니다. 분기(참/거짓)의 다중 버전입니다.",
+  extract: "글에서 정해 둔 항목(이름·날짜·수량 등)을 뽑아 {{이노드.항목}}으로 다음 노드가 씁니다. 없는 항목은 비워 둡니다.",
+  template: "앞 노드의 값들을 글 하나로 조합합니다. 비용이 없고 즉시 끝나며, 결과는 {{이노드.text}}입니다.",
 };
 
 /** What a tool node shows on its card without being opened. */
@@ -22,6 +26,11 @@ export function nodeDetail(node: GraphNode): string {
     return query ? `${ref} · ${query}` : ref;
   }
   if (node.kind === "branch") return conditionText(node.condition);
+  const c = node.config ?? {};
+  if (node.kind === "llm") return `${c.model || "기본 모델"} · ${(c.prompt ?? "").replace(/\s+/g, " ").slice(0, 60) || "프롬프트 없음"}`;
+  if (node.kind === "classify") return (c.categories ?? []).map((x) => x.label || x.id).join(" / ") || "갈래 없음";
+  if (node.kind === "extract") return (c.fields ?? []).map((f) => f.name).join(", ") || "항목 없음";
+  if (node.kind === "template") return (c.text ?? "").replace(/\s+/g, " ").slice(0, 70) || "본문 없음";
   return KIND_HELP[node.kind];
 }
 

@@ -20,7 +20,22 @@ export const NODE_KIND_LABEL: Record<GraphNode["kind"], string> = {
   tool: "도구",
   branch: "분기",
   answer: "답변",
+  llm: "모델 호출",
+  classify: "질문 분류",
+  extract: "정보 추출",
+  template: "텍스트 조합",
 };
+
+/** What each kind exposes to `{{id.field}}` downstream - mirrors what
+ * `backend/app/workflow/executor.py` writes into the scope for that kind. */
+export function nodeFields(node: GraphNode): string[] {
+  if (node.kind === "tool") return NODE_FIELDS;
+  if (node.kind === "llm") return ["text", ...(node.config?.output_fields ?? [])];
+  if (node.kind === "classify") return ["category", "label"];
+  if (node.kind === "extract") return (node.config?.fields ?? []).map((f) => f.name);
+  if (node.kind === "template") return ["text", "length"];
+  return [];
+}
 
 /** What a node can be asked for after it has run - `backend/app/workflow/
  * executor.py` writes exactly these into the scope. `items.N.*` is left out of
@@ -110,9 +125,8 @@ export function referenceOptions(
       options.push({ value: "{{input.text}}", label: "질문 전체 ({{input.text}})" });
       continue;
     }
-    if (node.kind !== "tool") continue;
     const name = node.label?.trim() || id;
-    for (const field of NODE_FIELDS) {
+    for (const field of nodeFields(node)) {
       options.push({ value: `{{${id}.${field}}}`, label: `${name} · ${field}` });
     }
   }
@@ -285,7 +299,29 @@ export function addNode(
           y,
           condition: { kind: "exists", of: "" },
         }
-      : {
+      : kind === "llm"
+        ? { id, kind, label: "", x, y, config: { prompt: "{{input.text}}", system: "", model: null, output_fields: [], as_evidence: false } }
+        : kind === "classify"
+          ? {
+              id,
+              kind,
+              label: "",
+              x,
+              y,
+              config: {
+                text: "{{input.text}}",
+                model: null,
+                categories: [
+                  { id: "a", label: "갈래 A", description: "" },
+                  { id: "b", label: "갈래 B", description: "" },
+                ],
+              },
+            }
+          : kind === "extract"
+            ? { id, kind, label: "", x, y, config: { text: "{{input.text}}", model: null, fields: [{ name: "value", type: "string", description: "" }] } }
+            : kind === "template"
+              ? { id, kind, label: "", x, y, config: { text: "{{input.text}}" } }
+              : {
           id,
           kind,
           label: "",
@@ -347,4 +383,45 @@ export function conditionText(condition: GraphCondition | null | undefined): str
     return parts.map(conditionText).join(condition.kind === "and" ? " 그리고 " : " 또는 ");
   }
   return "모델 판단";
+}
+
+/** A copy of a node next to the original, with no edges - the person decides
+ * where it plugs in. `input`/`answer` cannot be duplicated (one per graph). */
+export function duplicateNode(graph: WorkflowGraph, id: string): WorkflowGraph {
+  const node = graph.nodes.find((n) => n.id === id);
+  if (!node || node.kind === "input" || node.kind === "answer") return graph;
+  const copy: GraphNode = JSON.parse(JSON.stringify({ ...node, id: nextNodeId(graph), x: node.x + 40, y: node.y + 60 }));
+  return { nodes: [...graph.nodes, copy], edges: graph.edges };
+}
+
+/** Layered auto-layout: each node sits in the column of its longest path from
+ * `input`, nodes in a column stacked in id order. Deterministic, no library. */
+export function autoLayout(graph: WorkflowGraph, columnWidth = 260, rowHeight = 130): WorkflowGraph {
+  const depth = new Map<string, number>();
+  const incoming = (id: string) => graph.edges.filter((e) => e.to === id).map((e) => e.from);
+  const visiting = new Set<string>();
+  const depthOf = (id: string): number => {
+    if (depth.has(id)) return depth.get(id) as number;
+    if (visiting.has(id)) return 0;
+    visiting.add(id);
+    const parents = incoming(id);
+    const d = parents.length === 0 ? 0 : Math.max(...parents.map(depthOf)) + 1;
+    visiting.delete(id);
+    depth.set(id, d);
+    return d;
+  };
+  for (const n of graph.nodes) depthOf(n.id);
+  const answer = graph.nodes.find((n) => n.kind === "answer");
+  const maxDepth = Math.max(0, ...graph.nodes.filter((n) => n.kind !== "answer").map((n) => depth.get(n.id) ?? 0));
+  if (answer) depth.set(answer.id, maxDepth + 1);
+  const rows = new Map<number, number>();
+  const nodes = [...graph.nodes]
+    .sort((a, b) => (depth.get(a.id) ?? 0) - (depth.get(b.id) ?? 0) || a.id.localeCompare(b.id))
+    .map((n) => {
+      const d = depth.get(n.id) ?? 0;
+      const row = rows.get(d) ?? 0;
+      rows.set(d, row + 1);
+      return { ...n, x: d * columnWidth, y: row * rowHeight };
+    });
+  return { nodes, edges: graph.edges };
 }

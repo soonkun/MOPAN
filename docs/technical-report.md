@@ -814,6 +814,74 @@ Research를 조사했다(§13.6). 공통 골격은 "범위 확정 → 계획(사
 
 ---
 
+## 14. 워크플로우 에디터 — 네 노드와 편집 도구
+
+2026-09-13. 소유자: "분기 기능 정도만 있다. 보통 이런 워크플로우엔 뭐가 있는지 리서치해서 만들어라.
+모바일 UI가 왜 이러냐."
+
+### 14.1 업계 조사 요지
+
+Dify·Coze·Flowise·Langflow·n8n·Copilot Studio·OpenAI Agent Builder를 봤다(§14.5). 노드 어휘는
+Dify가 가장 RAG 친화적이다 - Start, LLM, Knowledge Retrieval, Question Classifier, IF/ELSE, Code,
+Template, Variable Aggregator, Iteration, Parameter Extractor, HTTP Request, Tool, Answer. 편집기
+공통은 undo/redo, 노드 검색, 단축키, 노드별 입출력을 보여 주는 인라인 실행, 초안/게시 버전.
+**모바일에서 그래프를 편집하게 만든 제품은 없다** - 전부 데스크톱 전용이고, 폰은 실행 로그와
+배포된 챗을 보는 용도다.
+
+### 14.2 채택한 것
+
+| 노드 | 하는 일 | 다음 노드가 읽는 값 |
+|---|---|---|
+| 모델 호출(llm) | 프롬프트(템플릿)로 모델을 한 번. 구조화 항목을 적으면 JSON. 근거로 넘길지 선택 | `text`, 항목들 |
+| 질문 분류(classify) | 갈래 중 하나로 분류하고 그 갈래의 간선만 연다 - 분기의 다중 버전 | `category`, `label` |
+| 정보 추출(extract) | 글에서 항목(글·수·예/아니오)을 뽑는다. 없으면 비움 | 항목 이름들 |
+| 텍스트 조합(template) | 앞 노드 값들을 글 하나로. 비용 0, 즉시 | `text`, `length` |
+
+편집기: 되돌리기/다시하기(Ctrl+Z / Ctrl+Shift+Z), 복제(Ctrl+D), 저장(Ctrl+S), 자동 정렬(실행
+순서대로 열 맞춤), 실행해보기와 추적 화면에 모델·텍스트 노드의 **출력 앞부분** 표시.
+모바일: 왼쪽에 세로로 쌓이던 아이콘 레일(햄버거와 겹쳐 보이던 것)을 아래쪽 이름 달린 막대로,
+도구 서랍·노드 설정·실행해보기 패널은 아래에서 올라오는 시트로.
+
+안 만든 것과 이유: **HTTP 요청**(SSRF - MCP 서버 등록이 같은 일을 권한 경계 안에서 한다),
+**코드**(샌드박스 없이는 안 된다), **반복(iteration)**(웨이브 실행기에 하위 그래프 개념이 없다 -
+필요가 생기면 `workflow:` 호출을 항목마다 도는 노드로), **변수 병합**(답변 노드가 이미 모든
+근거를 모은다).
+
+### 14.3 설계에서 지킨 선
+
+- **템플릿 치환은 프롬프트·본문에서만.** 도구 인자의 템플릿 금지(`expr.py`)는 "인자 스키마가
+  무엇인지 말할 수 없게 된다"는 논거였다. 모델이 읽을 글에는 그 논거가 닿지 않으므로 허용하되,
+  참조 하나가 끌어오는 글자는 8,000자로 자른다.
+- **모델 노드는 도구 노드와 같은 계약.** 웨이브(병렬)로 돌고, 호출 상한을 도구 호출과 함께
+  세고, 실패는 노드 하나의 failed이지 죽은 실행이 아니다. 분류 실패는 어느 갈래도 열지 않는다
+  (분기가 조건을 못 풀면 양쪽을 자르는 것과 같은 규칙).
+- **분류 간선은 갈래 id를 `when`으로 갖는다.** 분기의 참/거짓과 같은 자리라 실행기·재개(승인 뒤)
+  경로가 그대로 쓰인다.
+- **eval은 여전히 없다.** 모델의 JSON은 `json.loads`로만 읽고, 갈래 id는 정해진 목록과 대조한다.
+
+### 14.4 실측
+
+라이브 API로 "질문 분류 → (규정: 핵심어 추출 → 문서 검색 / 잡담: 모델 호출) → 답변" 그래프를
+만들어 두 질문을 넣었다(gemma4:26b, vLLM).
+
+| 질문 | 경로 | 시간 |
+|---|---|---|
+| 유사군코드는 어떻게 부여되나요? | 분류 «규정 질문» → 추출 «상표 출원 시 유사군코드 부여 방식» → 검색 → 답변(인용 2) | 16.4s |
+| 안녕? 오늘 기분 좋다! | 분류 «잡담» → 모델 호출 «…행복해지는 기분이야!» → 답변 | 0.3s |
+
+두 경로 모두 안 간 쪽은 skipped로 기록됐고, vLLM의 `response_format: json_object`가 분류·추출의
+JSON을 정확히 냈다. 테스트 8건(`tests/test_workflow_nodes.py`) + 기존 엔진 82건 통과.
+
+### 14.5 참고
+
+- Dify 노드 목록 — https://legacy-docs.dify.ai/guides/workflow/node ; Question Classifier — https://docs.dify.ai/en/guides/workflow/node/question-classifier
+- Dify 오류 처리(재시도·기본값·실패 분기) — https://dify.ai/blog/boost-ai-workflow-resilience-with-error-handling
+- n8n 단축키 — https://docs.n8n.io/keyboard-shortcuts/ ; Human-in-the-loop — https://blog.n8n.io/human-in-the-loop-automation/
+- Coze 조건 노드 — https://docs.coze.com/guides/condition_node
+- Copilot Studio agent flows — https://learn.microsoft.com/en-us/microsoft-copilot-studio/flows-overview
+
+---
+
 ## 부록 A. 재현
 
 ```bash
@@ -866,3 +934,4 @@ scripts/build_lexeme_df.py       # DF 표 (SPARSE_DF_TRIM 용, 기본 꺼짐)
 | **답변 모델 vLLM 서빙** | **채택** | 64명 p95 2.0s, 4,884 tok/s (Ollama 350) | 연속 배칭이 GPU를 쓰고, 고정 슬롯은 줄만 세운다 |
 | **딥 리서치: 지침이 base를 대체** | **채택(수정)** | 보고서 구조 범용 3절 → 지침 12절 | 모델은 먼저 읽은 구성을 따른다 |
 | **딥 리서치: 첨부 선독(검토 대상 요약)** | **채택** | 관점 9개가 계획서의 목표·산출물에서 나옴 | 30,000자 본문은 플래너를 표지로 끈다 |
+| **워크플로우 노드 넷(모델 호출·분류·추출·조합)** | **채택** | 분류→추출→검색 16.4s, 잡담 0.3s | 도구 노드와 같은 계약, 템플릿은 글에서만 |

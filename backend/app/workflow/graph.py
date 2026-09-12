@@ -47,9 +47,14 @@ from app.workflow.catalogue import (
     AvailableWorkflow,
     workflow_risk_level,
 )
-from app.workflow.expr import ExpressionError, check_condition, references_in
+from app.workflow.expr import ExpressionError, check_condition, references_in, template_references
 
-NODE_KINDS = ("input", "tool", "branch", "answer")
+NODE_KINDS = ("input", "tool", "branch", "answer", "llm", "classify", "extract", "template")
+# 모델을 부르는 노드. 도구 노드처럼 시간과 돈을 쓰므로 웨이브(병렬)로 돌고 호출 상한을 센다.
+MODEL_NODE_KINDS = ("llm", "classify", "extract")
+MAX_CATEGORIES = 12
+MAX_EXTRACT_FIELDS = 12
+MAX_PROMPT_CHARS = 20_000
 INPUT_NODE_KIND = "input"
 ANSWER_NODE_KIND = "answer"
 
@@ -78,6 +83,13 @@ EMPTY_QUERY_MESSAGE = "검색어가 없는 검색 노드가 있습니다."
 MISSING_CONDITION_MESSAGE = "조건이 없는 분기 노드가 있습니다: {name}"
 BRANCH_EDGE_MESSAGE = "분기 노드의 간선에는 참/거짓을 지정해야 합니다: {name}"
 NON_BRANCH_WHEN_MESSAGE = "분기 노드가 아닌 곳의 간선에는 참/거짓을 지정할 수 없습니다: {name}"
+EMPTY_PROMPT_MESSAGE = "프롬프트가 비어 있는 모델 호출 노드가 있습니다: {name}"
+EMPTY_TEMPLATE_MESSAGE = "본문이 비어 있는 텍스트 조합 노드가 있습니다: {name}"
+BAD_CATEGORIES_MESSAGE = "질문 분류 노드에는 서로 다른 갈래가 2~{limit}개 있어야 합니다: {name}"
+BAD_FIELDS_MESSAGE = "정보 추출 노드에는 이름이 올바른 항목이 1~{limit}개 있어야 합니다: {name}"
+CLASSIFY_EDGE_MESSAGE = "질문 분류 노드의 간선에는 갈래 이름을 지정해야 합니다: {name}"
+UNKNOWN_CATEGORY_EDGE_MESSAGE = "질문 분류 노드에 없는 갈래를 잇는 간선이 있습니다: {name}"
+TOO_LONG_PROMPT_MESSAGE = "프롬프트가 너무 깁니다(최대 {limit}자): {name}"
 
 _ID_OK = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
 
@@ -120,6 +132,12 @@ class Node:
     arguments: dict = field(default_factory=dict)
     # kind == "branch"
     condition: dict | None = None
+    # kind in llm/classify/extract/template. 종류별 키:
+    #   llm:      prompt(템플릿), system, model, output_fields[list[str]], as_evidence[bool]
+    #   classify: text(템플릿, 기본 {{input.text}}), categories[list[{id,label,description}]], model
+    #   extract:  text(템플릿), fields[list[{name,description,type}]], model
+    #   template: text(템플릿)
+    config: dict = field(default_factory=dict)
 
     @property
     def tool_ref(self) -> str | None:
@@ -217,6 +235,7 @@ class WorkflowGraph:
                         else {}
                     ),
                     **({"condition": node.condition} if node.kind == "branch" else {}),
+                    **({"config": node.config} if node.kind in (*MODEL_NODE_KINDS, "template") else {}),
                 }
                 for node in self.nodes
             ],
@@ -414,6 +433,9 @@ def validate_graph(
             nodes.append(
                 Node(id=node_id, kind="branch", label=label or "분기", x=x, y=y, condition=condition)
             )
+        elif kind in (*MODEL_NODE_KINDS, "template"):
+            config = _parse_config(kind, node_id, entry.get("config"))
+            nodes.append(Node(id=node_id, kind=kind, label=label or CONFIG_KIND_LABEL[kind], x=x, y=y, config=config))
         else:
             nodes.append(
                 Node(
@@ -438,6 +460,10 @@ def validate_graph(
 
     ids = {node.id for node in nodes}
     branch_ids = {node.id for node in nodes if node.kind == "branch"}
+    # 질문 분류 노드의 간선은 갈래 id를 `when`으로 갖는다 - 분기의 참/거짓과 같은 자리.
+    categories_of = {
+        node.id: {c["id"] for c in node.config.get("categories", [])} for node in nodes if node.kind == "classify"
+    }
     edges: list[Edge] = []
     for entry in raw_edges:
         if not isinstance(entry, dict):
@@ -449,6 +475,13 @@ def validate_graph(
         if source == target:
             raise GraphError(SELF_EDGE_MESSAGE.format(name=str(source)[:50]))
         when = entry.get("when")
+        if source in categories_of:
+            if not isinstance(when, str) or not when:
+                raise GraphError(CLASSIFY_EDGE_MESSAGE.format(name=str(source)[:50]))
+            if when not in categories_of[source]:
+                raise GraphError(UNKNOWN_CATEGORY_EDGE_MESSAGE.format(name=f"{source}:{when}"[:50]))
+            edges.append(Edge(source=source, target=target, when=when))
+            continue
         if when is not None:
             when = "true" if when in (True, "true") else "false" if when in (False, "false") else None
             if when is None:
@@ -482,7 +515,97 @@ def validate_graph(
             head = reference.segments[0]
             if head not in ids or position[head] >= position[node.id]:
                 raise GraphError(FORWARD_REFERENCE_MESSAGE.format(name=reference.raw[:100]))
+    for node in nodes:
+        for reference in config_references(node):
+            head = reference.segments[0]
+            if head not in ids or position[head] >= position[node.id]:
+                raise GraphError(FORWARD_REFERENCE_MESSAGE.format(name=reference.raw[:100]))
     return graph
+
+
+CONFIG_KIND_LABEL = {"llm": "모델 호출", "classify": "질문 분류", "extract": "정보 추출", "template": "텍스트 조합"}
+_TEMPLATE_KEYS = {"llm": ("prompt", "system"), "classify": ("text",), "extract": ("text",), "template": ("text",)}
+
+
+def config_references(node: Node) -> list:
+    """모델·텍스트 노드의 본문(템플릿)이 참조하는 노드들. 저장 시 도달 가능성 검사용."""
+    found = []
+    for key in _TEMPLATE_KEYS.get(node.kind, ()):
+        found.extend(template_references(node.config.get(key)))
+    return found
+
+
+def _parse_config(kind: str, node_id: str, raw: object) -> dict:
+    """종류별 설정을 검사해 정돈한 dict로. 모르는 키는 버린다 - 저장된 그래프는 코드보다 오래 산다."""
+    raw = raw if isinstance(raw, dict) else {}
+    name = node_id[:50]
+
+    def text_of(key: str, *, required: bool, default: str = "") -> str:
+        value = raw.get(key)
+        value = value.strip() if isinstance(value, str) else ""
+        if not value:
+            value = default
+        if len(value) > MAX_PROMPT_CHARS:
+            raise GraphError(TOO_LONG_PROMPT_MESSAGE.format(limit=MAX_PROMPT_CHARS, name=name))
+        try:
+            template_references(value)
+        except ExpressionError as exc:
+            raise GraphError(str(exc)) from exc
+        if required and not value:
+            raise GraphError((EMPTY_PROMPT_MESSAGE if kind == "llm" else EMPTY_TEMPLATE_MESSAGE).format(name=name))
+        return value
+
+    model = raw.get("model")
+    model = model.strip()[:100] if isinstance(model, str) and model.strip() else None
+    if kind == "template":
+        return {"text": text_of("text", required=True)}
+    if kind == "llm":
+        fields = [f for f in _as_str_list(raw.get("output_fields")) if SEGMENT_RE_OK(f)][:MAX_EXTRACT_FIELDS]
+        return {
+            "prompt": text_of("prompt", required=True),
+            "system": text_of("system", required=False),
+            "model": model,
+            "output_fields": fields,
+            "as_evidence": bool(raw.get("as_evidence")),
+        }
+    if kind == "classify":
+        categories = []
+        seen: set[str] = set()
+        for item in raw.get("categories") if isinstance(raw.get("categories"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            cid = item.get("id")
+            if not isinstance(cid, str) or not SEGMENT_RE_OK(cid) or cid in seen:
+                continue
+            seen.add(cid)
+            label = item.get("label") if isinstance(item.get("label"), str) else ""
+            description = item.get("description") if isinstance(item.get("description"), str) else ""
+            categories.append({"id": cid[:40], "label": label.strip()[:80] or cid, "description": description.strip()[:300]})
+        if not 2 <= len(categories) <= MAX_CATEGORIES:
+            raise GraphError(BAD_CATEGORIES_MESSAGE.format(limit=MAX_CATEGORIES, name=name))
+        return {"text": text_of("text", required=False, default="{{input.text}}"), "categories": categories, "model": model}
+    # extract
+    fields = []
+    seen_names: set[str] = set()
+    for item in raw.get("fields") if isinstance(raw.get("fields"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        fname = item.get("name")
+        if not isinstance(fname, str) or not SEGMENT_RE_OK(fname) or fname in seen_names:
+            continue
+        seen_names.add(fname)
+        ftype = item.get("type") if item.get("type") in ("string", "number", "boolean") else "string"
+        description = item.get("description") if isinstance(item.get("description"), str) else ""
+        fields.append({"name": fname[:40], "type": ftype, "description": description.strip()[:300]})
+    if not 1 <= len(fields) <= MAX_EXTRACT_FIELDS:
+        raise GraphError(BAD_FIELDS_MESSAGE.format(limit=MAX_EXTRACT_FIELDS, name=name))
+    return {"text": text_of("text", required=False, default="{{input.text}}"), "fields": fields, "model": model}
+
+
+def SEGMENT_RE_OK(value: str) -> bool:
+    from app.workflow.expr import SEGMENT_RE
+
+    return bool(value) and len(value) <= 40 and SEGMENT_RE.match(value) is not None
 
 
 def _condition_references(condition: object) -> list:

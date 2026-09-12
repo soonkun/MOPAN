@@ -165,6 +165,7 @@ function PlanSection({ plan }: { plan: TracePlan }) {
                 {step.depth ? ` · ${step.depth}단계 안쪽` : ""}
                 {step.depends_on?.length ? ` · ${step.depends_on.join(", ")} 이후` : ""}
               </p>
+              {step.output && <p className="mt-1 whitespace-pre-wrap text-caption text-on-surface">“{step.output}”</p>}
               {step.error && <p className="mt-1 text-caption text-error">{step.error}</p>}
             </li>
           ))}

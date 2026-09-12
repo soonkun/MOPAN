@@ -7,7 +7,7 @@ import EditorCanvas, { type Selection } from "@/components/workflows/EditorCanva
 import Inspector, { type Catalog, type Draft } from "@/components/workflows/Inspector";
 import TestRun from "@/components/workflows/TestRun";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
-import { placeGraphError, starterGraph } from "@/lib/graph";
+import { autoLayout, duplicateNode, placeGraphError, starterGraph } from "@/lib/graph";
 import type {
   AnswerModel,
   CallableTool,
@@ -184,10 +184,83 @@ export default function WorkflowEditorPage() {
   /** Editing the graph clears the refusal about it. A message pointing at an
    * edge the user has just deleted would be pointing at whatever now sits at
    * that index, which is worse than no message. */
+  // 되돌리기/다시하기. 그래프 변경마다 이전 상태를 쌓는다(좌표 이동 포함 - 배치도 되돌릴 가치가
+  // 있다). 상한 100. 저장·불러오기는 이력을 비우지 않는다 - 저장 뒤에도 되돌릴 수 있어야 한다.
+  const historyRef = useRef<{ past: WorkflowGraph[]; future: WorkflowGraph[] }>({ past: [], future: [] });
+  const [historyTick, setHistoryTick] = useState(0);
   function changeGraph(next: WorkflowGraph) {
-    setGraph(next);
+    setGraph((prev) => {
+      if (prev !== next) {
+        historyRef.current.past = [...historyRef.current.past.slice(-99), prev];
+        historyRef.current.future = [];
+      }
+      return next;
+    });
     setGraphError(null);
+    setHistoryTick((t) => t + 1);
   }
+  function undo() {
+    const past = historyRef.current.past;
+    if (past.length === 0) return;
+    setGraph((current) => {
+      const previous = past[past.length - 1];
+      historyRef.current.past = past.slice(0, -1);
+      historyRef.current.future = [current, ...historyRef.current.future].slice(0, 100);
+      return previous;
+    });
+    setGraphError(null);
+    setHistoryTick((t) => t + 1);
+  }
+  function redo() {
+    const future = historyRef.current.future;
+    if (future.length === 0) return;
+    setGraph((current) => {
+      const next = future[0];
+      historyRef.current.future = future.slice(1);
+      historyRef.current.past = [...historyRef.current.past, current];
+      return next;
+    });
+    setGraphError(null);
+    setHistoryTick((t) => t + 1);
+  }
+  void historyTick;
+  const canUndo = historyRef.current.past.length > 0;
+  const canRedo = historyRef.current.future.length > 0;
+  function duplicateSelected() {
+    if (!selection || !("node" in selection) || !selection.node) return;
+    const next = duplicateNode(graph, selection.node);
+    if (next === graph) return;
+    changeGraph(next);
+    setSelection({ node: next.nodes[next.nodes.length - 1].id });
+  }
+  // 단축키: Ctrl/⌘+Z 되돌리기, Ctrl/⌘+Shift+Z·Ctrl+Y 다시하기, Ctrl/⌘+D 복제, Ctrl/⌘+S 저장.
+  // 입력 칸 안에서는 브라우저 기본 동작(글자 되돌리기)이 우선이다.
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable);
+      if (!(event.ctrlKey || event.metaKey)) return;
+      const key = event.key.toLowerCase();
+      if (key === "s") {
+        event.preventDefault();
+        void save();
+        return;
+      }
+      if (typing) return;
+      if (key === "z" && !event.shiftKey) {
+        event.preventDefault();
+        undo();
+      } else if ((key === "z" && event.shiftKey) || key === "y") {
+        event.preventDefault();
+        redo();
+      } else if (key === "d") {
+        event.preventDefault();
+        duplicateSelected();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   async function save() {
     setSaving(true);
@@ -316,7 +389,28 @@ export default function WorkflowEditorPage() {
             중지됨
           </span>
         )}
-        <div className="ml-auto flex shrink-0 items-center gap-2">
+        <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-2">
+          {/* 편집 도구: 되돌리기·다시하기·정렬. 아이콘만, 툴팁이 이름. */}
+          <button type="button" onClick={undo} disabled={!canUndo} aria-label="되돌리기 (Ctrl+Z)" title="되돌리기 (Ctrl+Z)" className="icon-btn h-9 w-9 disabled:opacity-40">
+            <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 14 4 9l5-5" />
+              <path d="M4 9h10a6 6 0 0 1 0 12h-3" />
+            </svg>
+          </button>
+          <button type="button" onClick={redo} disabled={!canRedo} aria-label="다시하기 (Ctrl+Shift+Z)" title="다시하기 (Ctrl+Shift+Z)" className="icon-btn h-9 w-9 disabled:opacity-40">
+            <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="m15 14 5-5-5-5" />
+              <path d="M20 9H10a6 6 0 0 0 0 12h3" />
+            </svg>
+          </button>
+          <button type="button" onClick={() => changeGraph(autoLayout(graph))} aria-label="자동 정렬" title="자동 정렬 - 실행 순서대로 열을 맞춥니다" className="icon-btn h-9 w-9">
+            <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+              <rect x="3" y="4" width="6" height="6" rx="1.5" />
+              <rect x="15" y="4" width="6" height="6" rx="1.5" />
+              <rect x="15" y="14" width="6" height="6" rx="1.5" />
+              <path d="M9 7h6M9 7c3 0 3 10 6 10" />
+            </svg>
+          </button>
           {/* 아이콘+라벨 가변형(소유자 지정): 모바일은 아이콘만, 데스크톱은
               글자까지. aria-label이 아이콘만 남는 화면의 이름이다. */}
           <button
@@ -398,7 +492,7 @@ export default function WorkflowEditorPage() {
 
           {/* 왼쪽 레일: 워크플로우 설정 · 도구 · 노드 순(소유자 지정). 패널은
               전부 레일 옆에 떠서 열리고, 캔버스는 항상 전체 화면이다. */}
-          <div className="pointer-events-auto absolute left-3 top-3 z-20 flex flex-col items-start gap-2">
+          <div className="pointer-events-auto absolute inset-x-3 bottom-3 z-20 flex flex-row items-stretch gap-1 rounded-md bg-surface-container p-1 shadow-menu sm:inset-x-auto sm:bottom-auto sm:left-3 sm:top-3 sm:flex-col sm:items-start sm:gap-2 sm:bg-transparent sm:p-0 sm:shadow-none">
             <button
               type="button"
               onClick={() => {
@@ -407,7 +501,7 @@ export default function WorkflowEditorPage() {
               }}
               aria-label="워크플로우 설정"
               aria-expanded={panel === "settings"}
-              className={`flex h-10 items-center gap-2 rounded-md px-2.5 text-label shadow-menu sm:px-3 ${
+              className={`flex h-10 flex-1 items-center justify-center gap-2 rounded-md px-2.5 text-label sm:flex-none sm:justify-start sm:shadow-menu sm:px-3 ${
                 panel === "settings"
                   ? "bg-primary-container text-on-primary-container"
                   : "bg-surface-container text-on-surface hover:bg-surface-container-high"
@@ -418,7 +512,7 @@ export default function WorkflowEditorPage() {
                 <circle cx="15" cy="7" r="2.2" />
                 <circle cx="11" cy="17" r="2.2" />
               </svg>
-              <span className="hidden sm:inline">워크플로우 설정</span>
+              <span className="sm:hidden">설정</span><span className="hidden sm:inline">워크플로우 설정</span>
             </button>
             <button
               type="button"
@@ -428,7 +522,7 @@ export default function WorkflowEditorPage() {
               }}
               aria-label="도구"
               aria-expanded={paletteOpen}
-              className={`flex h-10 items-center gap-2 rounded-md px-2.5 text-label shadow-menu sm:px-3 ${
+              className={`flex h-10 flex-1 items-center justify-center gap-2 rounded-md px-2.5 text-label sm:flex-none sm:justify-start sm:shadow-menu sm:px-3 ${
                 paletteOpen
                   ? "bg-primary-container text-on-primary-container"
                   : "bg-surface-container text-on-surface hover:bg-surface-container-high"
@@ -440,7 +534,7 @@ export default function WorkflowEditorPage() {
               <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
               </svg>
-              <span className="hidden sm:inline">도구</span>
+              <span>도구</span>
             </button>
             <button
               type="button"
@@ -449,7 +543,7 @@ export default function WorkflowEditorPage() {
               title={selection ? undefined : "캔버스에서 노드나 간선을 누르면 열립니다."}
               aria-label="노드"
               aria-expanded={panel === "selection"}
-              className={`flex h-10 items-center gap-2 rounded-md px-2.5 text-label shadow-menu disabled:opacity-50 sm:px-3 ${
+              className={`flex h-10 flex-1 items-center justify-center gap-2 rounded-md px-2.5 text-label sm:flex-none sm:justify-start sm:shadow-menu disabled:opacity-50 sm:px-3 ${
                 panel === "selection"
                   ? "bg-primary-container text-on-primary-container"
                   : "bg-surface-container text-on-surface hover:bg-surface-container-high"
@@ -459,13 +553,13 @@ export default function WorkflowEditorPage() {
                 <rect x="5" y="5" width="14" height="14" rx="2.5" />
                 <rect x="9.5" y="9.5" width="5" height="5" rx="1" />
               </svg>
-              <span className="hidden sm:inline">노드</span>
+              <span>노드</span>
             </button>
           </div>
 
           {/* 수납 패널 - 도구 서랍과 같은 자리(레일 옆)에서 열린다. */}
           {(panel === "settings" || (panel === "selection" && selection)) && (
-            <div className="pointer-events-auto absolute bottom-3 left-3 top-[9.75rem] z-10 flex w-80 max-w-[calc(100%-1.5rem)] overflow-hidden rounded-md shadow-menu">
+            <div className="pointer-events-auto absolute inset-x-3 bottom-16 top-auto z-10 flex max-h-[62%] overflow-hidden rounded-md shadow-menu sm:inset-x-auto sm:bottom-3 sm:left-3 sm:top-[9.75rem] sm:max-h-none sm:w-80 sm:max-w-[calc(100%-1.5rem)]">
               <Inspector
                 graph={graph}
                 onChangeGraph={changeGraph}
@@ -486,6 +580,7 @@ export default function WorkflowEditorPage() {
                 versions={versions}
                 onRollBack={(v) => void rollBack(v)}
                 onDeleteVersion={setVersionToDelete}
+                onDuplicate={duplicateSelected}
               />
             </div>
           )}

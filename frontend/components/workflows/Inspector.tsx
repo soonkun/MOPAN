@@ -14,7 +14,8 @@ import {
   KIND_HELP,
   ValueField,
 } from "@/components/workflows/fields";
-import { defaultWhen, type Selection } from "@/components/workflows/EditorCanvas";
+import { defaultWhen, type Selection, whenLabel } from "@/components/workflows/EditorCanvas";
+import ConfigEditor from "@/components/workflows/ConfigEditors";
 import type {
   AnswerModel,
   CallableTool,
@@ -73,6 +74,8 @@ function NodePanel({
   onSelect,
   callables,
   mcpTools,
+  models,
+  onDuplicate,
   error,
 }: {
   node: GraphNode;
@@ -81,10 +84,13 @@ function NodePanel({
   onSelect: (next: Selection) => void;
   callables: CallableTool[];
   mcpTools: McpToolOption[];
+  models: AnswerModel[];
+  onDuplicate?: () => void;
   error: { node?: string; edge?: number; text: string } | null;
 }) {
   const uid = useId();
   const fixed = node.kind === "input" || node.kind === "answer";
+  const configured = node.kind === "llm" || node.kind === "classify" || node.kind === "extract" || node.kind === "template";
   const options = referenceOptions(graph, node.id);
   const ref = node.tool ?? "rag";
   const ragCollections = callables.find((c) => c.kind === "rag")?.collections ?? [];
@@ -111,6 +117,11 @@ function NodePanel({
           </h2>
           <p className="mt-1 text-caption text-on-surface-variant">{KIND_HELP[node.kind]}</p>
         </div>
+        {!fixed && onDuplicate && (
+          <button type="button" onClick={onDuplicate} className="btn-tonal btn-compact shrink-0" title="복제 (Ctrl+D)">
+            복제
+          </button>
+        )}
       </div>
       {error?.node === node.id && (
         <p className="mx-4 mt-2 rounded-sm bg-error-container px-2 py-1 text-caption text-on-error-container">
@@ -223,6 +234,12 @@ function NodePanel({
         </Section>
       )}
 
+      {configured && (
+        <Section title="설정">
+          <ConfigEditor node={node} options={options} models={models} onChange={(config) => change({ config })} />
+        </Section>
+      )}
+
       {node.kind !== "answer" && (
         <Section title="나가는 간선">
           <p className="text-caption text-on-surface-variant">
@@ -245,24 +262,30 @@ function NodePanel({
                   <div className="flex items-center justify-between gap-2">
                     <span className="min-w-0 truncate text-body">→ {edge.to}</span>
                     <span className="flex shrink-0 items-center gap-1">
-                      {node.kind === "branch" && (
+                      {(node.kind === "branch" || node.kind === "classify") && (
                         <select
-                          value={edge.when ?? "true"}
+                          value={edge.when ?? (node.kind === "branch" ? "true" : "")}
                           onChange={(event) =>
                             onChangeGraph({
                               nodes: graph.nodes,
-                              edges: graph.edges.map((e, i) =>
-                                i === index
-                                  ? { ...e, when: event.target.value as "true" | "false" }
-                                  : e,
-                              ),
+                              edges: graph.edges.map((e, i) => (i === index ? { ...e, when: event.target.value } : e)),
                             })
                           }
                           className="field h-8 text-caption"
                           aria-label={`${edge.from} → ${edge.to} 조건`}
                         >
-                          <option value="true">참</option>
-                          <option value="false">거짓</option>
+                          {node.kind === "branch" ? (
+                            <>
+                              <option value="true">참</option>
+                              <option value="false">거짓</option>
+                            </>
+                          ) : (
+                            (node.config?.categories ?? []).map((cat) => (
+                              <option key={cat.id} value={cat.id}>
+                                {cat.label || cat.id}
+                              </option>
+                            ))
+                          )}
                         </select>
                       )}
                       <button
@@ -367,24 +390,33 @@ function EdgePanel({
           {error.text}
         </p>
       )}
-      {source?.kind === "branch" && (
-        <Section title="조건">
+      {(source?.kind === "branch" || source?.kind === "classify") && (
+        <Section title={source.kind === "branch" ? "조건" : "갈래"}>
           <select
-            value={edge.when ?? "true"}
+            value={edge.when ?? (source.kind === "branch" ? "true" : "")}
             onChange={(event) =>
               onChangeGraph({
                 nodes: graph.nodes,
-                edges: graph.edges.map((e, i) =>
-                  i === index ? { ...e, when: event.target.value as "true" | "false" } : e,
-                ),
+                edges: graph.edges.map((e, i) => (i === index ? { ...e, when: event.target.value } : e)),
               })
             }
             className="field w-full"
             aria-label="간선 조건"
           >
-            <option value="true">참</option>
-            <option value="false">거짓</option>
+            {source.kind === "branch" ? (
+              <>
+                <option value="true">참</option>
+                <option value="false">거짓</option>
+              </>
+            ) : (
+              (source.config?.categories ?? []).map((cat) => (
+                <option key={cat.id} value={cat.id}>
+                  {cat.label || cat.id}
+                </option>
+              ))
+            )}
           </select>
+          <p className="text-caption text-on-surface-variant">지금: {whenLabel(graph, edge)}</p>
         </Section>
       )}
       <div className="px-4 py-4">
@@ -654,6 +686,7 @@ export default function Inspector({
   versions,
   onRollBack,
   onDeleteVersion,
+  onDuplicate,
 }: {
   graph: WorkflowGraph;
   onChangeGraph: (next: WorkflowGraph) => void;
@@ -671,6 +704,7 @@ export default function Inspector({
   versions: WorkflowVersion[];
   onRollBack: (version: number) => void;
   onDeleteVersion: (version: number) => void;
+  onDuplicate?: () => void;
 }) {
   const node =
     selection && "node" in selection ? graph.nodes.find((n) => n.id === selection.node) : null;
@@ -679,7 +713,7 @@ export default function Inspector({
   return (
     <aside
       aria-label="설정"
-      className="flex h-full w-80 shrink-0 flex-col overflow-y-auto border-l border-outline-variant bg-surface-container-low"
+      className="flex h-full w-full shrink-0 flex-col overflow-y-auto border-l border-outline-variant bg-surface-container-low sm:w-80"
     >
       {node ? (
         <NodePanel
@@ -689,6 +723,8 @@ export default function Inspector({
           onSelect={onSelect}
           callables={callables}
           mcpTools={mcpTools}
+          models={catalog.models}
+          onDuplicate={onDuplicate}
           error={error}
         />
       ) : edge !== null ? (

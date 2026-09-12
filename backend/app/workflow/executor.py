@@ -32,6 +32,7 @@ untaken side of a branch not run rather than run-and-be-ignored.
 """
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -40,17 +41,20 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
 from app.core.logging import log_event
-from app.llm.base import LLMProvider
+from app.llm.base import ChatMessage, LLMProvider
 from app.models.mcp import RISK_LEVELS
 from app.retrieval.evidence import Evidence
 from app.retrieval.reranker import Reranker
 from app.workflow.catalogue import AvailableResources
-from app.workflow.expr import ExpressionError, evaluate, resolve
-from app.workflow.graph import Node, WorkflowGraph
+from app.workflow.expr import ExpressionError, evaluate, render_template, resolve
+from app.workflow.graph import Node, WorkflowGraph, MODEL_NODE_KINDS
 from app.workflow.tools import ToolContext, ToolLimitError, tool_for
 
 logger = logging.getLogger("mopan.workflow")
 
+MODEL_OUTPUT_MESSAGE = "모델의 출력을 이해하지 못했습니다."
+UNKNOWN_CATEGORY_MESSAGE = "모델이 정해진 갈래 밖의 답을 냈습니다: {name}"
+OUTPUT_PREVIEW_CHARS = 300
 NODE_FAILED_MESSAGE = "노드 실행에 실패했습니다."
 NODE_TIMEOUT_MESSAGE = "제한 시간을 넘겨 실행하지 못했습니다."
 NODE_DENIED_MESSAGE = "사용자가 실행을 거부했습니다."
@@ -119,6 +123,21 @@ def evidence_from_dict(raw: dict) -> Evidence:
         score=raw.get("score"),
         metadata=raw.get("metadata") or {},
     )
+
+
+def _json_object(text: str) -> dict:
+    """모델의 JSON 답을 dict로. 코드 펜스는 벗기고, 객체가 아니면 실패."""
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        cleaned = cleaned[4:] if cleaned.lower().startswith("json") else cleaned
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ExpressionError(MODEL_OUTPUT_MESSAGE) from exc
+    if not isinstance(parsed, dict):
+        raise ExpressionError(MODEL_OUTPUT_MESSAGE)
+    return parsed
 
 
 def node_value(items: list[Evidence]) -> dict:
@@ -209,6 +228,8 @@ class WorkflowRun:
         # The variable space `{{...}}` reads. `input` is seeded before anything
         # runs, which is why `{{input.text}}` is always legal.
         self._scope: dict[str, dict] = {}
+        # 질문 분류 노드가 고른 갈래. 웨이브가 끝난 뒤 간선을 풀 때 `taken`으로 쓴다.
+        self._taken: dict[str, str] = {}
 
     # -- reading the result ------------------------------------------------
 
@@ -233,6 +254,7 @@ class WorkflowRun:
         cannot supply.
         """
         tool_ids = [n.id for n in self.graph.tool_nodes() if n.tool is not None or n.workflow is not None]
+        tool_ids += [n.id for n in self.graph.nodes if n.kind == "llm" and n.config.get("as_evidence")]
         rag_ids = [n.id for n in self.graph.tool_nodes() if n.tool is None and n.workflow is None]
         merged: list[Evidence] = []
         seen: set[str] = set()
@@ -289,6 +311,7 @@ class WorkflowRun:
         ms: int = 0,
         error: str | None = None,
         arguments: dict | None = None,
+        output: str | None = None,
     ) -> dict:
         entry = {
             "id": node.id,
@@ -309,6 +332,9 @@ class WorkflowRun:
             "evidence_count": count,
             "ms": ms,
             "error": error,
+            # 모델·텍스트 노드가 만든 값의 앞부분 - 실행해보기 화면이 "이 노드가 무엇을
+            # 냈나"를 보여 주는 유일한 창. 도구 노드는 근거 수가 그 역할을 한다.
+            "output": output,
         }
         self.node_trace.append(entry)
         return entry
@@ -323,6 +349,7 @@ class WorkflowRun:
             "evidence_count": entry["evidence_count"],
             "ms": entry["ms"],
             "detail": entry["error"],
+            "output": entry.get("output"),
         }
 
     def _activate(self, node_id: str, *, taken: str | None = None) -> None:
@@ -411,6 +438,114 @@ class WorkflowRun:
         )
         self._fold_nested(node, tool)
 
+    async def _run_model(self, node: Node) -> None:
+        """모델 호출·질문 분류·정보 추출. 도구 노드와 같은 계약: 실패는 노드 하나의 failed이고
+        실행은 계속된다. 호출 상한(orchestrator_max_tool_calls)을 도구 호출과 함께 센다 -
+        모델 호출도 돈이다."""
+        started = time.perf_counter()
+        cfg = node.config
+        try:
+            self.ctx.spend()
+            model = cfg.get("model") or self.settings.answer_model
+            if node.kind == "llm":
+                prompt = render_template(cfg.get("prompt", ""), self._scope)
+                system = render_template(cfg.get("system", ""), self._scope)
+                fields = list(cfg.get("output_fields") or [])
+                messages = []
+                if fields:
+                    system = (system + "\n\n" if system else "") + (
+                        "Answer with ONE JSON object with exactly these keys: " + ", ".join(fields) + ". "
+                        "Values are strings (Korean unless the content dictates otherwise). No other keys, no prose."
+                    )
+                if system:
+                    messages.append(ChatMessage(role="system", content=system))
+                messages.append(ChatMessage(role="user", content=prompt))
+                kwargs = {"model": model, "temperature": 0.2, "max_tokens": 2048}
+                if fields:
+                    kwargs["response_format"] = {"type": "json_object"}
+                result = await self.ctx.llm_provider.chat(messages, **kwargs)
+                text = (result.content or "").strip()
+                value: dict = {"text": text}
+                if fields:
+                    parsed = _json_object(text)
+                    for key in fields:
+                        item = parsed.get(key)
+                        value[key] = item if isinstance(item, str | int | float | bool) or item is None else json.dumps(item, ensure_ascii=False)
+                self._scope[node.id] = value
+                if cfg.get("as_evidence") and text:
+                    self.results[node.id] = [
+                        Evidence(source_type="llm", ref=f"llm:{node.id}", content=text, score=1.0,
+                                 metadata={"filename": node.label or node.id, "node": node.id})
+                    ]
+                self._record(node, "done", count=len(self.results.get(node.id, [])),
+                             ms=int((time.perf_counter() - started) * 1000), output=text[:OUTPUT_PREVIEW_CHARS])
+                return
+            if node.kind == "classify":
+                text = render_template(cfg.get("text", "{{input.text}}"), self._scope)
+                categories = cfg.get("categories") or []
+                listing = "\n".join(
+                    f"- {c['id']}: {c.get('label') or c['id']}" + (f" - {c['description']}" if c.get("description") else "")
+                    for c in categories
+                )
+                system = (
+                    "You classify a user message into exactly one of the categories below. "
+                    "Answer with ONE JSON object: {\"category\": \"<id>\"} using the id exactly as written. No other keys.\n\n"
+                    f"Categories:\n{listing}"
+                )
+                result = await self.ctx.llm_provider.chat(
+                    [ChatMessage(role="system", content=system), ChatMessage(role="user", content=text)],
+                    model=model, temperature=0.0, max_tokens=64, response_format={"type": "json_object"},
+                )
+                chosen = str(_json_object(result.content or "").get("category") or "").strip()
+                match = next((c for c in categories if c["id"] == chosen), None)
+                if match is None:
+                    # 모델이 id 대신 라벨을 답하는 흔한 실수는 봐준다.
+                    match = next((c for c in categories if c.get("label") == chosen), None)
+                if match is None:
+                    raise ExpressionError(UNKNOWN_CATEGORY_MESSAGE.format(name=chosen[:50]))
+                self._taken[node.id] = match["id"]
+                self._scope[node.id] = {"category": match["id"], "label": match.get("label") or match["id"]}
+                self._record(node, "done", ms=int((time.perf_counter() - started) * 1000),
+                             arguments={"category": match["id"]}, output=match.get("label") or match["id"])
+                return
+            # extract
+            text = render_template(cfg.get("text", "{{input.text}}"), self._scope)
+            fields = cfg.get("fields") or []
+            listing = "\n".join(
+                f"- {f['name']} ({f.get('type', 'string')}): {f.get('description') or ''}".rstrip(": ") for f in fields
+            )
+            system = (
+                "Extract the following fields from the user's text. Answer with ONE JSON object whose keys are exactly "
+                "the field names. Use null for a field the text does not state - never guess. "
+                "Numbers as JSON numbers, booleans as true/false, everything else as strings.\n\n"
+                f"Fields:\n{listing}"
+            )
+            result = await self.ctx.llm_provider.chat(
+                [ChatMessage(role="system", content=system), ChatMessage(role="user", content=text)],
+                model=model, temperature=0.0, max_tokens=1024, response_format={"type": "json_object"},
+            )
+            parsed = _json_object(result.content or "")
+            value = {}
+            for f in fields:
+                item = parsed.get(f["name"])
+                if f.get("type") == "number" and isinstance(item, str):
+                    try:
+                        item = float(item) if "." in item else int(item)
+                    except ValueError:
+                        item = None
+                value[f["name"]] = item if isinstance(item, str | int | float | bool) or item is None else json.dumps(item, ensure_ascii=False)
+            self._scope[node.id] = value
+            self._record(node, "done", ms=int((time.perf_counter() - started) * 1000),
+                         arguments={k: v for k, v in value.items()},
+                         output=json.dumps(value, ensure_ascii=False)[:OUTPUT_PREVIEW_CHARS])
+        except asyncio.CancelledError:
+            raise
+        except (ExpressionError, ToolLimitError) as exc:
+            self._record(node, "failed", ms=int((time.perf_counter() - started) * 1000), error=str(exc))
+        except Exception:
+            logger.exception("workflow model node failed", extra={"node": node.id})
+            self._record(node, "failed", ms=int((time.perf_counter() - started) * 1000), error=NODE_FAILED_MESSAGE)
+
     def _fold_nested(self, node: Node, tool: object) -> None:
         """A `workflow:` node's callee rows, folded into this trace.
 
@@ -436,7 +571,7 @@ class WorkflowRun:
         while moved:
             moved = False
             for node in self.graph.nodes:
-                if node.id in self._finished() or node.kind == "tool":
+                if node.id in self._finished() or node.kind == "tool" or node.kind in MODEL_NODE_KINDS:
                     continue
                 state = self._state_of(node)
                 if state == "waiting":
@@ -466,6 +601,17 @@ class WorkflowRun:
                     entries.append(
                         self._record(node, "done", arguments={"result": verdict})
                     )
+                elif node.kind == "template":
+                    try:
+                        text = render_template(node.config.get("text", ""), self._scope)
+                    except ExpressionError as exc:
+                        self._prune_from(node.id)
+                        entries.append(self._record(node, "failed", error=str(exc)))
+                        moved = True
+                        continue
+                    self._scope[node.id] = {"text": text, "length": len(text)}
+                    self._activate(node.id)
+                    entries.append(self._record(node, "done", output=text[:OUTPUT_PREVIEW_CHARS]))
                 else:  # answer
                     self._activate(node.id)
                     entries.append(self._record(node, "done"))
@@ -512,6 +658,8 @@ class WorkflowRun:
                     entry["id"],
                     taken="true" if (entry.get("arguments") or {}).get("result") else "false",
                 )
+            elif entry["kind"] == "classify" and entry.get("state") == "done":
+                self._activate(entry["id"], taken=str((entry.get("arguments") or {}).get("category") or ""))
             elif entry.get("error") == NODE_PRUNED_MESSAGE:
                 self._prune_from(entry["id"])
             else:
@@ -522,15 +670,16 @@ class WorkflowRun:
                     yield self._frame(entry)
 
                 done = self._finished()
+                costly = ("tool", *MODEL_NODE_KINDS)
                 wave = [
                     node
                     for node in self.graph.nodes
-                    if node.kind == "tool" and node.id not in done and self._state_of(node) == "ready"
+                    if node.kind in costly and node.id not in done and self._state_of(node) == "ready"
                 ]
                 pruned = [
                     node
                     for node in self.graph.nodes
-                    if node.kind == "tool" and node.id not in done and self._state_of(node) == "pruned"
+                    if node.kind in costly and node.id not in done and self._state_of(node) == "pruned"
                 ]
                 for node in pruned:
                     self._prune_from(node.id)
@@ -593,7 +742,9 @@ class WorkflowRun:
                 if budget > 0:
                     try:
                         async with asyncio.timeout(budget):
-                            await asyncio.gather(*(self._run(node) for node in wave))
+                            await asyncio.gather(
+                                *((self._run_model(node) if node.kind in MODEL_NODE_KINDS else self._run(node)) for node in wave)
+                            )
                     except TimeoutError:
                         self.timed_out = True
                 else:
@@ -606,8 +757,15 @@ class WorkflowRun:
                     )
                     # Whatever happened - done, failed or timed out - the node is
                     # finished and its edges resolve, so a later node is not left
-                    # waiting on one that will never report.
-                    self._activate(node.id)
+                    # waiting on one that will never report. 질문 분류는 고른 갈래만
+                    # 열고, 실패한 분류는 아무 갈래도 열지 않는다(분기와 같은 규칙).
+                    if node.kind == "classify":
+                        if node.id in self._taken:
+                            self._activate(node.id, taken=self._taken[node.id])
+                        else:
+                            self._prune_from(node.id)
+                    else:
+                        self._activate(node.id)
                     yield self._frame(entry)
 
                 if self.timed_out:
