@@ -121,6 +121,23 @@
 숙고가 봅니다 — 농약병 사진을 올리고 "이거 정보 찾아줘"라고만 해도 라벨의 이름을 읽어
 표를 조회합니다(실측). 생활정보 MCP(날씨·환율·공휴일, 무키)도 동봉되어 있습니다.
 
+### 앞의 대화를 기억합니다
+
+한 대화 안에서 답변 모델은 **최근 네 턴을 원문으로**, 그보다 오래된 대화는 **대화마다
+하나뿐인 요약**으로 봅니다. 요약은 답변이 저장된 뒤 백그라운드에서 값싼 모델이 갱신하므로
+기다리는 시간이 늘지 않고, 실패하면 이전 요약이 그대로 남을 뿐 답변은 영향이 없습니다.
+되묻기의 답("소셜네트워크용이야")을 검색어로 다시 쓰는 압축기와 MCP 도구 숙고도 같은
+요약을 읽어, 여섯 턴 전의 되묻기라도 "그거"가 무엇인지 풉니다. 근거가 아무리 많아도
+답변 컨텍스트 예산 안에서 이력 몫(기본 1,500토큰)은 먼저 떼어 두므로 "방금 한 말"이
+프롬프트에서 밀려나지 않습니다. 어떤 이력이 실렸는지는 답변마다 추적 화면에 기록됩니다.
+설계와 근거는 [기술 보고서 §11](docs/technical-report.md#11-멀티턴-기억--버퍼와-롤링-요약)에
+있습니다.
+
+**대화를 넘어서도 기억합니다.** 대화에서 드러난 나에 관한 사실(직무, 진행 중인 프로젝트, 답을
+받는 방식의 선호)이 한 줄씩 계정에 남고, 새 대화를 열어도 답변 모델이 봅니다. 계정별로
+완전히 분리되어 다른 사용자나 관리자는 볼 수 없고, 계정 창(닉네임 옆)의 **내 기억**에서 한 줄씩 또는
+전부 지웁니다(§11.3b).
+
 ### 입력창에서 `@` 로 부릅니다
 
 <img src="docs/screenshots/composer-mention-menu.png" width="720" alt="@를 눌러 연 목록">
@@ -341,6 +358,7 @@ docs/             설계 문서와 화면 기록
 | `EMBEDDING_PROFILE` | 빈 값 | `qwen3` / `openai` / `bge-m3` / `arctic`. 지정하면 `EMBEDDING_PROVIDER`·`EMBEDDING_MODEL`·`EMBEDDING_DIM`을 한 번에 정합니다. **바꾸는 절차는 아래** |
 | `EMBEDDING_MODEL` / `EMBEDDING_DIM` | `text-embedding-3-small` / `1536` | 프로필을 쓰지 않을 때만 직접 지정 |
 | `LOCAL_LLM_BASE_URL` | 빈 값 | Ollama의 OpenAI 호환 주소(`http://127.0.0.1:11434/v1`). 로컬 답변 모델과 로컬 임베딩이 이 주소를 씁니다 |
+| `VLLM_BASE_URL` | 빈 값 | 두 번째 로컬 서버 vLLM(`http://127.0.0.1:8001/v1`). 거기서 내는 이름만 vLLM으로, 나머지 로컬은 Ollama로 |
 | `CHUNKING_STRATEGY` | `semantic` | `semantic`(구조 + 임베딩 병합) 또는 `fixed`(문자 창) |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `150` | 문자 단위. `0 <= overlap < size` |
 | `RETRIEVAL_TOP_N` | `6` | 프롬프트까지 가는 청크 수 |
@@ -388,7 +406,7 @@ MCP·워크플로우·첨부 관련 한도(`MCP_*`, `WORKFLOW_MAX_*`, `ORCHESTRA
 
 ### 화면에서 바꿀 수 있는 값
 
-**고급 설정** 화면에서 재배포 없이 바꿀 수 있는 값은 열 개이고, 그렇게 저장된 값이 `.env`의
+**고급 설정** 화면에서 재배포 없이 바꿀 수 있는 값은 아래와 같고, 그렇게 저장된 값이 `.env`의
 값을 이깁니다. 각 항목에는 허용 범위와 `되돌리기`(저장값을 지우고 `.env` 값으로 복귀)가
 붙어 있습니다.
 
@@ -396,6 +414,8 @@ MCP·워크플로우·첨부 관련 한도(`MCP_*`, `WORKFLOW_MAX_*`, `ORCHESTRA
   `RRF_K`, `SPARSE_WEIGHT`, `ANSWER_CONTEXT_TOKEN_BUDGET`
 - 문서 분할 — `CHUNK_SIZE`, `CHUNK_OVERLAP`, `MAX_CHUNK_TOKENS`,
   `SEMANTIC_SIMILARITY_THRESHOLD`
+- 대화 기억 — `CONVERSATION_SUMMARY`, `CONVERSATION_SUMMARY_MODEL`, `HISTORY_WINDOW_MESSAGES`,
+  `HISTORY_RESERVE_TOKENS`, `USER_MEMORY`, `USER_MEMORY_MODEL`
 
 같은 화면에 `EMBEDDING_MODEL` · `EMBEDDING_DIM` · `SPARSE_TOKENIZER` · `NEIGHBOR_EXPANSION`
 · `RERANK_MODEL`이 **여기서 바꿀 수 없는 값**으로 이유와 함께 표시됩니다. 이 다섯은 바꾸면
@@ -496,6 +516,26 @@ API용 터널도, CORS 항목도, 쿠키 `SameSite` 완화도 필요 없습니�
 도착합니다.
 
 ---
+
+## 딥 리서치 — 과제 중복성 검토
+
+방을 템플릿으로 만듭니다: **과제 중복성 검토**(12,000자 심사 매뉴얼이 지침), 신규과제 발굴, 과제
+계획서 초안, 빈 방. 중복성 검토 방에서 신규 과제 계획서를 첨부하면 먼저 목표·대상·방법·산출물·
+핵심어를 읽어 **검토 대상**을 정리하고, 그 관점마다 등록된 보고서·계획서를 찾아 보완 검색까지
+한 뒤, 지침의 12개 절(비교 문서 적합성, 항목별 중복성, 세부과업별 조정안, 개선방향 종합표,
+차별성 강화 대안, 수정 문안, 종합 판정)로 보고서를 쓰고 **PDF로 내려받습니다**. 지침은 방의
+"지침 보기·편집" 창에서 문서 전체를 고치며 저장마다 버전이 됩니다. 판정은 참고 자료이고 최종
+판단은 심사위원이 합니다. 설계와 실측은 [기술 보고서 §13](docs/technical-report.md).
+
+## 로컬 모델 다중접속 — 답변 모델은 vLLM
+
+답변 모델(`gemma4:26b`)은 **vLLM**이 서빙합니다(`scripts/start_vllm.sh`, 포트 8001). 같은
+노드(B200)에서 Ollama는 합산 350 tok/s가 천장이라 16명 동시면 한 사람당 11~13초를 기다렸고,
+vLLM은 64명 동시에 p95 2.0초·합산 4,884 tok/s를 냈습니다(실측). 값싼 단계(의도 분류·질의
+압축·요약)의 `gemma4:e4b`와 임베딩은 Ollama에 그대로 둡니다. `.env`의 `VLLM_BASE_URL`이
+비거나 vLLM이 죽어 있으면 그 이름은 Ollama로 되돌아갑니다. 판단 과정·수치·남은 일은
+[docs/local-llm-concurrency.md](docs/local-llm-concurrency.md), 재는 스크립트는
+`scripts/bench_local_concurrency.py`.
 
 ## 설계 문서
 
