@@ -196,6 +196,11 @@ export default function Sidebar() {
   useEffect(() => {
     void load();
   }, [load, pathname]);
+  // 모바일 드로어는 길이 바뀌면 닫힌다. 계정 창의 "내 기억"처럼 링크가 아닌 것이 페이지를
+  // 옮겨도 드로어가 열린 채 남지 않게(실사고: 뒤에서 화면이 바뀌고 드로어는 그대로).
+  useEffect(() => {
+    setOpen(false);
+  }, [pathname]);
 
   // Without these the drawer is only technically keyboard-usable: nothing moves
   // focus into it on open, so dismissing it means tabbing past every history

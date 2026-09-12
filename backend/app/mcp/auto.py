@@ -62,6 +62,7 @@ _SYSTEM = (
 # 자르고(아래) 여섯 턴이면 되묻기 왕복 두어 번을 넉넉히 덮는다.
 _HISTORY_TURNS = 6
 _HISTORY_CHARS = 500
+_SUMMARY_CHARS = 1500
 
 
 def _spec_name(server: str, tool: str, taken: set[str]) -> str:
@@ -89,6 +90,7 @@ async def deliberate_and_run(
     current_time: str | None = None,
     images: list[str] | None = None,
     scope_document_ids: list | None = None,
+    summary: str | None = None,
 ) -> tuple[list[Evidence], dict | None, str | None]:
     """켜진 도구를 모델에게 보여주고, 부르겠다는 것을 실행해 Evidence로.
 
@@ -143,6 +145,9 @@ async def deliberate_and_run(
     # "올해 휴일"이 학습 시점의 연도로 호출되던 실사고 - 도구 인자(year, date)를
     # 사용자의 시계로 만들려면 숙고가 지금을 알아야 한다.
     system = _SYSTEM if not current_time else f"{_SYSTEM}\n\n{current_time}"
+    if summary:
+        # 원문 창 밖의 오래된 턴(app/chat/memory.py). 인자 추론의 실마리로만 쓴다.
+        system = f"{system}\n\nEarlier in this conversation (summary): {summary[:_SUMMARY_CHARS]}"
     messages = [ChatMessage(role="system", content=system)]
     # 되묻기 왕복이 해석되려면 직전 대화가 보여야 한다: "어떤 지역...?"에 대한
     # "대전"은 이 맥락 없이는 도시 이름이 아니라 소음이다. 한 턴은 짧게 자른다 -

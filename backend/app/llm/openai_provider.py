@@ -56,6 +56,7 @@ class OpenAIProvider(LLMProvider):
         local_base_url: str = "",
         local_api_key: str = "ollama",
         embedding_provider: str = "openai",
+        vllm_base_url: str = "",
     ):
         # Both are admin-configurable, so an invalid value is reachable from
         # configuration. Unvalidated, batch_size <= 0 degrades to one request per
@@ -80,6 +81,14 @@ class OpenAIProvider(LLMProvider):
             if local_base_url
             else None
         )
+        # vLLM(두 번째 로컬 서버). 어느 이름이 거기 있는지는 기동 시 /v1/models로 알아내
+        # vllm_model_names에 심는다(app/llm/catalog.py:discover_vllm_models). 비어 있으면 없는 것.
+        self.vllm_client = (
+            AsyncOpenAI(base_url=vllm_base_url, api_key="none", timeout=max(timeout, 120.0), max_retries=1)
+            if vllm_base_url
+            else None
+        )
+        self.vllm_model_names: set[str] = set()
         self.local_model_names: set[str] = set()
         self.reasoning_model_names: set[str] | None = None
         # 임베딩을 어느 클라이언트로 보내는가. local이면 Ollama /v1/embeddings(dimensions 지원).
@@ -218,10 +227,17 @@ class OpenAIProvider(LLMProvider):
         )
         return vectors
 
+    def _is_vllm(self, model: str) -> bool:
+        return self.vllm_client is not None and model in self.vllm_model_names
+
     def _is_local(self, model: str) -> bool:
+        if self._is_vllm(model):
+            return True
         return self.local_client is not None and (model in self.local_model_names or ":" in model)
 
     def _client_for(self, model: str) -> AsyncOpenAI:
+        if self._is_vllm(model):
+            return self.vllm_client
         return self.local_client if self._is_local(model) else self.client
 
     def _is_reasoning(self, model: str) -> bool:
@@ -310,3 +326,6 @@ class OpenAIProvider(LLMProvider):
 
     async def aclose(self) -> None:
         await self.client.close()
+        for extra in (self.local_client, self.vllm_client):
+            if extra is not None:
+                await extra.close()

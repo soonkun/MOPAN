@@ -184,6 +184,27 @@ class Settings(BaseSettings):
     # (app/chat/condense.py). 되묻기의 답("소셜네트워크용이야")이 그 여섯 글자
     # 로만 검색되어 근거 0개 답이 나가던 실사고. 값싼 completion 한 번/후속 턴.
     followup_condense: bool = True
+    # 멀티턴 기억(app/chat/memory.py, docs/technical-report.md §11). 최근
+    # HISTORY_WINDOW_MESSAGES개 메시지는 원문으로 답변 프롬프트에 실리고, 그보다
+    # 오래된 턴은 대화별 롤링 요약(conversations.summary) 하나로 접혀 시스템
+    # 프롬프트에 붙는다. 요약은 답변이 저장된 뒤 백그라운드에서 값싼 모델이
+    # 갱신하므로 사용자 대기 시간은 늘지 않는다. 끄면 원문 창만 남는다(예전 동작).
+    conversation_summary: bool = True
+    # 비면 query_expansion_model. 한 대화에 두 턴마다 한 번, 짧은 요약 하나.
+    conversation_summary_model: str = ""
+    # 원문으로 싣는 최근 메시지 수(질문+답변 = 2). 8 = 최근 네 턴.
+    history_window_messages: int = 8
+    # ANSWER_CONTEXT_TOKEN_BUDGET 안에서 이력(요약+최근 턴)에 먼저 떼어 두는 몫.
+    # 0이면 예전처럼 근거가 예산을 다 채우고 이력은 남는 만큼만 - 근거 14개가
+    # 이력을 통째로 밀어내 "방금 한 말"을 모델이 못 보던 구멍의 처방.
+    history_reserve_tokens: int = 1500
+    # 대화를 넘는 사용자별 기억(app/chat/user_memory.py). 매 턴 뒤 값싼 모델이 사용자에
+    # 관한 새 사실(직무·프로젝트·선호·진행 중인 일)만 한 줄씩 뽑아 계정에 붙이고, 모든
+    # 대화의 답변 프롬프트에 실린다. 본인이 화면(/memory)에서 보고 지운다. 계정 밖으로는
+    # 절대 안 나간다. 끄면 뽑지도 싣지도 않는다(저장된 것은 남는다).
+    user_memory: bool = True
+    # 비면 conversation_summary_model → query_expansion_model 순.
+    user_memory_model: str = ""
 
     # HOW THE SPARSE ARM TOKENISES, at ingest AND at query time - the two must
     # agree or the index answers a question nobody asked. See
@@ -257,6 +278,10 @@ class Settings(BaseSettings):
     # 비면 로컬 모델 없음. 모델 목록은 /models로 발견해 llm_models 표에 넣고 관리자가
     # 허가한다(app/llm/catalog.py). 임베딩은 계속 OpenAI다.
     local_llm_base_url: str = ""
+    # 두 번째 로컬 서버: vLLM(연속 배칭)의 OpenAI 호환 주소(http://127.0.0.1:8001/v1). 비면 없음.
+    # 거기서 /v1/models가 알려 주는 이름은 Ollama 대신 이쪽으로 간다 - 같은 이름(gemma4:26b)을
+    # 양쪽이 다 내면 vLLM이 이긴다. 근거·수치·기동은 docs/local-llm-concurrency.md, scripts/start_vllm.sh.
+    vllm_base_url: str = ""
     local_llm_api_key: str = "ollama"
     # 딥 리서치(app/research): 종합 프롬프트에 넣는 근거의 토큰 상한과 동시 실행 상한.
     # 원본(새싹이)의 문자 상한 90,000을 토큰으로 옮겼다. 넘치면 뒤에서 자르고 잘린 개수를
@@ -687,6 +712,13 @@ class Settings(BaseSettings):
         # turns the semantic strategy into "always merge" or "never merge".
         if not -1.0 <= self.semantic_similarity_threshold <= 1.0:
             raise ValueError("SEMANTIC_SIMILARITY_THRESHOLD must satisfy -1.0 <= value <= 1.0")
+        if not 2 <= self.history_window_messages <= 100:
+            raise ValueError("HISTORY_WINDOW_MESSAGES must satisfy 2 <= value <= 100")
+        # 예산보다 큰 예약은 무해하다 - build_prompt가 이력의 실제 비용과 남은
+        # 예산 중 작은 쪽으로 깎는다. 교차 검사를 두면 예산을 100으로 줄이는
+        # 테스트마다 예약도 같이 줄여야 한다.
+        if not 0 <= self.history_reserve_tokens <= 100_000:
+            raise ValueError("HISTORY_RESERVE_TOKENS must satisfy 0 <= value <= 100000")
         # Zero or negative degrades to one embedding request per chunk with no
         # error - just cost and latency; above 2048 the endpoint rejects the
         # array mid-document.

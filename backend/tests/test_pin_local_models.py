@@ -20,6 +20,8 @@ async def test_pins_every_model_and_survives_one_failure(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         import json
 
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": "0.32.5"})
         body = json.loads(request.content)
         seen.append((request.url.path, body))
         if body["model"] == "broken:1b":
@@ -42,3 +44,23 @@ async def test_pins_every_model_and_survives_one_failure(monkeypatch):
 @pytest.mark.asyncio
 async def test_no_base_url_means_nothing_to_do():
     assert await pin_local_models("", ["gemma4:e4b"], "x") == []
+
+
+@pytest.mark.asyncio
+async def test_a_server_without_the_ollama_api_is_left_alone(monkeypatch):
+    """vLLM/llama.cpp 서버: /api/version이 404 → keep_alive를 보낼 곳이 없다."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(404)
+
+    real = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(catalog_module.httpx, "AsyncClient", fake_client)
+    assert await pin_local_models("http://vllm:8000/v1", ["google/gemma-4-26b-it"], None) == []
+    assert calls == ["/api/version"]

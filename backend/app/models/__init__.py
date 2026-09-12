@@ -30,6 +30,7 @@ from app.models.research import (
     clamp_budget,
 )
 from app.models.user import USER_ROLES, User
+from app.models.user_memory import USER_MEMORY_CHARS, UserMemory
 from app.models.workflow import (
     Workflow,
     WorkflowVersion,
@@ -38,6 +39,8 @@ from app.models.workflow import (
 )
 
 __all__ = [
+    "USER_MEMORY_CHARS",
+    "UserMemory",
     "IngestFile",
     "Folder",
     "ResearchProject",

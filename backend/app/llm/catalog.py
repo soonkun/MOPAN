@@ -178,6 +178,26 @@ async def discover_local_models(db: AsyncSession, settings: Settings, *, timeout
     return added
 
 
+async def discover_vllm_models(base_url: str, *, timeout: float = 5.0) -> set[str]:
+    """vLLM(두 번째 로컬 서버)이 서빙하는 이름들. 프로바이더의 vllm_model_names에 심어
+    그 이름의 요청을 Ollama 대신 vLLM으로 보낸다. 죽어 있으면 빈 집합 - Ollama로 그대로
+    간다(같은 이름을 Ollama도 낼 수 있으므로 서비스는 산다). 절대 raise하지 않는다."""
+    base = base_url.rstrip("/")
+    if not base:
+        return set()
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(f"{base}/models", headers={"Authorization": "Bearer none"})
+            response.raise_for_status()
+            names = {item["id"] for item in response.json().get("data", []) if item.get("id")}
+    except Exception:
+        logger.warning("vllm model discovery failed at %s; routing everything local to Ollama", base)
+        return set()
+    if names:
+        logger.info("vllm serves: %s", ", ".join(sorted(names)))
+    return names
+
+
 def ollama_root(base_url: str) -> str:
     """OpenAI 호환 주소(…/v1)에서 Ollama 고유 API의 루트를 얻는다."""
     root = base_url.rstrip("/")
@@ -198,6 +218,13 @@ async def pin_local_models(base_url: str, chat_models: list[str], embedding_mode
     pinned: list[str] = []
     # 로드 자체가 모델당 수 초라 timeout은 넉넉히. 하나 실패해도 다음 모델은 시도한다.
     async with httpx.AsyncClient(timeout=120.0) as client:
+        # keep_alive는 Ollama 고유다. vLLM/llama.cpp 서버(docs/local-llm-concurrency.md)는
+        # 모델이 프로세스와 함께 상주하므로 고정할 것이 없다 - /api/version이 없으면 그쪽이다.
+        try:
+            (await client.get(f"{root}/api/version", timeout=5.0)).raise_for_status()
+        except Exception:
+            logger.info("local server at %s is not Ollama; nothing to pin", root)
+            return []
         for name in chat_models:
             try:
                 (await client.post(f"{root}/api/generate", json={"model": name, "keep_alive": -1})).raise_for_status()

@@ -59,9 +59,10 @@ async def lifespan(app: FastAPI):
         local_base_url=settings.local_llm_base_url,
         local_api_key=settings.local_llm_api_key,
         embedding_provider=settings.embedding_provider,
+        vllm_base_url=settings.vllm_base_url,
     )
     # 동봉 MCP 자동 등록. 실패해도 기동은 계속된다(seed 안에서 삼킨다).
-    from app.llm.catalog import discover_local_models, load_catalog, pin_local_models
+    from app.llm.catalog import discover_local_models, discover_vllm_models, load_catalog, pin_local_models
     from app.mcp.seed import seed_bundled_servers
 
     async with app.state.sessionmaker() as session:
@@ -70,6 +71,9 @@ async def lifespan(app: FastAPI):
         await discover_local_models(session, settings)
         catalog = await load_catalog(session, settings)
         catalog.apply_to_provider(app.state.llm_provider)
+    # vLLM이 내는 이름은 그쪽으로(docs/local-llm-concurrency.md). 카탈로그 행은 Ollama 발견이
+    # 만든 것을 그대로 쓴다 - 같은 이름(gemma4:26b)이라 화면·추적 기록이 안 바뀐다.
+    app.state.llm_provider.vllm_model_names = await discover_vllm_models(settings.vllm_base_url)
     if settings.embedding_provider == "local":
         # 선택된 프로필의 모델만 내려받는다(쓰지 않을 모델을 배포마다 심지 않는다).
         from app.llm.embedding_profiles import ensure_local_embedding_model
@@ -80,7 +84,8 @@ async def lifespan(app: FastAPI):
         app.state.pin_task = asyncio.create_task(
             pin_local_models(
                 settings.local_llm_base_url,
-                [m.id for m in catalog.enabled if m.provider == "local"],
+                # vLLM이 서빙하는 이름은 Ollama에 올리지 않는다(같은 모델을 두 번 상주시키지 않는다).
+                [m.id for m in catalog.enabled if m.provider == "local" and m.id not in app.state.llm_provider.vllm_model_names],
                 settings.embedding_model if settings.embedding_provider == "local" else None,
             )
         )
@@ -157,15 +162,16 @@ def create_app() -> FastAPI:
     from app.auth.router import router as auth_router
     from app.branding.router import router as branding_router
     from app.chat.router import router as chat_router
-    from app.documents.router import router as documents_router
-    from app.mcp.router import router as mcp_router
-    from app.llm.router import router as models_router
-    from app.research.router import router as research_router
+    from app.chat.user_memory_router import router as memory_router
     from app.documents.folders import router as folders_router
-    from app.documents.versions import router as versions_router
     from app.documents.ingest_router import router as ingest_router
+    from app.documents.router import router as documents_router
+    from app.documents.versions import router as versions_router
+    from app.llm.router import router as models_router
+    from app.mcp.router import router as mcp_router
     from app.observability.router import router as observability_router
     from app.prompts.router import router as prompts_router
+    from app.research.router import router as research_router
     from app.users.router import router as users_router
     from app.workflow.router import router as workflows_router
 
@@ -173,6 +179,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(branding_router)
     app.include_router(chat_router)
+    app.include_router(memory_router)
     # documents_router보다 먼저: /documents/search가 /documents/{document_id}에 UUID로 잡히지 않게.
     app.include_router(folders_router)
     app.include_router(versions_router)

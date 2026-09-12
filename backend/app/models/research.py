@@ -48,6 +48,10 @@ class ResearchProject(Base):
     reasoning_effort: Mapped[str | None] = mapped_column(String(20), nullable=True)
     gap_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     collection_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default=sa_text("'[]'::jsonb"))
+    # 플래너의 "관점 예시" 한 줄(원본 CR-62 planner_hint) - 하위 질의를 어느 축으로 나눌지.
+    planner_hint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 어느 템플릿에서 태어났는지(app/research/templates.py). 화면 표시용, 동작에는 안 쓴다.
+    template_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
@@ -93,6 +97,8 @@ class ResearchRun(Base):
     report: Mapped[str | None] = mapped_column(Text, nullable=True)
     sources: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default=sa_text("'[]'::jsonb"))
     sub_queries: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default=sa_text("'[]'::jsonb"))
+    # 검토 대상 요약(첨부를 먼저 읽어 뽑은 구조화 요약). 없으면 None - 첨부 없는 질문형 실행.
+    scope: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=sa_text("false"))
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)

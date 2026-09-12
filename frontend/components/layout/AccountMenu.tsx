@@ -25,7 +25,7 @@ backdrop이다(내용은 안쪽 div가 전부 덮는다). 사이드바 content�
 따르는 것이 맞고, 그러면 스위치가 있을 이유가 없다. 저장값 청소는
 public/theme.js가 한다. */
 
-function IconGlyph({ name }: { name: "logout" | "back" | "chevron" | "gear" }) {
+function IconGlyph({ name }: { name: "logout" | "back" | "chevron" | "gear" | "memory" }) {
   const paths = {
     logout: (
       <>
@@ -42,6 +42,13 @@ function IconGlyph({ name }: { name: "logout" | "back" | "chevron" | "gear" }) {
         <path d="M4 7h8M18 7h2M4 17h4M14 17h6" />
         <circle cx="15" cy="7" r="2.2" />
         <circle cx="11" cy="17" r="2.2" />
+      </>
+    ),
+    // 내 기억 - 머리에 켜진 불. 대화를 넘어 남는 나에 관한 사실(/memory).
+    memory: (
+      <>
+        <path d="M12 3a6 6 0 0 0-6 6c0 2.2 1 3.4 2 4.6V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-3.4c1-1.2 2-2.4 2-4.6a6 6 0 0 0-6-6Z" />
+        <path d="M10 21h4M12 8v3M10.5 9.5h3" />
       </>
     ),
   } as const;
@@ -244,6 +251,24 @@ export default function AccountMenu({
                   <IconGlyph name="gear" />
                 </span>
                 <span className="min-w-0 flex-1">계정 설정</span>
+                <span className="text-on-surface-variant">
+                  <IconGlyph name="chevron" />
+                </span>
+              </button>
+              {/* 내 기억 - 대화를 넘어 남는 나에 관한 사실. 계정에 묶인 것이라 계정 창에서
+                  간다(소유자 지정: 사이드바가 아니라 여기). 페이지로 가므로 창은 닫는다. */}
+              <button
+                type="button"
+                onClick={() => {
+                  dialogRef.current?.close();
+                  router.push("/memory");
+                }}
+                className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left text-body hover:bg-surface-container-high"
+              >
+                <span className="text-on-surface-variant">
+                  <IconGlyph name="memory" />
+                </span>
+                <span className="min-w-0 flex-1">내 기억</span>
                 <span className="text-on-surface-variant">
                   <IconGlyph name="chevron" />
                 </span>

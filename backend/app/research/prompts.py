@@ -52,12 +52,52 @@ NO_EVIDENCE_REPORT = """## 검토 결과
 - 요청 문구에 조항·대상·용어 등 구체적인 키워드를 포함하면 검색 정확도가 올라갑니다."""
 
 
+SCOPE_SYSTEM_PROMPT = """당신은 첨부된 문서(연구과제 계획서·RFP·보고서 등)를 읽고 검토의 대상을 구조화하는
+분석가입니다. 아래 문서에서 다음 항목을 뽑아 JSON으로만 답하세요. 문서에 없는 항목은 빈 배열로
+두고 지어내지 마세요. 각 항목은 한국어 짧은 구(8~60자)로, 문서가 쓰는 공식 용어를 그대로 쓰세요.
+
+{"title": "과제명 또는 문서 제목",
+ "goals": ["연구 목표·최종 목표"],
+ "targets": ["연구 대상: 작물·축종·지역·제도·사용자 등"],
+ "methods": ["핵심 방법·기술·실험 설계"],
+ "outputs": ["최종 산출물: 데이터·모델·시스템·매뉴얼 등"],
+ "prior_work": ["문서가 스스로 언급한 선행 연구·기존 사업·연계 과제"],
+ "keywords": ["검색에 쓸 핵심어 6~12개"]}"""
+
+
+def scope_digest(scope: dict | None) -> str:
+    """검토 대상 요약을 플래너·종합에 넣을 마크다운 한 덩이로. 비어 있으면 빈 문자열."""
+    if not scope:
+        return ""
+    labels = (("title", "과제명"), ("goals", "연구 목표"), ("targets", "연구 대상"), ("methods", "핵심 방법"),
+              ("outputs", "최종 산출물"), ("prior_work", "선행·연계 연구"), ("keywords", "핵심어"))
+    lines = []
+    for key, label in labels:
+        value = scope.get(key)
+        if isinstance(value, list):
+            value = [str(v).strip() for v in value if str(v).strip()]
+            if value:
+                lines.append(f"- {label}: " + " / ".join(value))
+        elif isinstance(value, str) and value.strip():
+            lines.append(f"- {label}: {value.strip()}")
+    return "\n".join(lines)
+
+
+def planner_messages(base: str, planner_hint: str, user_input: str) -> tuple[str, str]:
+    """(system, user). `planner_hint`는 방의 관점 예시 한 줄 - 하위 질의를 어느 축으로 나눌지(원본 CR-62)."""
+    hint = (planner_hint or "").strip()
+    return (f"{base.rstrip()}\n- {hint}" if hint else base), user_input
+
+
 def synthesis_messages(base: str, instructions: str, user_input: str, evidence_block: str) -> tuple[str, str]:
-    """(system, user). `base`는 프롬프트 저장소의 research_synthesis, `instructions`는 방 지침.
-    안전 규칙 둘은 항상 뒤에 붙는다 - 편집으로 지울 수 없다."""
-    body = (instructions or "").strip() or base
-    if instructions and instructions.strip() and base and base.strip() != body:
-        body = f"{base.strip()}\n\n## 이 방의 지침\n{instructions.strip()}"
+    """(system, user). `instructions`(방 지침)가 있으면 그것이 시스템 프롬프트 본문 전부이고,
+    `base`(프롬프트 저장소의 research_synthesis, 범용 조사 보고서 형식)는 지침이 빌 때만 쓴다.
+
+    실사고(2026-09-13): 이식본은 base 뒤에 "## 이 방의 지침"으로 지침을 덧붙였다. 그러자 12,000자
+    중복성 검토 매뉴얼을 준 방의 보고서가 base의 "요청 요약 / 확인된 내용 / 한계" 구조로 나왔다 -
+    모델은 먼저 읽은 구성을 따른다. 원본(새싹이)과 같이 지침이 base를 대체한다. 안전 규칙 둘은
+    항상 뒤에 붙는다 - 편집으로 지울 수 없다."""
+    body = (instructions or "").strip() or base.strip()
     system = f"{body}\n\n{EVIDENCE_RULES}\n\n{OUTPUT_FORMAT_RULES}"
     user = f"## 사용자 요청\n{user_input}\n\n## 근거 자료\n{evidence_block}"
     return system, user

@@ -1,5 +1,7 @@
 """관리자용 모델 레지스트리 API - 고급 설정 > 모델 화면의 뒷면."""
-from fastapi import APIRouter, Depends, HTTPException
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -7,10 +9,8 @@ from app.auth.dependencies import require_admin
 from app.core.config import Settings, get_app_settings
 from app.core.db import get_db_session
 from app.core.logging import log_event
-from app.llm.catalog import discover_local_models, load_catalog, upsert_row
+from app.llm.catalog import discover_local_models, discover_vllm_models, load_catalog, upsert_row
 from app.models.user import User
-
-import logging
 
 logger = logging.getLogger("mopan.models")
 router = APIRouter(prefix="/api/admin/models", tags=["models"])
@@ -166,6 +166,7 @@ async def embedding_status(
 
 @router.post("/refresh", response_model=RefreshResponse)
 async def refresh_local_models(
+    request: Request,
     admin: User = Depends(require_admin),
     settings: Settings = Depends(get_app_settings),
     db: AsyncSession = Depends(get_db_session),
@@ -173,4 +174,6 @@ async def refresh_local_models(
     if not settings.local_llm_base_url:
         raise HTTPException(status_code=400, detail="LOCAL_LLM_BASE_URL이 설정되지 않았습니다(.env).")
     added = await discover_local_models(db, settings)
+    if settings.vllm_base_url:
+        request.app.state.llm_provider.vllm_model_names = await discover_vllm_models(settings.vllm_base_url)
     return RefreshResponse(added=added, local_base_url=settings.local_llm_base_url)

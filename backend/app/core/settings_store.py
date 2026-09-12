@@ -28,6 +28,7 @@ logger = logging.getLogger("mopan.settings")
 RETRIEVAL = "retrieval"
 CHUNKING = "chunking"
 INTENT = "intent"
+MEMORY = "memory"
 DOCUMENTS = "documents"
 
 # Applies to the WHOLE chunking group and is repeated on screen, because an admin
@@ -231,6 +232,83 @@ RUNTIME_SAFE_SETTINGS: dict[str, SettingSpec] = {
                 "값싼 모델이 맞습니다. 비워 두면 '질문 다시 쓰기' 모델(QUERY_EXPANSION_MODEL)을 "
                 "그대로 씁니다. 판정 기준(프롬프트)은 프롬프트 관리의 intent_agent에서 고칩니다."
             ),
+        ),
+        SettingSpec(
+            key="CONVERSATION_SUMMARY",
+            field="conversation_summary",
+            kind=bool,
+            minimum=0,
+            maximum=1,
+            group=MEMORY,
+            label="오래된 턴 요약 사용",
+            help=(
+                "최근 턴 창 밖으로 밀려난 오래된 대화를 대화마다 요약 하나로 접어 답변 모델에 "
+                "함께 보여 줍니다. 답변이 저장된 뒤 백그라운드에서 갱신하므로 대기 시간은 늘지 "
+                "않습니다. 끄면 최근 턴 창만 봅니다."
+            ),
+        ),
+        SettingSpec(
+            key="CONVERSATION_SUMMARY_MODEL",
+            field="conversation_summary_model",
+            kind=str,
+            minimum=0,
+            maximum=1,
+            group=MEMORY,
+            label="요약 모델",
+            help=(
+                "오래된 턴을 접는 모델입니다. 두 턴마다 한 번, 1,500자 이내의 요약 하나를 쓰므로 "
+                "값싼 모델이 맞습니다. 비워 두면 '질문 다시 쓰기' 모델(QUERY_EXPANSION_MODEL)을 씁니다."
+            ),
+        ),
+        SettingSpec(
+            key="HISTORY_WINDOW_MESSAGES",
+            field="history_window_messages",
+            kind=int,
+            minimum=2,
+            maximum=100,
+            group=MEMORY,
+            label="원문으로 싣는 최근 메시지 수",
+            help=(
+                "답변 모델이 그대로 읽는 최근 메시지 수입니다(질문+답변이 2). 이보다 오래된 턴은 "
+                "요약으로만 남습니다. 기본 8 = 최근 네 턴."
+            ),
+        ),
+        SettingSpec(
+            key="HISTORY_RESERVE_TOKENS",
+            field="history_reserve_tokens",
+            kind=int,
+            minimum=0,
+            maximum=20_000,
+            group=MEMORY,
+            label="이력 최소 토큰 몫",
+            help=(
+                "답변 컨텍스트 토큰 예산 안에서 대화 이력(요약+최근 턴)에 먼저 떼어 두는 몫입니다. "
+                "0이면 근거가 예산을 다 채울 수 있어 방금 한 말이 프롬프트에서 밀려날 수 있습니다."
+            ),
+        ),
+        SettingSpec(
+            key="USER_MEMORY",
+            field="user_memory",
+            kind=bool,
+            minimum=0,
+            maximum=1,
+            group=MEMORY,
+            label="대화를 넘는 사용자 기억",
+            help=(
+                "매 턴 뒤 값싼 모델이 사용자에 관한 새 사실(직무·프로젝트·선호·진행 중인 일)만 한 줄씩 뽑아 "
+                "그 계정에 붙이고, 그 사용자의 모든 대화에서 답변 모델이 봅니다. 계정별로 완전히 분리되며 "
+                "본인이 계정 창의 '내 기억'에서 보고 지웁니다. 끄면 뽑지도 싣지도 않습니다(저장된 것은 남습니다)."
+            ),
+        ),
+        SettingSpec(
+            key="USER_MEMORY_MODEL",
+            field="user_memory_model",
+            kind=str,
+            minimum=0,
+            maximum=1,
+            group=MEMORY,
+            label="사용자 기억 추출 모델",
+            help="비워 두면 요약 모델, 그것도 비면 '질문 다시 쓰기' 모델을 씁니다. 매 턴 한 번, 몇 줄짜리 출력이라 값싼 모델이 맞습니다.",
         ),
         SettingSpec(
             key="DOCUMENT_STALE_DAYS",

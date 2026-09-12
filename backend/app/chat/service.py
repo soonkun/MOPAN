@@ -480,6 +480,8 @@ async def answer(
     user_nickname: str | None = None,
     reasoning_effort: str | None = None,
     current_time: str | None = None,
+    summary: str | None = None,
+    user_memory: list[str] | None = None,
 ) -> ChatAnswer:
     """Deliberately knows nothing about where `evidence` came from: no session, no
     vector store, no reranker. That is the whole point of the split - Slice 3 runs
@@ -559,6 +561,9 @@ async def answer(
         nonce=new_nonce(),
         token_budget=settings.answer_context_token_budget,
         images=images,
+        summary=summary,
+        history_reserve_tokens=settings.history_reserve_tokens,
+        user_memory=user_memory,
     )
 
     started = time.perf_counter()
@@ -604,6 +609,18 @@ async def answer(
         clarified=clarifying,
         **{k: v for k, v in result.usage.items() if isinstance(v, int)},
     )
+    trace = build_trace(evidence, used_evidence, settings=settings, prompt=template)
+    # 추적 화면이 "모델은 이 대화의 무엇을 보고 답했나"에 답할 수 있게. 원문
+    # 턴 수는 build_prompt가 예산 안에 실제로 실은 것이다: user/assistant
+    # 메시지에서 질문 하나와 (있다면) 근거 울타리 하나를 뺀 수.
+    trace["memory"] = {
+        "summary_chars": len(summary or ""),
+        "user_memory_items": len(user_memory or []),
+        "history_messages_given": len(history),
+        "history_messages_sent": sum(1 for m in messages if m.role in ("user", "assistant"))
+        - 1
+        - (1 if used_evidence else 0),
+    }
     return ChatAnswer(
         content=result.content,
         citations=citations,
@@ -612,7 +629,7 @@ async def answer(
         latency_ms=latency_ms,
         prompt_name=template.name,
         prompt_version=template.version,
-        trace=build_trace(evidence, used_evidence, settings=settings, prompt=template),
+        trace=trace,
     )
 
 

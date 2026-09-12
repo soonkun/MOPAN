@@ -223,6 +223,12 @@ async def app(test_engine, test_sessionmaker, fake_redis, tmp_path_factory):
     application.dependency_overrides[get_db_session] = _override_db
     application.dependency_overrides[get_redis] = lambda: fake_redis
     yield application
+    # 채팅 한 턴은 대화 요약 갱신을 백그라운드 태스크로 띄운다(app/chat/memory.py).
+    # 이 루프가 닫히기 전에 끝내지 않으면 그 세션의 연결이 풀에 갇혀 clean_db의
+    # TRUNCATE가 영원히 기다린다(실측: 스위트가 test_chat 근처에서 멈췄다).
+    from app.chat.memory import drain
+
+    await drain()
     application.dependency_overrides.clear()
 
 

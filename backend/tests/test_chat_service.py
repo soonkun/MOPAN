@@ -203,6 +203,10 @@ def test_answer_takes_no_session_and_no_retrieval_collaborator():
         "reasoning_effort",
         # 사용자의 "지금" 한 줄(app/core/localtime.py). 역시 데이터다.
         "current_time",
+        # 원문 창 밖 오래된 턴의 요약(app/chat/memory.py). 문자열 하나 - 데이터다.
+        "summary",
+        # 대화를 넘는 사용자별 기억 줄들(app/chat/user_memory.py). 문자열 목록 - 데이터다.
+        "user_memory",
     ]
 
 

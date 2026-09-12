@@ -20,18 +20,20 @@ from app.attachments.service import (
 )
 from app.auth.authorization import get_owned_conversation
 from app.auth.dependencies import get_current_user
-from app.chat.intent import classify_intent
 from app.chat.condense import condense_followup
+from app.chat.intent import classify_intent
+from app.chat.memory import await_inflight, schedule_refresh
 from app.chat.service import ChatAnswer, answer, load_history, persist_turn, retrieve
+from app.chat.user_memory import load_user_memory, memory_lines, schedule_extract
 from app.core.config import Settings, get_app_settings
-from app.llm.catalog import load_catalog
-from app.core.localtime import now_line
 from app.core.db import get_db_session
+from app.core.localtime import now_line
 from app.core.logging import log_event
 from app.core.redis import get_redis
 from app.documents.folders import documents_in_folders
 from app.documents.storage import delete_document_files
 from app.llm.base import LLMError, LLMProvider
+from app.llm.catalog import load_catalog
 from app.mcp.auto import deliberate_and_run
 from app.mcp.service import load_tool_calls, run_tool_calls, substantive
 from app.models.attachment import Attachment
@@ -216,6 +218,8 @@ async def _complete(
     auto_tool_ids: list[uuid.UUID] | None = None,
     reasoning_effort: str | None = None,
     client_tz: str | None = None,
+    user_id: uuid.UUID | None = None,
+    user_memory: list[str] | None = None,
 ) -> AsyncIterator[str]:
     """Everything after the evidence has been gathered: retrieve if there is
     none, answer, persist, emit `citations` and `done`.
@@ -252,6 +256,7 @@ async def _complete(
             question,
             model=settings.query_expansion_model,
             timeout=settings.query_expansion_timeout_seconds,
+            summary=conversation.summary,
         )
         if condensed:
             question_for_retrieval = condensed
@@ -293,6 +298,7 @@ async def _complete(
                 current_time=current_time,
                 images=images,
                 scope_document_ids=document_ids,
+                summary=conversation.summary,
             )
         evidence = evidence + auto_evidence
         # 도구 먼저, 빈손이면 RAG(소유자 결정). '근거를 냈다'의 기준은 실패·빈
@@ -383,6 +389,8 @@ async def _complete(
             user_nickname=user_nickname,
             reasoning_effort=reasoning_effort,
             current_time=current_time,
+            summary=conversation.summary,
+            user_memory=user_memory,
         )
     # 추적 화면이 "왜 인용이 없는가"에 답할 수 있게. prompt_name(smalltalk_agent)
     # 이 이미 기록되지만, 그것이 게이트의 판정이었다는 사실은 여기만 안다.
@@ -411,6 +419,18 @@ async def _complete(
             attachment_ids=attachment_ids,
             workflow_name=workflow.name,
             workflow_version=workflow.version,
+        )
+    # 멀티턴 기억(app/chat/memory.py): 방금 저장한 턴까지 보고, 원문 창 밖으로
+    # 밀려난 것이 쌓였으면 요약을 갱신한다. 요청과 분리된 태스크 - done 프레임을
+    # 기다리게 하지 않고, 클라이언트가 끊어도 끝까지 간다.
+    if settings.conversation_summary:
+        schedule_refresh(sessionmaker, llm_provider, settings=settings, conversation_id=conversation.id)
+    # 대화를 넘는 사용자별 기억(app/chat/user_memory.py) - 이 턴에서 사용자에 관해 새로
+    # 드러난 사실만. 되물음(auto_ask)으로 끝난 턴도 사용자 발화는 있으므로 똑같이 본다.
+    if settings.user_memory and user_id is not None:
+        schedule_extract(
+            sessionmaker, llm_provider, settings=settings, user_id=user_id,
+            conversation_id=conversation.id, question=question, answer=chat_answer.content,
         )
 
     yield _sse({"type": "citations", "citations": chat_answer.citations})
@@ -579,8 +599,11 @@ async def chat(
         # expire_on_commit=False leaves it readable after the commit and the close.
         await db.commit()
     else:
+        # 직전 턴의 요약 갱신이 아직 돌고 있으면 잠깐 기다린 뒤 읽는다(memory.await_inflight).
+        await await_inflight(payload.conversation_id)
         conversation = await get_owned_conversation(db, payload.conversation_id, user)
-    history = await load_history(db, conversation)
+    history = await load_history(db, conversation, limit=settings.history_window_messages)
+    user_memory = memory_lines(await load_user_memory(db, user.id)) if settings.user_memory else []
     # `db` is not touched again below, and it must not be: since FastAPI 0.106 a
     # yield-dependency's exit code runs BEFORE the response body is sent, so this
     # session is already closed by the time the generator runs. Using it there
@@ -706,6 +729,8 @@ async def chat(
                 document_ids=document_ids,
                 workflow=workflow,
                 user_nickname=user.nickname,
+                user_id=user.id,
+                user_memory=user_memory,
                 auto_tool_ids=payload.auto_tool_ids,
                 reasoning_effort=payload.reasoning_effort,
                 client_tz=payload.client_tz,
@@ -850,7 +875,8 @@ async def approve(
         user_id=str(user.id),
     )
 
-    history = await load_history(db, conversation)
+    history = await load_history(db, conversation, limit=settings.history_window_messages)
+    user_memory = memory_lines(await load_user_memory(db, user.id)) if settings.user_memory else []
     question = stored["question"]
     model = stored["model"]
     tool_evidence = [evidence_from_dict(item) for item in stored.get("tool_evidence") or []]
@@ -920,6 +946,8 @@ async def approve(
                 attachment_ids=attachment_ids,
                 workflow=workflow,
                 user_nickname=user.nickname,
+                user_id=user.id,
+                user_memory=user_memory,
             ):
                 yield frame
         except LLMError:

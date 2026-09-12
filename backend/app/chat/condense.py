@@ -37,6 +37,7 @@ _SYSTEM = (
 _MAX_CHARS = 200
 _HISTORY_TURNS = 6
 _HISTORY_CHARS = 500
+_SUMMARY_CHARS = 1500
 
 
 async def condense_followup(
@@ -46,11 +47,16 @@ async def condense_followup(
     *,
     model: str,
     timeout: float,
+    summary: str | None = None,
 ) -> str | None:
-    """자립형 질문을, 또는(이미 자립형이거나 어떤 실패든) None을 돌려준다."""
-    if not history:
+    """자립형 질문을, 또는(이미 자립형이거나 어떤 실패든) None을 돌려준다.
+
+    `summary`는 원문 창 밖으로 밀려난 오래된 턴의 요약(app/chat/memory.py).
+    되묻기가 여섯 턴 전이었어도 "그거"가 무엇인지 여기서 풀린다."""
+    if not history and not summary:
         return None
-    messages = [ChatMessage(role="system", content=_SYSTEM)]
+    system = _SYSTEM if not summary else f"{_SYSTEM}\n\nEarlier in this conversation (summary): {summary[:_SUMMARY_CHARS]}"
+    messages = [ChatMessage(role="system", content=system)]
     for turn in history[-_HISTORY_TURNS:]:
         role = turn.get("role")
         content = (turn.get("content") or "")[:_HISTORY_CHARS]
