@@ -113,6 +113,8 @@ NULLABLE_FK_EXCEPTIONS = {
     ("documents", "folder_id"),
     # 감시 폴더 장부(0022): 중복·미지원 파일은 문서가 없고, 문서가 지워지면 SET NULL로 남는다.
     ("ingest_files", "document_id"),
+    # 사용자 기억(0024): 출처 대화가 지워져도 기억은 남는다(SET NULL) - 화면 '출처'만 사라진다.
+    ("user_memories", "source_conversation_id"),
 }
 
 

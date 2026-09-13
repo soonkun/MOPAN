@@ -178,24 +178,27 @@ async def discover_local_models(db: AsyncSession, settings: Settings, *, timeout
     return added
 
 
-async def discover_vllm_models(base_url: str, *, timeout: float = 5.0) -> set[str]:
-    """vLLM(두 번째 로컬 서버)이 서빙하는 이름들. 프로바이더의 vllm_model_names에 심어
-    그 이름의 요청을 Ollama 대신 vLLM으로 보낸다. 죽어 있으면 빈 집합 - Ollama로 그대로
-    간다(같은 이름을 Ollama도 낼 수 있으므로 서비스는 산다). 절대 raise하지 않는다."""
-    base = base_url.rstrip("/")
-    if not base:
-        return set()
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.get(f"{base}/models", headers={"Authorization": "Bearer none"})
-            response.raise_for_status()
-            names = {item["id"] for item in response.json().get("data", []) if item.get("id")}
-    except Exception:
-        logger.warning("vllm model discovery failed at %s; routing everything local to Ollama", base)
-        return set()
-    if names:
-        logger.info("vllm serves: %s", ", ".join(sorted(names)))
-    return names
+async def discover_vllm_models(base_urls: list[str] | str, *, timeout: float = 5.0) -> dict[str, str]:
+    """vLLM 서버들이 서빙하는 이름 → 그 서버 주소. 프로바이더의 vllm_model_bases에 심어 그 이름의
+    요청을 그 서버로 보낸다. 죽어 있는 서버는 빠진다(그 이름은 LOCAL_LLM_BASE_URL로 간다). 같은
+    이름을 둘이 내면 먼저 적은 서버가 이긴다. 절대 raise하지 않는다."""
+    if isinstance(base_urls, str):
+        base_urls = [u.strip() for u in base_urls.split(",") if u.strip()]
+    found: dict[str, str] = {}
+    for base_url in base_urls:
+        base = base_url.rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.get(f"{base}/models", headers={"Authorization": "Bearer none"})
+                response.raise_for_status()
+                names = [item["id"] for item in response.json().get("data", []) if item.get("id")]
+        except Exception:
+            logger.warning("vllm model discovery failed at %s", base)
+            continue
+        for name in names:
+            found.setdefault(name, base_url)
+        logger.info("vllm %s serves: %s", base, ", ".join(sorted(names)) or "(없음)")
+    return found
 
 
 def ollama_root(base_url: str) -> str:

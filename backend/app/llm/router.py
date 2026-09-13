@@ -175,5 +175,5 @@ async def refresh_local_models(
         raise HTTPException(status_code=400, detail="LOCAL_LLM_BASE_URL이 설정되지 않았습니다(.env).")
     added = await discover_local_models(db, settings)
     if settings.vllm_base_url:
-        request.app.state.llm_provider.vllm_model_names = await discover_vllm_models(settings.vllm_base_url)
+        request.app.state.llm_provider.vllm_model_bases = await discover_vllm_models(settings.vllm_base_urls)
     return RefreshResponse(added=added, local_base_url=settings.local_llm_base_url)

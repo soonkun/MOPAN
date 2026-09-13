@@ -365,7 +365,7 @@ docs/             설계 문서와 화면 기록
 | `EMBEDDING_PROFILE` | 빈 값 | `qwen3` / `openai` / `bge-m3` / `arctic`. 지정하면 `EMBEDDING_PROVIDER`·`EMBEDDING_MODEL`·`EMBEDDING_DIM`을 한 번에 정합니다. **바꾸는 절차는 아래** |
 | `EMBEDDING_MODEL` / `EMBEDDING_DIM` | `text-embedding-3-small` / `1536` | 프로필을 쓰지 않을 때만 직접 지정 |
 | `LOCAL_LLM_BASE_URL` | 빈 값 | Ollama의 OpenAI 호환 주소(`http://127.0.0.1:11434/v1`). 로컬 답변 모델과 로컬 임베딩이 이 주소를 씁니다 |
-| `VLLM_BASE_URL` | 빈 값 | 두 번째 로컬 서버 vLLM(`http://127.0.0.1:8001/v1`). 거기서 내는 이름만 vLLM으로, 나머지 로컬은 Ollama로 |
+| `VLLM_BASE_URL` | 빈 값 | vLLM 서버 주소, 여럿이면 쉼표(`…:8001/v1,…:8002/v1` - 프로세스 하나가 모델 하나). 각 서버가 내는 이름은 그 서버로, 나머지 로컬 이름은 `LOCAL_LLM_BASE_URL`로 |
 | `EMBEDDING_BASE_URL` | 빈 값 | 임베딩 전용 서버(vLLM pooling, `http://127.0.0.1:8003/v1`). 비면 Ollama가 임베딩도 맡습니다. 바꾸면 `scripts/reembed.py`로 전부 다시 채웁니다 |
 | `VLLM_SLEEP_AFTER_MINUTES` | `0` | vLLM 서버가 이 분수만큼 요청이 없으면 가중치를 CPU로 내려 GPU를 비우고, 다음 요청이 수 초 만에 깨웁니다. 0이면 항상 상주. 화면(모델 탭)에서도 바꿉니다 |
 | `CHUNKING_STRATEGY` | `semantic` | `semantic`(구조 + 임베딩 병합) 또는 `fixed`(문자 창) |
@@ -540,9 +540,10 @@ API용 터널도, CORS 항목도, 쿠키 `SameSite` 완화도 필요 없습니�
 
 답변 모델(`gemma4:26b`)은 **vLLM**이 서빙합니다(`scripts/start_vllm.sh`, 포트 8001). 같은
 노드(B200)에서 Ollama는 합산 350 tok/s가 천장이라 16명 동시면 한 사람당 11~13초를 기다렸고,
-vLLM은 64명 동시에 p95 2.0초·합산 4,884 tok/s를 냈습니다(실측). 값싼 단계(의도 분류·질의
-압축·요약)의 `gemma4:e4b`와 임베딩은 Ollama에 그대로 둡니다. `.env`의 `VLLM_BASE_URL`이
-비거나 vLLM이 죽어 있으면 그 이름은 Ollama로 되돌아갑니다. 판단 과정·수치·남은 일은
+vLLM은 64명 동시에 p95 2.0초·합산 4,884 tok/s를 냈습니다(실측). 값싼 단계(의도 분류·질문
+다시쓰기·대화 요약·사용자 기억)의 `gemma4:e4b`는 두 번째 vLLM(`scripts/start_vllm_e4b.sh`,
+포트 8002), 임베딩은 세 번째 vLLM(pooling, 8003)이 서빙해 MOPAN의 로컬 모델은 전부 vLLM입니다.
+`.env`의 `VLLM_BASE_URL`에 서버를 쉼표로 적으면 각 서버가 내는 이름만 그 서버로 갑니다. 판단 과정·수치·남은 일은
 [docs/local-llm-concurrency.md](docs/local-llm-concurrency.md), 재는 스크립트는
 `scripts/bench_local_concurrency.py`.
 

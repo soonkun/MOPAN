@@ -281,7 +281,12 @@ class Settings(BaseSettings):
     # 두 번째 로컬 서버: vLLM(연속 배칭)의 OpenAI 호환 주소(http://127.0.0.1:8001/v1). 비면 없음.
     # 거기서 /v1/models가 알려 주는 이름은 Ollama 대신 이쪽으로 간다 - 같은 이름(gemma4:26b)을
     # 양쪽이 다 내면 vLLM이 이긴다. 근거·수치·기동은 docs/local-llm-concurrency.md, scripts/start_vllm.sh.
+    # 여러 서버는 쉼표로(모델 하나에 프로세스 하나가 vLLM의 구조라 8001=26b, 8002=e4b처럼 는다).
     vllm_base_url: str = ""
+
+    @property
+    def vllm_base_urls(self) -> list[str]:
+        return [u.strip() for u in self.vllm_base_url.split(",") if u.strip()]
     # 임베딩만 따로 보내는 OpenAI 호환 주소(비면 LOCAL_LLM_BASE_URL). 2026-09-13: Ollama 임베딩(4 슬롯)이
     # 색인 병목이라 vLLM pooling(scripts/start_vllm_embed.sh, GPU 0, 8003)으로 옮겼다. 모델 이름은
     # --served-model-name으로 qwen3-embedding:8b 그대로라 EMBEDDING_MODEL·프로필·저장된 벡터의 이름표는

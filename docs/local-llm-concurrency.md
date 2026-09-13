@@ -156,10 +156,10 @@ CUDA_VISIBLE_DEVICES=0 vllm serve google/gemma-4-26b-it \
   건너뛴다. vLLM은 프로세스와 함께 상주한다.
 - (완료) 모델 발견 `/v1/models`·채팅 `/v1/chat/completions`·임베딩 `/v1/embeddings`는 이미
   OpenAI 호환 그대로다.
-- (완료) 로컬 base가 둘일 때의 라우팅: `VLLM_BASE_URL`(두 번째 로컬 서버). 기동 시 그쪽
-  `/v1/models`가 내는 이름을 프로바이더에 심고(`vllm_model_names`), 그 이름만 vLLM으로,
-  나머지 로컬 이름은 Ollama로 보낸다. vLLM이 내는 이름은 Ollama에 상주시키지 않는다.
-  nginx 없이 코드 한 줄짜리 대안(4.1)이 이것이다.
+- (완료) 로컬 base가 여럿일 때의 라우팅: `VLLM_BASE_URL`에 vLLM 서버를 쉼표로 적는다. 기동 시
+  각 서버 `/v1/models`가 내는 이름→서버 표를 프로바이더에 심고(`vllm_model_bases`), 그 이름은
+  그 서버로, 나머지 로컬 이름은 `LOCAL_LLM_BASE_URL`로 보낸다. vLLM이 내는 이름은 Ollama에
+  상주시키지 않는다. nginx 없이 코드 몇 줄짜리 대안(4.1)이 이것이다.
 - (남음) 스트리밍. 지금 답은 `done` 프레임 하나로 도착한다. 동시 사용자가 늘면 첫 토큰까지
   기다리는 시간이 곧 체감이라, vLLM으로 가면 `stream=True`로 토큰을 흘리는 것이 다음
   체감 개선이다. 백엔드 SSE 골격은 이미 있어 프레임 하나를 더 정의하면 된다.
@@ -204,5 +204,11 @@ CUDA_VISIBLE_DEVICES=0 vllm serve google/gemma-4-26b-it \
   모델로 표시하고 수준을 고르면 `--reasoning-parser gemma4`가 사고 본문을 분리한다.
 - (09-13 낮) 임베딩도 vLLM pooling으로(기술 보고서 §15): 재임베딩 26,338청크 188초, 검색 품질 동일.
   31b·e4b는 내렸고 요약·사용자 기억은 vLLM 26b가 맡는다.
+- (09-13 밤) **로컬 모델 전부 vLLM**: 화면 설정이 의도 분류·질문 다시쓰기·요약·사용자 기억을
+  `gemma4:e4b`로 돌려놓아 그 넷이 Ollama로 새고 있었다. e4b(google/gemma-4-E4B-it BF16 15GB,
+  게이트 아님)를 `scripts/start_vllm_e4b.sh`로 GPU0 8002에 띄우고(util 0.12 ≈ 22GB, sleep 모드)
+  `VLLM_BASE_URL`을 `8001,8002`로. `LOCAL_LLM_BASE_URL`도 8001로 바꿔 MOPAN 요청이 Ollama에
+  닿는 길을 없앴다(Ollama는 새싹이 몫). 검증: 채팅 1회에 8002 완료 1건(의도 게이트)·8001 1건(답변),
+  `ollama ps` 빈 상태. 기동 약 1분 30초(26b의 1/3).
 - 남은 것: 답변 스트리밍(첫 토큰 체감).
 - 재현: `python scripts/bench_local_concurrency.py http://127.0.0.1:8001/v1 gemma4:26b 1,4,8,16,32,64`

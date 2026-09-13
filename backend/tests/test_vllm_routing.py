@@ -15,8 +15,8 @@ def _provider(vllm: str = "http://vllm:8001/v1") -> OpenAIProvider:
 
 def test_vllm_names_route_to_vllm_and_other_local_names_to_ollama():
     p = _provider()
-    p.vllm_model_names = {"gemma4:26b"}
-    assert p._client_for("gemma4:26b") is p.vllm_client
+    p.vllm_model_bases = {"gemma4:26b": "http://vllm:8001/v1"}
+    assert p._client_for("gemma4:26b") is p.vllm_clients["http://vllm:8001/v1"]
     assert p._client_for("gemma4:e4b") is p.local_client
     assert p._client_for("gpt-4o") is p.client
     assert p._is_local("gemma4:26b")
@@ -24,8 +24,8 @@ def test_vllm_names_route_to_vllm_and_other_local_names_to_ollama():
 
 def test_without_a_vllm_url_everything_local_goes_to_ollama():
     p = _provider(vllm="")
-    p.vllm_model_names = {"gemma4:26b"}  # 발견은 됐어도 클라이언트가 없으면 Ollama
-    assert p.vllm_client is None
+    p.vllm_model_bases = {"gemma4:26b": "http://vllm:8001/v1"}  # 발견은 됐어도 클라이언트가 없으면 Ollama
+    assert p.vllm_clients == {}
     assert p._client_for("gemma4:26b") is p.local_client
 
 
@@ -42,6 +42,17 @@ async def test_discovery_reads_v1_models_and_degrades_to_empty(monkeypatch):
         return real(*args, **kwargs)
 
     monkeypatch.setattr(catalog_module.httpx, "AsyncClient", fake_client)
-    assert await discover_vllm_models("http://vllm:8001/v1") == {"gemma4:26b"}
-    assert await discover_vllm_models("http://dead:8001/v1") == set()
-    assert await discover_vllm_models("") == set()
+    assert await discover_vllm_models("http://vllm:8001/v1") == {"gemma4:26b": "http://vllm:8001/v1"}
+    assert await discover_vllm_models(["http://dead:8001/v1", "http://vllm:8001/v1"]) == {"gemma4:26b": "http://vllm:8001/v1"}
+    assert await discover_vllm_models("") == {}
+
+
+def test_two_vllm_servers_route_by_model_name():
+    p = OpenAIProvider(
+        api_key="k", embedding_model="e", answer_model="gpt-4o",
+        local_base_url="http://ollama:11434/v1", vllm_base_url="http://vllm:8001/v1, http://vllm:8002/v1",
+    )
+    p.vllm_model_bases = {"gemma4:26b": "http://vllm:8001/v1", "gemma4:e4b": "http://vllm:8002/v1"}
+    assert p._client_for("gemma4:26b") is p.vllm_clients["http://vllm:8001/v1"]
+    assert p._client_for("gemma4:e4b") is p.vllm_clients["http://vllm:8002/v1"]
+    assert p._client_for("gemma4:31b") is p.local_client

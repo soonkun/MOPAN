@@ -11,19 +11,21 @@
 # GPU 메모리를 비우고 첫 요청에 /wake_up으로 되살린다(app/llm/sleep.py). 없으면 두 엔드포인트가 없다.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"   # …/soonkun
+# 같은 스크립트를 env로 바꿔 다른 모델도 띄운다(scripts/start_vllm_e4b.sh 참고).
 MODEL="${VLLM_MODEL_PATH:-$ROOT/models/gemma-4-26B-A4B-it}"
+NAME="${VLLM_SERVED_NAME:-gemma4:26b}"
 PORT="${VLLM_PORT:-8001}"
 GPU="${VLLM_GPU:-1}"
 UTIL="${VLLM_GPU_UTIL:-0.42}"
-LOG="$ROOT/MOPAN/logs/vllm.log"
+LOG="$ROOT/MOPAN/logs/${VLLM_LOG_NAME:-vllm}.log"
 mkdir -p "$(dirname "$LOG")"
 
 if curl -s -m 3 -o /dev/null "http://127.0.0.1:$PORT/v1/models"; then
-  echo "vllm already listening on $PORT"; exit 0
+  echo "vllm ($NAME) already listening on $PORT"; exit 0
 fi
 CUDA_VISIBLE_DEVICES="$GPU" HF_HUB_OFFLINE=1 VLLM_SERVER_DEV_MODE=1 VLLM_LOGGING_LEVEL=INFO \
   setsid nohup "$ROOT/opt/vllm/.venv/bin/vllm" serve "$MODEL" \
-    --served-model-name gemma4:26b \
+    --served-model-name "$NAME" \
     --host 127.0.0.1 --port "$PORT" \
     --dtype bfloat16 \
     --max-model-len 16384 --max-num-seqs 64 \
@@ -34,4 +36,4 @@ CUDA_VISIBLE_DEVICES="$GPU" HF_HUB_OFFLINE=1 VLLM_SERVER_DEV_MODE=1 VLLM_LOGGING
     --enable-auto-tool-choice --tool-call-parser gemma4 \
     --limit-mm-per-prompt '{"image": 5}' \
     >> "$LOG" 2>&1 < /dev/null &
-echo "vllm starting (pid $!), log: $LOG"
+echo "vllm $NAME starting (pid $!), log: $LOG"

@@ -89,14 +89,13 @@ class OpenAIProvider(LLMProvider):
             if local_base_url
             else None
         )
-        # vLLM(두 번째 로컬 서버). 어느 이름이 거기 있는지는 기동 시 /v1/models로 알아내
-        # vllm_model_names에 심는다(app/llm/catalog.py:discover_vllm_models). 비어 있으면 없는 것.
-        self.vllm_client = (
-            AsyncOpenAI(base_url=vllm_base_url, api_key="none", timeout=max(timeout, 120.0), max_retries=1)
-            if vllm_base_url
-            else None
-        )
-        self.vllm_model_names: set[str] = set()
+        # vLLM 서버들(쉼표 구분 - 프로세스 하나가 모델 하나). 어느 이름이 어느 서버인지는 기동 시
+        # /v1/models로 알아내 vllm_model_bases(이름→base)에 심는다(catalog.py:discover_vllm_models).
+        self.vllm_clients: dict[str, AsyncOpenAI] = {
+            base: AsyncOpenAI(base_url=base, api_key="none", timeout=max(timeout, 120.0), max_retries=1)
+            for base in (u.strip() for u in (vllm_base_url or "").split(",")) if base
+        }
+        self.vllm_model_bases: dict[str, str] = {}
         self.local_model_names: set[str] = set()
         # 임베딩 전용 서버(vLLM pooling). 비면 local_client(Ollama)가 임베딩도 맡는다.
         # 타임아웃 900초·재시도 3: 실사고(2026-09-13) - 워커 8개가 128건 배치를 쏟자 vLLM 큐에 2,000
@@ -253,8 +252,12 @@ class OpenAIProvider(LLMProvider):
         )
         return vectors
 
+    def _vllm_base(self, model: str) -> str | None:
+        base = self.vllm_model_bases.get(model)
+        return base if base in self.vllm_clients else None
+
     def _is_vllm(self, model: str) -> bool:
-        return self.vllm_client is not None and model in self.vllm_model_names
+        return self._vllm_base(model) is not None
 
     def _is_local(self, model: str) -> bool:
         if self._is_vllm(model):
@@ -262,8 +265,9 @@ class OpenAIProvider(LLMProvider):
         return self.local_client is not None and (model in self.local_model_names or ":" in model)
 
     def _client_for(self, model: str) -> AsyncOpenAI:
-        if self._is_vllm(model):
-            return self.vllm_client
+        base = self._vllm_base(model)
+        if base is not None:
+            return self.vllm_clients[base]
         return self.local_client if self._is_local(model) else self.client
 
     def _is_reasoning(self, model: str) -> bool:
@@ -296,8 +300,9 @@ class OpenAIProvider(LLMProvider):
         # 비추론 모델에 남은 effort(브라우저에 기억된 값)는 조용히 버린다.
         model_name = str(request["model"])
         client = self._client_for(model_name)
-        if client is self.vllm_client:
-            await ensure_awake(str(self.vllm_client.base_url))  # 자고 있으면 깨운다(app/llm/sleep.py)
+        vllm_base = self._vllm_base(model_name)
+        if vllm_base is not None:
+            await ensure_awake(vllm_base)  # 자고 있으면 깨운다(app/llm/sleep.py)
         if self._is_reasoning(model_name):
             request.pop("temperature", None)
         else:
@@ -354,6 +359,6 @@ class OpenAIProvider(LLMProvider):
 
     async def aclose(self) -> None:
         await self.client.close()
-        for extra in (self.local_client, self.vllm_client, self.embedding_client):
+        for extra in (self.local_client, *self.vllm_clients.values(), self.embedding_client):
             if extra is not None:
                 await extra.close()

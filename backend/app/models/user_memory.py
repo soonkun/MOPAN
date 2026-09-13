@@ -26,7 +26,7 @@ class UserMemory(Base):
     )
     content: Mapped[str] = mapped_column(String(USER_MEMORY_CHARS), nullable=False)
     source_conversation_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True
     )
     # clock_timestamp(): 한 턴에서 붙는 여러 줄이 now()면 같은 시각을 받아 순서가 흔들린다(messages와 같은 이유).
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("clock_timestamp()"))

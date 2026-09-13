@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
         catalog.apply_to_provider(app.state.llm_provider)
     # vLLM이 내는 이름은 그쪽으로(docs/local-llm-concurrency.md). 카탈로그 행은 Ollama 발견이
     # 만든 것을 그대로 쓴다 - 같은 이름(gemma4:26b)이라 화면·추적 기록이 안 바뀐다.
-    app.state.llm_provider.vllm_model_names = await discover_vllm_models(settings.vllm_base_url)
+    app.state.llm_provider.vllm_model_bases = await discover_vllm_models(settings.vllm_base_urls)
     if settings.embedding_provider == "local":
         # 선택된 프로필의 모델만 내려받는다(쓰지 않을 모델을 배포마다 심지 않는다).
         from app.llm.embedding_profiles import ensure_local_embedding_model
@@ -90,7 +90,7 @@ async def lifespan(app: FastAPI):
             pin_local_models(
                 settings.local_llm_base_url,
                 # vLLM이 서빙하는 이름은 Ollama에 올리지 않는다(같은 모델을 두 번 상주시키지 않는다).
-                [m.id for m in catalog.enabled if m.provider == "local" and m.id not in app.state.llm_provider.vllm_model_names],
+                [m.id for m in catalog.enabled if m.provider == "local" and m.id not in app.state.llm_provider.vllm_model_bases],
                 settings.embedding_model if settings.embedding_provider == "local" and not settings.embedding_base_url else None,
             )
         )
@@ -103,7 +103,7 @@ async def lifespan(app: FastAPI):
         async with app.state.sessionmaker() as session:
             return (await _effective_settings(session, settings)).vllm_sleep_after_minutes
 
-    sleeper = Sleeper([settings.vllm_base_url, settings.embedding_base_url])
+    sleeper = Sleeper([*settings.vllm_base_urls, settings.embedding_base_url])
     app.state.sleep_task = asyncio.create_task(sleeper.run(_idle_minutes)) if sleeper.base_urls else None
 
     try:
