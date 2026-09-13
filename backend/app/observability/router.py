@@ -177,8 +177,10 @@ def _setting_response(
         # 모델 선택 설정의 선택지: 이 배포가 답변에 쓰는 모델들 + 질문 다시 쓰기 모델.
         # ""는 '질문 다시 쓰기 모델과 같음'이라는 기본값이다.
         choices=(
-            [""] + list(dict.fromkeys((model_choices or effective.selectable_models) + [effective.query_expansion_model]))
-            if spec.kind is str and spec.field.endswith("_model")  # 모델을 고르는 설정 전부(요약·사용자 기억·의도)
+            list(dict.fromkeys((model_choices or effective.selectable_models) + [effective.query_expansion_model]))
+            if spec.key == "QUERY_EXPANSION_MODEL"
+            else [""] + list(dict.fromkeys((model_choices or effective.selectable_models) + [effective.query_expansion_model]))
+            if spec.kind is str and spec.field.endswith("_model") and spec.key != "QUERY_EXPANSION_MODEL"
             else None
         ),
     )

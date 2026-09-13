@@ -61,6 +61,13 @@ const CATEGORIES: { id: string; title: string; summary: string; note?: string }[
 // 화면에서 바꿀 수 없는 값. 별도 탭으로 두자 모바일 가로 스크롤 밖으로 밀려 "사라진"
 // 것처럼 보였다(소유자 지적). 중요한 안내라 숨기지 않고, 설정 카테고리마다 하단에
 // 접힌 채로 항상 보이게 둔다 - 펼치면 이유까지 읽는다.
+// 모델 드롭다운의 빈 값이 실제로 무엇으로 풀리는지(backend config의 폴백 순서와 같아야 한다).
+const EMPTY_MODEL_LABEL: Record<string, string> = {
+  INTENT_MODEL: "기본값 (질문 다시 쓰기 모델과 같음)",
+  CONVERSATION_SUMMARY_MODEL: "기본값 (질문 다시 쓰기 모델과 같음)",
+  USER_MEMORY_MODEL: "기본값 (요약 모델, 없으면 질문 다시 쓰기 모델)",
+};
+
 const ENV_ONLY_NOTE =
   "아래 값들은 바꾸면 이미 저장된 데이터와 어긋나므로 환경변수(.env)로만 관리합니다. 화면에서 바꿀 수 있게 두면 코퍼스가 조용히 망가집니다.";
 
@@ -154,7 +161,7 @@ function SettingRow({
           >
             {(setting.choices ?? [String(setting.value)]).map((choice) => (
               <option key={choice} value={choice}>
-                {choice === "" ? "기본값 (질문 다시 쓰기 모델과 같음)" : choice}
+                {choice === "" ? EMPTY_MODEL_LABEL[setting.key] ?? "기본값" : choice}
               </option>
             ))}
           </select>

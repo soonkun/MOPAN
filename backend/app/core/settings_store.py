@@ -159,6 +159,20 @@ RUNTIME_SAFE_SETTINGS: dict[str, SettingSpec] = {
             help="키워드(FTS) 검색 결과의 비중입니다. 0으로 두면 벡터 검색만 사용합니다.",
         ),
         SettingSpec(
+            key="QUERY_EXPANSION_MODEL",
+            field="query_expansion_model",
+            kind=str,
+            minimum=0,
+            maximum=1,
+            group=RETRIEVAL,
+            label="질문 다시 쓰기 모델",
+            help=(
+                "약한 근거일 때 검색어를 다시 쓰고, 후속 질문을 자립형 검색어로 압축하며, 딥 리서치의 계획·보완 질의를 "
+                "만드는 값싼 모델입니다. 의도 분류·요약·사용자 기억 모델을 비워 두면 이 모델을 씁니다. 질문마다 "
+                "한두 번 짧은 출력을 내므로 gpt-4o-mini나 로컬 gemma4:26b(vLLM) 정도가 맞습니다."
+            ),
+        ),
+        SettingSpec(
             key="ANSWER_CONTEXT_TOKEN_BUDGET",
             field="answer_context_token_budget",
             kind=int,
