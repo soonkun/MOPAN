@@ -55,7 +55,7 @@ export default function Palette({
   if (!open) return null;
 
   return (
-    <div className="pointer-events-auto absolute inset-x-0 bottom-[3.75rem] top-auto z-10 flex max-h-[56%] flex-col rounded-t-xl bg-surface-container shadow-dialog sm:inset-x-auto sm:bottom-3 sm:left-3 sm:top-[9.75rem] sm:max-h-none sm:w-72 sm:max-w-[calc(100%-1.5rem)] sm:rounded-md sm:shadow-menu">
+    <div className="pointer-events-auto absolute inset-x-0 bottom-[3.75rem] top-2 z-10 flex flex-col rounded-t-xl bg-surface-container shadow-dialog sm:inset-x-auto sm:bottom-3 sm:left-3 sm:top-[9.75rem] sm:max-h-none sm:w-72 sm:max-w-[calc(100%-1.5rem)] sm:rounded-md sm:shadow-menu">
       <span className="mx-auto mt-2 h-1 w-10 shrink-0 rounded-full bg-outline-variant sm:hidden" aria-hidden="true" />
       <div className="flex items-center justify-between gap-2 p-3 pb-2">
         <h2 className="text-label font-medium text-on-surface">도구 서랍</h2>

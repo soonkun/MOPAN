@@ -7,7 +7,7 @@ import EditorCanvas, { type Selection } from "@/components/workflows/EditorCanva
 import Inspector, { type Catalog, type Draft } from "@/components/workflows/Inspector";
 import TestRun from "@/components/workflows/TestRun";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
-import { autoLayout, duplicateNode, placeGraphError, starterGraph } from "@/lib/graph";
+import { duplicateNode, placeGraphError, starterGraph } from "@/lib/graph";
 import type {
   AnswerModel,
   CallableTool,
@@ -397,7 +397,7 @@ export default function WorkflowEditorPage() {
           </span>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-2">
-          {/* 편집 도구: 되돌리기·다시하기·정렬. 아이콘만, 툴팁이 이름. 모바일에서는
+          {/* 편집 도구: 되돌리기·다시하기. 아이콘만, 툴팁이 이름. 모바일에서는
               머리 줄이 좁아 아래 막대로 내려간다(같은 핸들러). */}
           <button type="button" onClick={undo} disabled={!canUndo} aria-label="되돌리기 (Ctrl+Z)" title="되돌리기 (Ctrl+Z)" className="icon-btn hidden h-9 w-9 disabled:opacity-40 sm:flex">
             <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -409,14 +409,6 @@ export default function WorkflowEditorPage() {
             <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
               <path d="m15 14 5-5-5-5" />
               <path d="M20 9H10a6 6 0 0 0 0 12h3" />
-            </svg>
-          </button>
-          <button type="button" onClick={() => changeGraph(autoLayout(graph))} aria-label="자동 정렬" title="자동 정렬 - 실행 순서대로 열을 맞춥니다" className="icon-btn hidden h-9 w-9 sm:flex">
-            <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-              <rect x="3" y="4" width="6" height="6" rx="1.5" />
-              <rect x="15" y="4" width="6" height="6" rx="1.5" />
-              <rect x="15" y="14" width="6" height="6" rx="1.5" />
-              <path d="M9 7h6M9 7c3 0 3 10 6 10" />
             </svg>
           </button>
           {/* 아이콘+라벨 가변형(소유자 지정): 모바일은 아이콘만, 데스크톱은
@@ -577,20 +569,12 @@ export default function WorkflowEditorPage() {
                 <path d="M20 9H10a6 6 0 0 0 0 12h3" />
               </svg>
             </button>
-            <button type="button" onClick={() => changeGraph(autoLayout(graph))} aria-label="자동 정렬" className="icon-btn h-10 w-9 sm:hidden">
-              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-                <rect x="3" y="4" width="6" height="6" rx="1.5" />
-                <rect x="15" y="4" width="6" height="6" rx="1.5" />
-                <rect x="15" y="14" width="6" height="6" rx="1.5" />
-                <path d="M9 7h6M9 7c3 0 3 10 6 10" />
-              </svg>
-            </button>
           </div>
 
           {/* 수납 패널 - 도구 서랍과 같은 자리(레일 옆)에서 열린다. 모바일은 아래에서
               올라오는 시트: 손잡이 줄과 닫기 버튼이 있고, 높이는 화면의 절반 남짓. */}
           {(panel === "settings" || (panel === "selection" && selection)) && (
-            <div className="pointer-events-auto absolute inset-x-0 bottom-[3.75rem] top-auto z-10 flex max-h-[56%] flex-col overflow-hidden rounded-t-xl bg-surface-container-low shadow-dialog sm:inset-x-auto sm:bottom-3 sm:left-3 sm:top-[9.75rem] sm:max-h-none sm:w-80 sm:max-w-[calc(100%-1.5rem)] sm:flex-row sm:rounded-md sm:shadow-menu">
+            <div className="pointer-events-auto absolute inset-x-0 bottom-[3.75rem] top-2 z-10 flex flex-col overflow-hidden rounded-t-xl bg-surface-container-low shadow-dialog sm:inset-x-auto sm:bottom-3 sm:left-3 sm:top-[9.75rem] sm:max-h-none sm:w-80 sm:max-w-[calc(100%-1.5rem)] sm:flex-row sm:rounded-md sm:shadow-menu">
               <div className="flex shrink-0 items-center justify-between px-3 pt-2 sm:hidden">
                 <span className="mx-auto h-1 w-10 rounded-full bg-outline-variant" aria-hidden="true" />
                 <button

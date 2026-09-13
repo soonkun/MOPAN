@@ -393,35 +393,3 @@ export function duplicateNode(graph: WorkflowGraph, id: string): WorkflowGraph {
   const copy: GraphNode = JSON.parse(JSON.stringify({ ...node, id: nextNodeId(graph), x: node.x + 40, y: node.y + 60 }));
   return { nodes: [...graph.nodes, copy], edges: graph.edges };
 }
-
-/** Layered auto-layout: each node sits in the column of its longest path from
- * `input`, nodes in a column stacked in id order. Deterministic, no library. */
-export function autoLayout(graph: WorkflowGraph, columnWidth = 260, rowHeight = 130): WorkflowGraph {
-  const depth = new Map<string, number>();
-  const incoming = (id: string) => graph.edges.filter((e) => e.to === id).map((e) => e.from);
-  const visiting = new Set<string>();
-  const depthOf = (id: string): number => {
-    if (depth.has(id)) return depth.get(id) as number;
-    if (visiting.has(id)) return 0;
-    visiting.add(id);
-    const parents = incoming(id);
-    const d = parents.length === 0 ? 0 : Math.max(...parents.map(depthOf)) + 1;
-    visiting.delete(id);
-    depth.set(id, d);
-    return d;
-  };
-  for (const n of graph.nodes) depthOf(n.id);
-  const answer = graph.nodes.find((n) => n.kind === "answer");
-  const maxDepth = Math.max(0, ...graph.nodes.filter((n) => n.kind !== "answer").map((n) => depth.get(n.id) ?? 0));
-  if (answer) depth.set(answer.id, maxDepth + 1);
-  const rows = new Map<number, number>();
-  const nodes = [...graph.nodes]
-    .sort((a, b) => (depth.get(a.id) ?? 0) - (depth.get(b.id) ?? 0) || a.id.localeCompare(b.id))
-    .map((n) => {
-      const d = depth.get(n.id) ?? 0;
-      const row = rows.get(d) ?? 0;
-      rows.set(d, row + 1);
-      return { ...n, x: d * columnWidth, y: row * rowHeight };
-    });
-  return { nodes, edges: graph.edges };
-}

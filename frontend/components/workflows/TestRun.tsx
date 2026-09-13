@@ -95,7 +95,7 @@ export default function TestRun({
     <aside
       aria-label="실행해보기"
       // 모바일: 아래쪽 시트(레일 바 위), 데스크톱: 오른쪽 패널.
-      className="pointer-events-auto absolute inset-x-0 bottom-[3.75rem] top-auto z-20 flex max-h-[56%] flex-col rounded-t-xl bg-surface-container shadow-dialog sm:inset-x-auto sm:bottom-3 sm:right-3 sm:top-3 sm:max-h-none sm:w-96 sm:max-w-[calc(100%-1.5rem)] sm:rounded-md sm:shadow-menu"
+      className="pointer-events-auto absolute inset-x-0 bottom-[3.75rem] top-2 z-20 flex flex-col rounded-t-xl bg-surface-container shadow-dialog sm:inset-x-auto sm:bottom-3 sm:right-3 sm:top-3 sm:max-h-none sm:w-96 sm:max-w-[calc(100%-1.5rem)] sm:rounded-md sm:shadow-menu"
     >
       <div className="flex items-center justify-between gap-2 p-3 pb-2">
         <h2 className="text-label font-medium text-on-surface">실행해보기</h2>
