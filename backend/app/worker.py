@@ -263,9 +263,11 @@ class WorkerSettings:
     # hung job is ours to mark rather than arq's to silently finish.
     job_timeout = PIPELINE_TIMEOUT + 30
     max_tries = 2
-    # 동시 문서 처리 수. arq 기본 10에서 올렸다(2026-09-13): 임베딩이 vLLM으로 가자 병목이 CPU 파싱
-    # (문서당 스레드 하나)으로 옮겨 GPU가 놀았다 - 72코어 노드에서 실측 15건/분 → 아래 §15.3.
-    max_jobs = 24
+    # 프로세스당 동시 문서 수. 파싱은 스레드라 GIL 하나를 나눠 쓴다 - 24로 올려도 한 코어만 썼다(실측
+    # 워커 102% CPU). 처리량은 프로세스 수로 늘린다: start_local.sh가 이 워커를 8개 띄운다(같은 큐,
+    # 각자 GIL). OCR 프로세스 풀은 문서마다 열리므로 OCR_WORKERS=4·OMP_THREAD_LIMIT=1로 묶는다 -
+    # 안 묶으면 24문서 × 16 tesseract × OpenMP 스레드로 로드가 90을 넘었다(2026-09-13).
+    max_jobs = 8
     keep_result = 3600
     # ponytail: a SIGKILL/OOM leaves the document at `parsing` with no try left
     # to reap it. A sweeper for non-terminal documents older than job_timeout

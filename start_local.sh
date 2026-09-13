@@ -15,7 +15,10 @@ DBURL=$(grep -E '^DATABASE_URL=' ../.env | cut -d= -f2-)
 DATABASE_URL="$DBURL" nohup ../.venv/bin/python -m uvicorn app.examples_mcp.main:app --host 127.0.0.1 --port 8100 >> ../logs/mcp-examples.log 2>&1 &
 sleep 3   # 시딩이 발견까지 하려면 MCP가 먼저 떠 있어야 한다.
 nohup ../.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8010 >> ../logs/backend.log 2>&1 &
-nohup ../.venv/bin/python -m arq app.worker.WorkerSettings >> ../logs/worker.log 2>&1 &
+# 문서 처리 워커 8개(같은 큐, 각자 GIL - 파싱이 CPU 병목이라 프로세스 수가 곧 처리량, 3개 18건/분 실측). OCR 풀·스레드는 묶는다(app/worker.py 주석).
+for i in 1 2 3 4 5 6 7 8; do
+  OCR_WORKERS=4 OMP_THREAD_LIMIT=1 nohup ../.venv/bin/python -m arq app.worker.WorkerSettings >> ../logs/worker.log 2>&1 &
+done
 # 감시 폴더 스캔 전용 워커(제 큐, 동시 1) - 문서 처리 큐 뒤에서 굶지 않게(app/worker.py:WatchWorkerSettings).
 nohup ../.venv/bin/python -m arq app.worker.WatchWorkerSettings >> ../logs/watch-worker.log 2>&1 &
 sleep 8
