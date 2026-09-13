@@ -11,6 +11,7 @@ from app.llm.base import LLMProvider
 from app.models.document import Document
 from app.rag.chunking.base import ChunkingStrategy
 from app.rag.chunking.hierarchy import CHARACTERS, Scheme, detect
+from app.rag.blocks import sanitize
 from app.rag.parsers import get_parser
 from app.rag.parsers.base import ParseFailure
 from app.documents.versions import revert_current_on_failure
@@ -71,7 +72,7 @@ async def process_document(
         # on the worker's single event loop stalls every other queued job and
         # arq's own heartbeat. The chunking strategies thread their tiktoken
         # passes for the same reason.
-        parsed = await to_thread.run_sync(parser.parse, document.storage_path, section_marker)
+        parsed = sanitize(await to_thread.run_sync(parser.parse, document.storage_path, section_marker))
 
         await _set_status(db, document, "chunking")
         # WHAT THIS DOCUMENT IS, decided by this document's own content and then
@@ -104,9 +105,7 @@ async def process_document(
                 # document whose collection said "hierarchy" and whose content
                 # said otherwise.
                 if section_marker is not None:
-                    parsed = await to_thread.run_sync(
-                        parser.parse, document.storage_path, None
-                    )
+                    parsed = sanitize(await to_thread.run_sync(parser.parse, document.storage_path, None))
             document.structure = structure
         candidates = await strategy.chunk(parsed.blocks, llm_provider.embed)
 

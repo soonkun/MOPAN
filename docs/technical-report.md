@@ -945,6 +945,11 @@ Ollama qwen3-embedding(4 슬롯, GPU 1 80%)으로 6건/분, 전체 약 33시간.
    취소된 요청). 색인 중에는 워커를 재시작하지 말고, 했다면 failed 문서를 uploaded로 되돌려
    다시 큐에 넣는다(이번 색인에서 그렇게 했다).
 
+네 번째: 색인이 끝나고 보니 실패 352건 중 **296건이 Postgres의 "invalid byte sequence for encoding
+UTF8: 0x00"** - 글꼴 매핑이 깨진 PDF의 추출 텍스트에 NUL이 섞여 나오고 text 컬럼이 거부한다.
+파서마다 고치지 않고 파이프라인 한 곳(`rag/blocks.py:sanitize`)에서 NUL과 C0 제어문자를 지운다
+(개행·탭은 남긴다). 나머지는 처리 시간 초과(870초)와 진짜 깨진 파일이다.
+
 ### 15.4 남은 것
 
 - Ollama의 qwen3-embedding은 폴백으로 남겨 두었다(EMBEDDING_BASE_URL을 비우면 그대로 돌아감).

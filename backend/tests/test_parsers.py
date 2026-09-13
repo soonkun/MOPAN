@@ -610,3 +610,12 @@ def test_readable_ratio_catches_wrong_glyph_and_cid_garbage():
     # 목차 쪽: 점선 리더가 아무리 길어도 쓰레기 글자를 가리지 못한다.
     toc = "㈃㶟 㞃シ㇯㘏 ㅣ◿ 㞃シㄿ ㉬⌿ " + "o" * 300 + " 㞃シ☐Ⳅⳓ⪓ " + "." * 200
     assert _page_unreadable(_lines_from_text(toc))
+
+
+def test_sanitize_strips_nul_and_control_characters_but_keeps_newlines():
+    """실사고 2026-09-13: 완결보고서 296건이 Postgres의 'invalid byte sequence 0x00'으로 색인 실패."""
+    from app.rag.blocks import Block, ParsedDocument, sanitize
+
+    doc = ParsedDocument(blocks=[Block(text="가\x00나\x01다\n라\t마", block_type="paragraph", section="절\x001")])
+    out = sanitize(doc)
+    assert out.blocks[0].text == "가나다\n라\t마" and out.blocks[0].section == "절1"
