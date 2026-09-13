@@ -98,8 +98,11 @@ class OpenAIProvider(LLMProvider):
         self.vllm_model_names: set[str] = set()
         self.local_model_names: set[str] = set()
         # 임베딩 전용 서버(vLLM pooling). 비면 local_client(Ollama)가 임베딩도 맡는다.
+        # 타임아웃 900초·재시도 3: 실사고(2026-09-13) - 워커 8개가 128건 배치를 쏟자 vLLM 큐에 2,000
+        # 시퀀스가 줄을 섰고, 120초 안에 차례가 안 온 요청이 "Connection error"로 실패해 문서가
+        # failed로 남았다. 임베딩은 멱등이라 기다리고 다시 보내는 것이 맞다.
         self.embedding_client = (
-            AsyncOpenAI(base_url=embedding_base_url, api_key="none", timeout=max(timeout, 120.0), max_retries=1)
+            AsyncOpenAI(base_url=embedding_base_url, api_key="none", timeout=max(timeout, 900.0), max_retries=3)
             if embedding_base_url
             else None
         )
