@@ -234,6 +234,20 @@ RUNTIME_SAFE_SETTINGS: dict[str, SettingSpec] = {
             ),
         ),
         SettingSpec(
+            key="VLLM_SLEEP_AFTER_MINUTES",
+            field="vllm_sleep_after_minutes",
+            kind=int,
+            minimum=0,
+            maximum=1440,
+            group="models",
+            label="GPU 유휴 대기(분) 뒤 재우기",
+            help=(
+                "vLLM 서버(답변 모델·임베딩)에 이 시간 동안 요청이 없으면 가중치를 CPU 메모리로 내려 GPU를 비웁니다. "
+                "다음 요청이 오면 자동으로 되살리며 수 초가 걸립니다(재기동 4분과 다릅니다). 0이면 항상 GPU에 둡니다. "
+                "GPU를 다른 작업(모델 학습 등)과 나눠 쓸 때 켜세요."
+            ),
+        ),
+        SettingSpec(
             key="CONVERSATION_SUMMARY",
             field="conversation_summary",
             kind=bool,

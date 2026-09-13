@@ -273,8 +273,6 @@ export default function SettingsPage() {
 
           {current.id === "branding" ? (
             <BrandingSection />
-          ) : current.id === "models" ? (
-            <ModelsSection />
           ) : payload === null ? (
             !loadError && <p className="py-8 text-center text-body text-on-surface-variant">불러오는 중...</p>
           ) : (
@@ -283,6 +281,8 @@ export default function SettingsPage() {
                   and a button, and one column left two thirds of every card empty
                   on a wide screen. items-start so an error banner does not stretch
                   the neighbour. */}
+              {/* 모델 탭: 레지스트리(ModelsSection) 아래에 이 그룹의 런타임 설정(GPU 유휴 재우기 등)도 그린다. */}
+              {current.id === "models" && <ModelsSection />}
               {current.id === "documents" && <IngestSection />}
               {current.id === "chunking" && <EmbeddingSection />}
               <div className="grid gap-3 2xl:grid-cols-2 2xl:items-start">

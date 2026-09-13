@@ -367,6 +367,7 @@ docs/             설계 문서와 화면 기록
 | `LOCAL_LLM_BASE_URL` | 빈 값 | Ollama의 OpenAI 호환 주소(`http://127.0.0.1:11434/v1`). 로컬 답변 모델과 로컬 임베딩이 이 주소를 씁니다 |
 | `VLLM_BASE_URL` | 빈 값 | 두 번째 로컬 서버 vLLM(`http://127.0.0.1:8001/v1`). 거기서 내는 이름만 vLLM으로, 나머지 로컬은 Ollama로 |
 | `EMBEDDING_BASE_URL` | 빈 값 | 임베딩 전용 서버(vLLM pooling, `http://127.0.0.1:8003/v1`). 비면 Ollama가 임베딩도 맡습니다. 바꾸면 `scripts/reembed.py`로 전부 다시 채웁니다 |
+| `VLLM_SLEEP_AFTER_MINUTES` | `0` | vLLM 서버가 이 분수만큼 요청이 없으면 가중치를 CPU로 내려 GPU를 비우고, 다음 요청이 수 초 만에 깨웁니다. 0이면 항상 상주. 화면(모델 탭)에서도 바꿉니다 |
 | `CHUNKING_STRATEGY` | `semantic` | `semantic`(구조 + 임베딩 병합) 또는 `fixed`(문자 창) |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `150` | 문자 단위. `0 <= overlap < size` |
 | `RETRIEVAL_TOP_N` | `6` | 프롬프트까지 가는 청크 수 |

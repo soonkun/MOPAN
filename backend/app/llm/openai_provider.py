@@ -6,6 +6,7 @@ from openai import AsyncOpenAI, OpenAIError, RateLimitError
 
 from app.core.config import EMBEDDING_MAX_BATCH_SIZE
 from app.core.logging import log_event
+from app.llm.sleep import ensure_awake
 from app.llm.base import ChatMessage, ChatResult, LLMError, LLMProvider, ToolCall
 
 # 임베딩 배치가 429를 만났을 때의 바깥 재시도 횟수. 지수 백오프(2,4,8,…,45초
@@ -217,6 +218,8 @@ class OpenAIProvider(LLMProvider):
                 else {}
             )
             embed_client = (self.embedding_client or self.local_client) if local else self.client
+            if embed_client is self.embedding_client and self.embedding_client is not None:
+                await ensure_awake(str(self.embedding_client.base_url))
             for batch in self._batches(texts):
                 # 분당 토큰 한도(429)는 오류가 아니라 큰 표를 올린 날의 정상
                 # 상태다 - 창은 길어야 60초면 되살아난다. SDK 내부 재시도
@@ -293,6 +296,8 @@ class OpenAIProvider(LLMProvider):
         # 비추론 모델에 남은 effort(브라우저에 기억된 값)는 조용히 버린다.
         model_name = str(request["model"])
         client = self._client_for(model_name)
+        if client is self.vllm_client:
+            await ensure_awake(str(self.vllm_client.base_url))  # 자고 있으면 깨운다(app/llm/sleep.py)
         if self._is_reasoning(model_name):
             request.pop("temperature", None)
         else:

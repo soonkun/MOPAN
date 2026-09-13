@@ -95,9 +95,22 @@ async def lifespan(app: FastAPI):
             )
         )
 
+    # vLLM 유휴 재우기(app/llm/sleep.py). 백엔드 한 프로세스만 재우고, 깨우는 건 요청마다 프로바이더가.
+    from app.core.settings_store import effective_settings as _effective_settings
+    from app.llm.sleep import Sleeper
+
+    async def _idle_minutes() -> int:
+        async with app.state.sessionmaker() as session:
+            return (await _effective_settings(session, settings)).vllm_sleep_after_minutes
+
+    sleeper = Sleeper([settings.vllm_base_url, settings.embedding_base_url])
+    app.state.sleep_task = asyncio.create_task(sleeper.run(_idle_minutes)) if sleeper.base_urls else None
+
     try:
         yield
     finally:
+        if app.state.sleep_task is not None:
+            app.state.sleep_task.cancel()
         await app.state.llm_provider.aclose()
         await app.state.arq_pool.aclose()
         await app.state.redis.aclose()

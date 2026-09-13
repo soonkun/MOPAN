@@ -5,6 +5,8 @@
 #   --runner pooling : /v1/embeddings 서버. --max-model-len 8192는 청크 상한(4,095토큰)의 두 배.
 #   차원 1536은 앱이 요청마다 dimensions로 보내고, 서버가 무시하면 프로바이더가 앞 1536차원을
 #   잘라 정규화한다(MRL) - Ollama의 dimensions와 같은 연산.
+# --enable-sleep-mode + VLLM_SERVER_DEV_MODE=1: 유휴 시 백엔드가 /sleep(level 1, 가중치를 CPU RAM으로)으로
+# GPU 메모리를 비우고 첫 요청에 /wake_up으로 되살린다(app/llm/sleep.py). 없으면 두 엔드포인트가 없다.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"   # …/soonkun
 MODEL="${VLLM_EMBED_MODEL_PATH:-$ROOT/models/Qwen3-Embedding-8B}"
@@ -16,12 +18,13 @@ mkdir -p "$(dirname "$LOG")"
 if curl -s -m 3 -o /dev/null "http://127.0.0.1:$PORT/v1/models"; then
   echo "vllm-embed already listening on $PORT"; exit 0
 fi
-CUDA_VISIBLE_DEVICES="$GPU" HF_HUB_OFFLINE=1 \
+CUDA_VISIBLE_DEVICES="$GPU" HF_HUB_OFFLINE=1 VLLM_SERVER_DEV_MODE=1 \
   setsid nohup "$ROOT/opt/vllm/.venv/bin/vllm" serve "$MODEL" \
     --runner pooling \
     --served-model-name qwen3-embedding:8b \
     --host 127.0.0.1 --port "$PORT" \
     --dtype bfloat16 --max-model-len 8192 --max-num-seqs 128 \
     --gpu-memory-utilization "$UTIL" \
+    --enable-sleep-mode \
     >> "$LOG" 2>&1 < /dev/null &
 echo "vllm-embed starting (pid $!), log: $LOG"

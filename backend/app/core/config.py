@@ -287,6 +287,9 @@ class Settings(BaseSettings):
     # --served-model-name으로 qwen3-embedding:8b 그대로라 EMBEDDING_MODEL·프로필·저장된 벡터의 이름표는
     # 안 바뀐다. 단, 벡터 값은 BF16과 Q4 GGUF가 미세하게 달라 전환 때 scripts/reembed.py로 전부 다시 채웠다.
     embedding_base_url: str = ""
+    # vLLM 서버(답변·임베딩)가 이 분수만큼 요청이 없으면 재운다(가중치를 CPU RAM으로, GPU 비움). 첫
+    # 요청이 깨운다(수 초). 0이면 항상 상주. app/llm/sleep.py. 런타임 설정(화면)으로 바꾼다.
+    vllm_sleep_after_minutes: int = 0
     local_llm_api_key: str = "ollama"
     # 딥 리서치(app/research): 종합 프롬프트에 넣는 근거의 토큰 상한과 동시 실행 상한.
     # 원본(새싹이)의 문자 상한 90,000을 토큰으로 옮겼다. 넘치면 뒤에서 자르고 잘린 개수를

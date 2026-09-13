@@ -7,6 +7,8 @@
 #   --reasoning-parser/--tool-call-parser gemma4 : 사고 토큰과 함수 호출을 본문에서 분리(vLLM 0.26).
 #   --enable-prefix-caching : 시스템 프롬프트(모든 요청의 접두사) KV 재사용.
 #   --max-model-len 16384 : MOPAN 프롬프트 상한(예산 8k + 필수 2k + 출력)에 여유. 262k를 다 열면 KV만 먹는다.
+# --enable-sleep-mode + VLLM_SERVER_DEV_MODE=1: 유휴 시 백엔드가 /sleep(level 1, 가중치를 CPU RAM으로)으로
+# GPU 메모리를 비우고 첫 요청에 /wake_up으로 되살린다(app/llm/sleep.py). 없으면 두 엔드포인트가 없다.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"   # …/soonkun
 MODEL="${VLLM_MODEL_PATH:-$ROOT/models/gemma-4-26B-A4B-it}"
@@ -19,13 +21,14 @@ mkdir -p "$(dirname "$LOG")"
 if curl -s -m 3 -o /dev/null "http://127.0.0.1:$PORT/v1/models"; then
   echo "vllm already listening on $PORT"; exit 0
 fi
-CUDA_VISIBLE_DEVICES="$GPU" HF_HUB_OFFLINE=1 VLLM_LOGGING_LEVEL=INFO \
+CUDA_VISIBLE_DEVICES="$GPU" HF_HUB_OFFLINE=1 VLLM_SERVER_DEV_MODE=1 VLLM_LOGGING_LEVEL=INFO \
   setsid nohup "$ROOT/opt/vllm/.venv/bin/vllm" serve "$MODEL" \
     --served-model-name gemma4:26b \
     --host 127.0.0.1 --port "$PORT" \
     --dtype bfloat16 \
     --max-model-len 16384 --max-num-seqs 64 \
     --gpu-memory-utilization "$UTIL" \
+    --enable-sleep-mode \
     --enable-prefix-caching \
     --reasoning-parser gemma4 \
     --enable-auto-tool-choice --tool-call-parser gemma4 \
