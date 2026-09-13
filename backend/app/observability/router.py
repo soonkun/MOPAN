@@ -178,7 +178,7 @@ def _setting_response(
         # ""는 '질문 다시 쓰기 모델과 같음'이라는 기본값이다.
         choices=(
             [""] + list(dict.fromkeys((model_choices or effective.selectable_models) + [effective.query_expansion_model]))
-            if spec.key == "INTENT_MODEL"
+            if spec.kind is str and spec.field.endswith("_model")  # 모델을 고르는 설정 전부(요약·사용자 기억·의도)
             else None
         ),
     )
