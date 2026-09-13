@@ -173,6 +173,9 @@ async def app(test_engine, test_sessionmaker, fake_redis, tmp_path_factory):
             "upload_dir": tmp_path_factory.mktemp("uploads"),
             "allow_self_registration": True,
             "environment": "development",
+            # 운영 .env의 DF 트림(2026-09-13, 122만 청크용)은 sparse_lexeme_df 표를 요구한다 - 테스트 DB엔
+            # 그 표가 없고 키워드 팔은 표가 없으면 일부러 크게 실패한다. 같은 이유로 여기서 못 박는다.
+            "sparse_df_trim": 0.0,
             # Pinned for the same reason allow_self_registration is: the model
             # allowlist is a deployment decision, and an operator adding a model
             # to .env must not be able to change what the suite asserts. A test
