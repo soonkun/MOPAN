@@ -54,6 +54,7 @@ async def startup(ctx: dict) -> None:
         local_base_url=settings.local_llm_base_url,
         local_api_key=settings.local_llm_api_key,
         embedding_provider=settings.embedding_provider,
+        embedding_base_url=settings.embedding_base_url,
     )
 
 
@@ -237,6 +238,9 @@ class WorkerSettings:
     # hung job is ours to mark rather than arq's to silently finish.
     job_timeout = PIPELINE_TIMEOUT + 30
     max_tries = 2
+    # 동시 문서 처리 수. arq 기본 10에서 올렸다(2026-09-13): 임베딩이 vLLM으로 가자 병목이 CPU 파싱
+    # (문서당 스레드 하나)으로 옮겨 GPU가 놀았다 - 72코어 노드에서 실측 15건/분 → 아래 §15.3.
+    max_jobs = 24
     keep_result = 3600
     # ponytail: a SIGKILL/OOM leaves the document at `parsing` with no try left
     # to reap it. A sweeper for non-terminal documents older than job_timeout

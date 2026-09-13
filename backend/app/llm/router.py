@@ -152,7 +152,7 @@ async def embedding_status(
     for p in ordered_profiles():
         present = None
         if p.provider == "local" and settings.local_llm_base_url:
-            present = await local_model_present(settings.local_llm_base_url, p.model, timeout=2.0)
+            present = await local_model_present(settings.embedding_base_url or settings.local_llm_base_url, p.model, timeout=2.0)
         items.append(EmbeddingProfileResponse(
             key=p.key, rank=p.rank, label=p.label, provider=p.provider, model=p.model, dim=p.dim, origin=p.origin,
             badges=list(p.badges), note=p.note, current=(p.key == current), local_present=present,

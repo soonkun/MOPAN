@@ -190,7 +190,8 @@ CUDA_VISIBLE_DEVICES=0 vllm serve google/gemma-4-26b-it \
 | 프로세스 | 모델 | GPU | 포트 | 기동 |
 |---|---|---|---|---|
 | vLLM 0.26 | `gemma4:26b` = models/gemma-4-26B-A4B-it (BF16, 48.5GiB) | 1 (42% ≈ 77GB 선점) | 8001 | `scripts/start_vllm.sh` (start_local.sh가 부른다) |
-| Ollama 0.32.5 | `gemma4:e4b`(값싼 단계), `gemma4:31b`, `qwen3-embedding:8b` | 0·1 | 11434 | 새싹이 start.sh |
+| vLLM 0.26 pooling | `qwen3-embedding:8b` = models/Qwen3-Embedding-8B (BF16) | 0 (25% ≈ 46GB) | 8003 | `scripts/start_vllm_embed.sh` (start_local.sh가 부른다) |
+| Ollama 0.32.5 | `qwen3-embedding:8b`(폴백, EMBEDDING_BASE_URL을 비우면) | 1 | 11434 | 새싹이 start.sh |
 
 - `.env`: `VLLM_BASE_URL=http://127.0.0.1:8001/v1`. 지우면(또는 vLLM이 죽어 있으면) 발견이
   빈 집합이라 `gemma4:26b`는 Ollama로 돌아간다 - 되돌리기는 그것뿐이다. 단, MOPAN 기동 시
@@ -201,7 +202,7 @@ CUDA_VISIBLE_DEVICES=0 vllm serve google/gemma-4-26b-it \
 - 사고(thinking): MOPAN은 추론 모델로 표시되지 않은 로컬 모델에 항상 `reasoning_effort:
   none`을 보내고, vLLM은 그것을 `enable_thinking=false`로 옮긴다. 사용자가 26b를 추론
   모델로 표시하고 수준을 고르면 `--reasoning-parser gemma4`가 사고 본문을 분리한다.
-- 남은 것: (1) 답변 스트리밍(첫 토큰 체감), (2) 임베딩을 vLLM pooling 인스턴스로(지금은
-  Ollama, 부하가 가벼워 급하지 않다), (3) e4b도 vLLM으로(값싼 단계 셋이 매 질문마다 도는데
-  Ollama 슬롯을 쓴다 - 동시 사용자가 더 늘면 다음 병목은 여기다).
+- (09-13 낮) 임베딩도 vLLM pooling으로(기술 보고서 §15): 재임베딩 26,338청크 188초, 검색 품질 동일.
+  31b·e4b는 내렸고 요약·사용자 기억은 vLLM 26b가 맡는다.
+- 남은 것: 답변 스트리밍(첫 토큰 체감).
 - 재현: `python scripts/bench_local_concurrency.py http://127.0.0.1:8001/v1 gemma4:26b 1,4,8,16,32,64`

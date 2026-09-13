@@ -66,12 +66,17 @@ def current_profile_key(provider: str, model: str) -> str | None:
 
 
 async def local_model_present(base_url: str, model: str, timeout: float = 5.0) -> bool | None:
-    """Ollama에 모델이 있는가. 서버가 안 뜨면 None(모름)."""
+    """로컬 서버에 모델이 있는가. Ollama면 /api/tags, 아니면(vLLM 등) OpenAI 호환 /v1/models.
+    서버가 안 뜨면 None(모름)."""
     root = base_url.rstrip("/")
     root = root[: -len("/v1")] if root.endswith("/v1") else root
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             r = await client.get(f"{root}/api/tags")
+            if r.status_code == 404:
+                r = await client.get(f"{root}/v1/models", headers={"Authorization": "Bearer none"})
+                r.raise_for_status()
+                return model in {m.get("id") for m in r.json().get("data", [])}
             r.raise_for_status()
             names = {m["name"] for m in r.json().get("models", [])}
     except Exception:
@@ -88,6 +93,13 @@ async def ensure_local_embedding_model(base_url: str, model: str) -> str:
     if present:
         return "present"
     root = base_url.rstrip("/")
+    root = root[: -len("/v1")] if root.endswith("/v1") else root
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            if (await client.get(f"{root}/api/version")).status_code == 404:
+                return "not ollama; cannot pull"  # vLLM은 기동 시 모델이 정해진다
+    except Exception:
+        return "unreachable"
     root = root[: -len("/v1")] if root.endswith("/v1") else root
     logger.warning("embedding model %s not found locally; pulling from Ollama registry", model)
     try:

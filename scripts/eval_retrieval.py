@@ -409,6 +409,7 @@ async def embed_openai(model: str, texts: list[str], settings) -> tuple[dict[str
             max_retries=settings.llm_max_retries,
             embedding_dim=settings.embedding_dim if deployed_local else None,
             local_base_url=settings.local_llm_base_url if deployed_local else "",
+            embedding_base_url=settings.embedding_base_url if deployed_local else "",
             local_api_key=settings.local_llm_api_key,
             embedding_provider="local" if deployed_local else "openai",
         )

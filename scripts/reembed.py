@@ -106,6 +106,7 @@ async def main() -> int:
             max_retries=settings.llm_max_retries,
             embedding_dim=args.dim,
             local_base_url=settings.local_llm_base_url if args.local else "",
+            embedding_base_url=settings.embedding_base_url if args.local else "",
             local_api_key=settings.local_llm_api_key,
             embedding_provider="local" if args.local else "openai",
         )
@@ -114,7 +115,7 @@ async def main() -> int:
         if args.local:
             from app.llm.embedding_profiles import ensure_local_embedding_model
 
-            print(f"local model {args.model}: {await ensure_local_embedding_model(settings.local_llm_base_url, args.model)}")
+            print(f"local model {args.model}: {await ensure_local_embedding_model(settings.embedding_base_url or settings.local_llm_base_url, args.model)}")
         # 차원이 다른 프로필(1024)로 바꾸면 컬럼 폭을 함께 바꾼다. HNSW 인덱스는 폭에 묶여 있어 지우고 다시 만든다.
         # 기존 벡터는 새 공간과 무관하므로 NULL로 비우고 아래에서 전부 다시 채운다.
         from sqlalchemy import text as sql_text

@@ -10,6 +10,8 @@ DBURL=$(grep -E '^DATABASE_URL=' ../.env | cut -d= -f2-)
 # 아니면 띄운다 - 가중치 로드 ~20초 + 그래프 캡처 ~1분이라 백엔드 기동을 막지 않는다. 백엔드는 기동 시
 # /v1/models로 vLLM을 발견하며, 그때 아직 안 떠 있었으면 관리자 화면 "모델 → 새로고침"이 다시 발견한다.
 ../scripts/start_vllm.sh
+# 임베딩은 GPU 0의 vLLM pooling(8003)이 낸다 - Ollama 임베딩(4 슬롯)보다 색인이 수십 배 빠르다.
+../scripts/start_vllm_embed.sh
 DATABASE_URL="$DBURL" nohup ../.venv/bin/python -m uvicorn app.examples_mcp.main:app --host 127.0.0.1 --port 8100 >> ../logs/mcp-examples.log 2>&1 &
 sleep 3   # 시딩이 발견까지 하려면 MCP가 먼저 떠 있어야 한다.
 nohup ../.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8010 >> ../logs/backend.log 2>&1 &

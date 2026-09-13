@@ -282,6 +282,11 @@ class Settings(BaseSettings):
     # 거기서 /v1/models가 알려 주는 이름은 Ollama 대신 이쪽으로 간다 - 같은 이름(gemma4:26b)을
     # 양쪽이 다 내면 vLLM이 이긴다. 근거·수치·기동은 docs/local-llm-concurrency.md, scripts/start_vllm.sh.
     vllm_base_url: str = ""
+    # 임베딩만 따로 보내는 OpenAI 호환 주소(비면 LOCAL_LLM_BASE_URL). 2026-09-13: Ollama 임베딩(4 슬롯)이
+    # 색인 병목이라 vLLM pooling(scripts/start_vllm_embed.sh, GPU 0, 8003)으로 옮겼다. 모델 이름은
+    # --served-model-name으로 qwen3-embedding:8b 그대로라 EMBEDDING_MODEL·프로필·저장된 벡터의 이름표는
+    # 안 바뀐다. 단, 벡터 값은 BF16과 Q4 GGUF가 미세하게 달라 전환 때 scripts/reembed.py로 전부 다시 채웠다.
+    embedding_base_url: str = ""
     local_llm_api_key: str = "ollama"
     # 딥 리서치(app/research): 종합 프롬프트에 넣는 근거의 토큰 상한과 동시 실행 상한.
     # 원본(새싹이)의 문자 상한 90,000을 토큰으로 옮겼다. 넘치면 뒤에서 자르고 잘린 개수를

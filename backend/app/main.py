@@ -60,6 +60,7 @@ async def lifespan(app: FastAPI):
         local_api_key=settings.local_llm_api_key,
         embedding_provider=settings.embedding_provider,
         vllm_base_url=settings.vllm_base_url,
+        embedding_base_url=settings.embedding_base_url,
     )
     # 동봉 MCP 자동 등록. 실패해도 기동은 계속된다(seed 안에서 삼킨다).
     from app.llm.catalog import discover_local_models, discover_vllm_models, load_catalog, pin_local_models
@@ -77,7 +78,7 @@ async def lifespan(app: FastAPI):
     if settings.embedding_provider == "local":
         # 선택된 프로필의 모델만 내려받는다(쓰지 않을 모델을 배포마다 심지 않는다).
         from app.llm.embedding_profiles import ensure_local_embedding_model
-        logger.info("embedding model %s: %s", settings.embedding_model, await ensure_local_embedding_model(settings.local_llm_base_url, settings.embedding_model))
+        logger.info("embedding model %s: %s", settings.embedding_model, await ensure_local_embedding_model(settings.embedding_base_url or settings.local_llm_base_url, settings.embedding_model))
     if settings.local_llm_base_url:
         # 켜 둔 로컬 모델을 GPU에 상주시킨다(pin_local_models 주석 참조). 로드는 수십 초가 걸릴 수
         # 있어 기동을 막지 않고 뒤에서 돈다. 요청은 그 사이에도 받는다(첫 요청이 로드를 기다릴 뿐).
@@ -86,7 +87,7 @@ async def lifespan(app: FastAPI):
                 settings.local_llm_base_url,
                 # vLLM이 서빙하는 이름은 Ollama에 올리지 않는다(같은 모델을 두 번 상주시키지 않는다).
                 [m.id for m in catalog.enabled if m.provider == "local" and m.id not in app.state.llm_provider.vllm_model_names],
-                settings.embedding_model if settings.embedding_provider == "local" else None,
+                settings.embedding_model if settings.embedding_provider == "local" and not settings.embedding_base_url else None,
             )
         )
 

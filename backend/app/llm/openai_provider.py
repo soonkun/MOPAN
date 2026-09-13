@@ -38,6 +38,12 @@ def adapt_reasoning_effort(model: str, effort: str | None, *, has_tools: bool) -
 
 
 
+def _truncate_normalise(vector: list[float], dim: int) -> list[float]:
+    head = vector[:dim]
+    norm = sum(x * x for x in head) ** 0.5
+    return [x / norm for x in head] if norm else head
+
+
 class OpenAIProvider(LLMProvider):
     def __init__(
         self,
@@ -57,6 +63,7 @@ class OpenAIProvider(LLMProvider):
         local_api_key: str = "ollama",
         embedding_provider: str = "openai",
         vllm_base_url: str = "",
+        embedding_base_url: str = "",
     ):
         # Both are admin-configurable, so an invalid value is reachable from
         # configuration. Unvalidated, batch_size <= 0 degrades to one request per
@@ -90,6 +97,12 @@ class OpenAIProvider(LLMProvider):
         )
         self.vllm_model_names: set[str] = set()
         self.local_model_names: set[str] = set()
+        # 임베딩 전용 서버(vLLM pooling). 비면 local_client(Ollama)가 임베딩도 맡는다.
+        self.embedding_client = (
+            AsyncOpenAI(base_url=embedding_base_url, api_key="none", timeout=max(timeout, 120.0), max_retries=1)
+            if embedding_base_url
+            else None
+        )
         self.reasoning_model_names: set[str] | None = None
         # 임베딩을 어느 클라이언트로 보내는가. local이면 Ollama /v1/embeddings(dimensions 지원).
         if embedding_provider == "local" and self.local_client is None:
@@ -154,6 +167,11 @@ class OpenAIProvider(LLMProvider):
                 f"({len(data)} vectors returned)"
             )
         vectors = [item.embedding for item in data]
+        # MRL 폴백(로컬만): 서버가 dimensions를 무시하고 전체 폭(qwen3 4096)을 냈으면 앞 N차원을
+        # 잘라 정규화한다 - Ollama·OpenAI의 dimensions가 하는 연산과 같다(vLLM pooling 실측).
+        # 더 좁게 낸 것은 아래 폭 검사가 그대로 잡는다.
+        if self.embedding_provider == "local" and self.embedding_dim is not None:
+            vectors = [_truncate_normalise(v, self.embedding_dim) if len(v) > self.embedding_dim else v for v in vectors]
         if self.embedding_dim is not None:
             width = next((len(v) for v in vectors if len(v) != self.embedding_dim), None)
             if width is not None:
@@ -187,13 +205,15 @@ class OpenAIProvider(LLMProvider):
             # 로컬(Ollama)도 받는다: qwen3-embedding 같은 MRL 모델은 dimensions로 축소된 벡터를 낸다
             # (실측 2026-09-09: 8b 기본 4096 → 1536). 안 받는 모델이면 폭 검사가 잡는다.
             local = self.embedding_provider == "local"
+            # dimensions는 Ollama·OpenAI(text-embedding-3-*)만 받는다. vLLM pooling은 400으로 거절하므로
+            # (실측 2026-09-13) 임베딩 전용 서버로 갈 때는 보내지 않고 _vectors_in_input_order가 자른다.
             extra = (
                 {"dimensions": self.embedding_dim}
                 if self.embedding_dim is not None
-                and (local or self.embedding_model.startswith("text-embedding-3-"))
+                and ((local and self.embedding_client is None) or self.embedding_model.startswith("text-embedding-3-"))
                 else {}
             )
-            embed_client = self.local_client if local else self.client
+            embed_client = (self.embedding_client or self.local_client) if local else self.client
             for batch in self._batches(texts):
                 # 분당 토큰 한도(429)는 오류가 아니라 큰 표를 올린 날의 정상
                 # 상태다 - 창은 길어야 60초면 되살아난다. SDK 내부 재시도
@@ -326,6 +346,6 @@ class OpenAIProvider(LLMProvider):
 
     async def aclose(self) -> None:
         await self.client.close()
-        for extra in (self.local_client, self.vllm_client):
+        for extra in (self.local_client, self.vllm_client, self.embedding_client):
             if extra is not None:
                 await extra.close()
