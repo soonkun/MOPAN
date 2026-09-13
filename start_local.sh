@@ -16,6 +16,8 @@ DATABASE_URL="$DBURL" nohup ../.venv/bin/python -m uvicorn app.examples_mcp.main
 sleep 3   # 시딩이 발견까지 하려면 MCP가 먼저 떠 있어야 한다.
 nohup ../.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8010 >> ../logs/backend.log 2>&1 &
 nohup ../.venv/bin/python -m arq app.worker.WorkerSettings >> ../logs/worker.log 2>&1 &
+# 감시 폴더 스캔 전용 워커(제 큐, 동시 1) - 문서 처리 큐 뒤에서 굶지 않게(app/worker.py:WatchWorkerSettings).
+nohup ../.venv/bin/python -m arq app.worker.WatchWorkerSettings >> ../logs/watch-worker.log 2>&1 &
 sleep 8
 pgrep -af '^\.\./\.venv/bin/python -m'
 curl -s -m 5 -o /dev/null -w 'mcp-examples /healthz %{http_code}\n' http://127.0.0.1:8100/healthz

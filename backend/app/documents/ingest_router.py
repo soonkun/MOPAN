@@ -37,5 +37,8 @@ async def scan_now(admin: User = Depends(require_admin), settings: Settings = De
     """스캔은 워커 잡이다 - 2만 파일 해시를 요청 안에서 하지 않는다."""
     if not settings.ingest_watch_dir:
         raise HTTPException(status_code=400, detail="INGEST_WATCH_DIR이 설정되지 않았습니다(.env).")
-    await arq_pool.enqueue_job("scan_watch_dir", _job_id="scan_watch_dir")  # 같은 id면 이미 큐에 있는 스캔과 합쳐진다
+    from app.worker import WATCH_QUEUE
+
+    # 스캔 전용 큐로(문서 처리 큐 뒤에 줄 서지 않게). 같은 id면 이미 큐에 있는 스캔과 합쳐진다.
+    await arq_pool.enqueue_job("scan_watch_dir", _job_id="scan_watch_dir", _queue_name=WATCH_QUEUE)
     return {"queued": True}

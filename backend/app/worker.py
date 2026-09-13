@@ -218,7 +218,32 @@ def _watch_cron():
     if not settings.ingest_watch_dir or settings.ingest_scan_interval_minutes <= 0:
         return []
     step = max(1, min(settings.ingest_scan_interval_minutes, 60))
-    return [cron(scan_watch_dir_job, name="scan_watch_dir", minute=set(range(0, 60, step)), run_at_startup=True, timeout=1800, max_tries=1)]
+    # keep_result=0이 핵심(실사고 2026-09-13): arq 크론은 job_id가 고정이라 지난 실행의 결과가 남아 있는
+    # 동안(WorkerSettings.keep_result=3600) 같은 id를 다시 넣지 못한다 - 2분 크론이 실제로는 시간당
+    # 한 번 돌았고, 12,107건 중 500건만 등록된 채 멈췄다. 결과를 안 남기면 매번 들어간다.
+    return [
+        cron(
+            scan_watch_dir_job, name="scan_watch_dir", minute=set(range(0, 60, step)),
+            run_at_startup=True, timeout=1800, max_tries=1, keep_result=0,
+        )
+    ]
+
+
+# 감시 폴더 스캔 전용 큐·워커. 실사고(2026-09-13): 스캔 크론이 2분마다 잘 들어갔지만(Redis에 24개
+# 쌓임) 본 워커의 슬롯이 문서 처리로 꽉 차 하나도 돌지 못했다 - arq 큐는 선입선출이고 우선순위가
+# 없다. 500건짜리 첫 스캔 뒤 12,107건 색인이 멈춘 이유. 스캔은 제 큐에서 제 워커(동시 1)가 돈다.
+WATCH_QUEUE = "arq:watch"
+
+
+class WatchWorkerSettings:
+    functions = [func(scan_watch_dir_job, name="scan_watch_dir", timeout=1800, max_tries=1)]
+    cron_jobs = _watch_cron()
+    queue_name = WATCH_QUEUE
+    max_jobs = 1
+    keep_result = 0
+    on_startup = startup
+    on_shutdown = shutdown
+    redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
 
 
 class WorkerSettings:
@@ -228,7 +253,7 @@ class WorkerSettings:
         func(run_research, timeout=RESEARCH_TIMEOUT, max_tries=1),
         func(scan_watch_dir_job, name="scan_watch_dir", timeout=1800, max_tries=1),
     ]
-    cron_jobs = _watch_cron()
+    # 크론(스캔)은 WatchWorkerSettings로 갔다 - 여기 남긴 scan 함수는 옛 큐에 남은 잡을 소화하기 위한 것.
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
