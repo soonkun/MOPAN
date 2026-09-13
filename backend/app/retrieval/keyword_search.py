@@ -1,11 +1,15 @@
+import logging
 import uuid
 
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy import ARRAY, Text, bindparam, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chunk import Chunk
 from app.models.document import Document
 from app.retrieval.tokenize import tokenize
+
+logger = logging.getLogger("mopan.retrieval")
 
 # 'simple' MUST match the regconfig content_tsv was written with (see
 # app/models/chunk.py) AND the tokenizer must match the one that wrote it. The
@@ -173,14 +177,22 @@ async def _trim_common_tokens(
     쪽으로 안전하게 틀린다.
     """
     unique = list(dict.fromkeys([*tokens, "__total__"]))
-    rows = (await db.execute(_DF.bindparams(toks=unique))).all()
+    # 표가 없거나 비었으면 트림 없이 간다(경고 한 줄). "크게 실패"가 원칙이었지만 그 실패는 검색 전체가
+    # 죽는 것이라 트림 없는 검색보다 나쁘다 - 실사고(2026-09-13): 운영 .env의 SPARSE_DF_TRIM이 표가
+    # 없는 테스트 DB에서 채팅을 통째로 오류 프레임으로 만들었다. 실패한 문장 뒤의 DB 트랜잭션은
+    # 롤백해 같은 세션의 다음 질의가 '트랜잭션 중단' 상태를 물려받지 않게 한다.
+    try:
+        # 세이브포인트: 표가 없어 문장이 실패해도 세션의 바깥 트랜잭션(호출자가 쌓아 둔 것)은 살린다.
+        async with db.begin_nested():
+            rows = (await db.execute(_DF.bindparams(toks=unique))).all()
+    except DBAPIError:
+        logger.warning("sparse_lexeme_df 표가 없습니다 - SPARSE_DF_TRIM 없이 검색합니다. scripts/build_lexeme_df.py 를 돌리세요.")
+        return tokens, words
     df = {row.lexeme: row.df for row in rows}
     total = df.get("__total__", 0)
     if total <= 0:
-        raise RuntimeError(
-            "sparse_lexeme_df 표가 비어 있습니다. SPARSE_DF_TRIM 을 켜기 전에 "
-            "scripts/build_lexeme_df.py 를 돌려야 합니다."
-        )
+        logger.warning("sparse_lexeme_df 표가 비어 있습니다 - SPARSE_DF_TRIM 없이 검색합니다.")
+        return tokens, words
     ceiling = total * df_trim
     kept = [(t, w) for t, w in zip(tokens, words) if df.get(t, 0) <= ceiling]
     return [t for t, _ in kept], [w for _, w in kept]
