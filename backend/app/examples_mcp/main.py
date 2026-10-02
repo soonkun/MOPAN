@@ -290,7 +290,8 @@ async def mcp(request: Request) -> Response:
 # "인증 토큰"에 넣으면 Authorization 헤더로 이 서버에 오고, 여기서 KIPRIS의
 # accessKey 파라미터로 전달된다 - .env를 만질 일이 없다.
 
-import xml.etree.ElementTree as ET
+# 외부 API(KIPRIS)가 준 XML이다 - 표준 xml.etree는 엔티티 확장 공격을 막지 않으므로 defusedxml로 읽는다.
+import defusedxml.ElementTree as ET
 
 KIPRIS_BASE = "http://plus.kipris.or.kr/openapi/rest/TradeMarkClassificationInfoService"
 

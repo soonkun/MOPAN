@@ -15,7 +15,7 @@ pgvector==0.3.4
 redis==5.0.8
 arq==0.26.1
 bcrypt==4.2.0
-python-multipart==0.0.20  # >=0.0.18: CVE-2024-53981(boundary CPU 소진)
+python-multipart==0.0.31  # >=0.0.31: PYSEC-2026-3036~3041·CVE-2026-24486/42561/53539(GitLab 보안 검사 2026-10-03)
 # pdfplumber, not pypdf: pypdf's extract_text returns content-stream order, which
 # scrambles every Korean government PDF this system ingests (see pdf_parser.py).
 # pdfplumber reaches pdfminer.six's per-word bounding boxes, which is what lets
@@ -31,9 +31,11 @@ filetype==1.2.0
 tiktoken==0.8.0
 openai==1.47.0
 httpx==0.27.2
-anyio==4.4.0
+anyio==4.14.2  # >=4.14.2: PYSEC-2026-4024/4025
+# 외부 XML(KIPRIS·법령 API)을 읽는 파서 - xml.etree 대신(app/examples_mcp/main.py, scripts/fetch_statutes.py).
+defusedxml==0.7.1
 # 글자 매핑이 깨진 PDF(pdfminer가 (cid:N)만 뱉는 폰트)를 pdfium으로 다시 읽고, 그것도
 # 비면(스캔본) 페이지를 그려 로컬 tesseract로 OCR한다 - 토큰·외부 호출 0.
 # 시스템 의존성: apt install tesseract-ocr tesseract-ocr-kor (app/rag/parsers/pdf_parser.py).
-pypdfium2==5.0.0
+pypdfium2==5.13.0  # pdfplumber 0.11.10이 >=5.9.0을 요구한다 - 5.0.0 고정은 설치가 안 됐다(서버는 5.13.0으로 돌고 있었다)
 pytesseract==0.3.13

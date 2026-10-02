@@ -53,7 +53,7 @@ def sparse_tsvector(content: str, tokenizer: str | None = None):
     it adds a second bind parameter per row, and SQLAlchemy's insertmanyvalues
     compiler asserts that the positions it expands per row are contiguous. The
     failure is a bare `AssertionError` inside compiler.py naming no column, plus a
-    `KeyError: 'chunks.id_m0'` on the ON CONFLICT path. Two named call sites beat
+    KeyError for chunks.id_m0 on the ON CONFLICT path. Two named call sites beat
     one clever one that breaks the ORM's bulk paths.
     """
     return func.to_tsvector(
@@ -141,7 +141,7 @@ def _fill_content_tsv(mapper, connection, target) -> None:
     first: bind_expression adds a SECOND bind parameter per row, and the
     insertmanyvalues compiler asserts the positions it expands per row are
     contiguous. It fails as a bare AssertionError inside compiler.py naming no
-    column, and as `KeyError: 'chunks.id_m0'` on the ON CONFLICT path.
+    column, and as a KeyError for chunks.id_m0 on the ON CONFLICT path.
     """
     if target.content_tsv is None:
         target.content_tsv = sparse_tsvector(target.content)

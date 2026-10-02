@@ -32,8 +32,9 @@ import pathlib
 import re
 import sys
 import urllib.parse
-import urllib.request
-import xml.etree.ElementTree as ET
+
+import defusedxml.ElementTree as ET  # 외부에서 받은 XML - 엔티티 확장 공격을 막는 파서
+import httpx
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 OUT = ROOT / "data" / "statutes"
@@ -66,7 +67,9 @@ ANNOT = re.compile(r"\s*<(?:개정|신설|전문개정|본조신설|제목개정
 
 
 def _get(url: str) -> bytes:
-    return urllib.request.urlopen(url, timeout=90).read()
+    response = httpx.get(url, timeout=90, follow_redirects=True)
+    response.raise_for_status()
+    return response.content
 
 
 def _d(s: str) -> str:
