@@ -45,6 +45,10 @@ _SYSTEM = (
     "You can call the tools below. Call one ONLY when the user's question actually needs live "
     "or external data that a tool provides - a greeting, an opinion, or a question answerable "
     "from documents needs NO tool. "
+    "But a request for a dataset, map or file a tool PRODUCES (자료·데이터·파일·지도를 줘, 잘라줘, "
+    "받고 싶어) DOES need that tool: documents only describe such data, they cannot hand it over. "
+    "Fill arguments from the conversation first - a region, product or name said in an earlier "
+    "turn still applies to a follow-up like '토지피복도도 줘'. "
     "If a tool clearly WOULD answer the question but a REQUIRED argument is missing and cannot "
     "be inferred from the conversation, do not guess and do not stay silent: reply with exactly "
     "'ask: ' followed by ONE short Korean question asking for that detail "
@@ -91,6 +95,7 @@ async def deliberate_and_run(
     images: list[str] | None = None,
     scope_document_ids: list | None = None,
     summary: str | None = None,
+    on_progress=None,
 ) -> tuple[list[Evidence], dict | None, str | None]:
     """켜진 도구를 모델에게 보여주고, 부르겠다는 것을 실행해 Evidence로.
 
@@ -222,7 +227,8 @@ async def deliberate_and_run(
             trace["ask"] = ask
         return [], trace, ask
 
-    evidence = await run_tool_calls(calls, settings=settings)
+    # on_progress: 도구가 진행 알림을 보내면(인터넷 조사) 그 문장을 받는 콜백. 화면에 "지금 무엇을 하는지"를 낸다.
+    evidence = await run_tool_calls(calls, settings=settings, on_progress=on_progress)
     # 내장 서버(RAG 문서 표 조회)의 근거는 코퍼스 자체를 읽은 것이다. 라우터의
     # "도구가 근거를 냈으면 RAG를 건너뛴다"는 외부 데이터(날씨 등)를 위한 규칙이라,
     # 이 표시로 내장 근거를 그 판정에서 뺀다. 실사고: '어플' 부분일치 4건(어플리케이터)이
@@ -234,3 +240,48 @@ async def deliberate_and_run(
             metadata["builtin"] = True
     trace["ms"] = int((time.perf_counter() - started) * 1000)
     return evidence, trace, None
+
+
+# 인터넷 조사 도구의 이름(soonkun/mcp_server/web의 계약). 이 이름의 도구가 켜져 있으면 인터넷이 켜진 것이다.
+WEB_RESEARCH_TOOL = "web_research"
+
+
+async def research_call(
+    db: AsyncSession,
+    *,
+    question: str,
+    auto_tool_ids: list[uuid.UUID] | None,
+    workflow: ResolvedWorkflow = DEFAULT_WORKFLOW,
+) -> PendingToolCall | None:
+    """문서 검색이 약했을 때의 웹 조사 호출. 켜진 도구 중에 조사 도구가 있으면 질문 그대로 부를 호출을, 없으면 None.
+
+    숙고(deliberate_and_run)는 문서를 보기 전에 "도구가 필요한가"를 추측한다 - 문서로 답할 수 있을 것 같아
+    pass했는데 막상 문서에 없는 경우가 이 함수의 몫이다(소유자 요구: "RAG만으로는 답변이 충분하지 않은 경우
+    관련 웹사이트 정보를 찾아서 답"). 걸러내는 조건은 숙고와 같다: 켜진 서버의 켜진 read 도구, 워크플로우 경계 안.
+    실행은 부른 쪽이 한다(run_tool_calls) - 호출이 있을 때만 "인터넷에서 찾는 중" 상태를 내보낼 수 있게.
+    """
+    if not auto_tool_ids:
+        return None
+    row = (
+        await db.execute(
+            select(McpTool, McpServer)
+            .join(McpServer, McpServer.id == McpTool.server_id)
+            .where(
+                McpTool.id.in_(auto_tool_ids),
+                McpTool.name == WEB_RESEARCH_TOOL,
+                McpTool.enabled.is_(True),
+                McpServer.enabled.is_(True),
+                McpTool.risk_level == "read",
+            )
+        )
+    ).first()
+    if row is None or not workflow.allows_tool(row[0].id):
+        return None
+    tool, server = row
+    return PendingToolCall(
+        target=MCPTarget(name=server.name, base_url=server.base_url, auth_token=server.auth_token),
+        server_name=server.name,
+        tool_name=tool.name,
+        arguments={"question": question},
+        risk_level=tool.risk_level,
+    )

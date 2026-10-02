@@ -40,6 +40,11 @@ _LEGACY_SUFFIX = "/goods/mcp"
 
 async def seed_bundled_servers(db: AsyncSession, settings: Settings) -> None:
     """Never raises: 시딩 실패가 기동이나 회원가입을 죽이면 안 된다."""
+    await _seed_tables_server(db, settings)
+    await _seed_web_server(db, settings)
+
+
+async def _seed_tables_server(db: AsyncSession, settings: Settings) -> None:
     url = settings.bundled_mcp_seed_url
     if not url:
         return
@@ -91,3 +96,42 @@ async def seed_bundled_servers(db: AsyncSession, settings: Settings) -> None:
     except Exception:
         await db.rollback()
         logger.warning("bundled MCP seeding failed; retried on next start", exc_info=True)
+
+
+WEB_SERVER_NAME = "인터넷 검색"
+
+
+async def _seed_web_server(db: AsyncSession, settings: Settings) -> None:
+    """WEB_SEARCH_URL이 있으면 인터넷 검색 MCP를 등록한다. 위와 같은 멱등 규칙이되 builtin이 아니다 -
+    builtin은 "같은 코퍼스를 읽는 내장 도구"라는 뜻이고(문서 범위 주입, RAG를 막지 않음), 웹은 외부 근거다."""
+    if not settings.web_search_url:
+        return
+    url = settings.web_search_url.rstrip("/") + "/mcp"
+    try:
+        server = await db.scalar(select(McpServer).where(McpServer.base_url == url))
+        if server is None:
+            admin_id = await db.scalar(
+                select(User.id)
+                .where(User.role == "admin", User.is_active.is_(True))
+                .order_by(User.created_at)
+                .limit(1)
+            )
+            if admin_id is None:
+                return
+            server = McpServer(name=WEB_SERVER_NAME, base_url=url, created_by=admin_id)
+            db.add(server)
+            await db.commit()
+            log_event(logger, "mcp_server_seeded", server_id=str(server.id), server=server.name)
+        # 이 서버는 부팅마다 도구 목록을 다시 읽는다 - 서버가 도구를 더하거나(web_research) 설명을 바꾸면 손으로
+        # "도구 다시 가져오기"를 누르지 않아도 반영되게. discover는 기존 도구의 등급·사용 여부를 건드리지 않으므로
+        # 관리자의 결정은 남고, 처음 보는 도구만 read로 연다(전부 읽기뿐이고, read여야 자동 숙고가 쓴다).
+        known = set(
+            (await db.scalars(select(McpTool.name).where(McpTool.server_id == server.id))).all()
+        )
+        for tool in await discover(db, server, settings=settings):
+            if tool.name not in known:
+                tool.risk_level = "read"
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.warning("web search MCP seeding failed; retried on next start", exc_info=True)

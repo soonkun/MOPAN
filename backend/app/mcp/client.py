@@ -1,8 +1,10 @@
+import asyncio
 import ipaddress
 import json
 import logging
 import socket
 from dataclasses import dataclass
+from typing import NamedTuple
 from urllib.parse import urlsplit
 
 import anyio
@@ -22,6 +24,20 @@ CLIENT_INFO = {"name": "mopan", "version": "1"}
 # not. Swap httpx's response for an aiter_bytes loop with a running byte count if
 # a registered server ever turns out to be that kind of neighbour.
 MAX_RESULT_CHARS = 40_000
+MAX_RESULT_FILES = 20
+
+
+class ToolResult(NamedTuple):
+    """tools/call의 본문 텍스트와, 도구가 resource_link로 알려 준 결과 파일들.
+    files 항목: uri(상대경로 또는 http(s)), name, mime_type, size_bytes."""
+
+    text: str
+    files: list[dict]
+    # 출처가 따로 있는 문서들(웹 검색이 읽은 페이지): text 블록 바로 뒤에 text/html resource_link가 오면 그 둘이
+    # 한 문서다 - {text, url, name}. 이런 블록은 text·files에 들어가지 않고, 문서마다 근거 하나가 된다.
+    documents: list[dict]
+
+
 TRUNCATION_MARK = "\n[결과가 잘렸습니다]"
 
 # Every message here reaches a user through HTTPException(detail=...), so they
@@ -225,6 +241,50 @@ class MCPClient:
         self._session_id = response.headers.get("mcp-session-id") or self._session_id
         return self._parse(response, request_id)
 
+    async def _call_streaming(self, method: str, params: dict, on_progress) -> dict:
+        """응답을 스트림으로 읽으며 `notifications/progress`를 on_progress(문장)로 넘긴다.
+
+        오래 걸리는 도구(인터넷 조사 30~70초)가 그동안 무엇을 하는지 보이게 하는 길이다. 서버가 JSON 한 덩어리로
+        답하면 알림은 없고 결과만 온다 - 그것도 정상이다. 전체 시간 상한은 따로 건다: 스트림은 조각이 올 때마다
+        httpx의 읽기 타임아웃이 새로 시작하므로, 알림만 끝없이 보내는 서버는 그것으로 못 막는다."""
+        assert self._client is not None
+        self._next_id += 1
+        request_id = self._next_id
+        payload = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+        headers = {"Mcp-Session-Id": self._session_id} if self._session_id else {}
+        try:
+            async with asyncio.timeout(self.timeout):
+                async with self._client.stream("POST", self.target.base_url, json=payload, headers=headers) as response:
+                    if response.status_code >= 400:
+                        raise MCPError(f"{UNREACHABLE_MESSAGE} (HTTP {response.status_code})")
+                    self._session_id = response.headers.get("mcp-session-id") or self._session_id
+                    if "text/event-stream" not in response.headers.get("content-type", ""):
+                        await response.aread()
+                        return self._parse(response, request_id)
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        try:
+                            message = json.loads(line[len("data:") :].strip())
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(message, dict):
+                            continue
+                        if message.get("method") == "notifications/progress":
+                            text = (message.get("params") or {}).get("message")
+                            if isinstance(text, str) and text.strip():
+                                # 남의 서버가 쓴 문장이 사용자 화면에 간다: 토큰을 지우고 길이를 자른다.
+                                await on_progress(self._redact(text.strip())[:300])
+                        elif message.get("id") == request_id:
+                            if "error" in message:
+                                detail = str((message["error"] or {}).get("message", ""))[:200]
+                                raise MCPError(f"{PROTOCOL_MESSAGE} ({self._redact(detail)})")
+                            return json.loads(self._redact(json.dumps(message.get("result") or {}, ensure_ascii=False)))
+        except (httpx.HTTPError, TimeoutError) as exc:
+            logger.warning("mcp transport error: %s", type(exc).__name__)
+            raise MCPError(UNREACHABLE_MESSAGE) from exc
+        raise MCPError(PROTOCOL_MESSAGE)
+
     async def _initialize(self) -> None:
         await self._call(
             "initialize",
@@ -245,12 +305,70 @@ class MCPClient:
             raise MCPError(PROTOCOL_MESSAGE)
         return [tool for tool in tools if isinstance(tool, dict) and isinstance(tool.get("name"), str)]
 
-    async def call_tool(self, name: str, arguments: dict) -> str:
-        result = await self._call("tools/call", {"name": name, "arguments": arguments})
+    async def call_tool(self, name: str, arguments: dict, on_progress=None) -> ToolResult:
+        """on_progress(문장)를 주면 서버에 진행 알림을 청하고(progressToken) 오는 대로 넘긴다."""
+        if on_progress is None:
+            result = await self._call("tools/call", {"name": name, "arguments": arguments})
+        else:
+            result = await self._call_streaming(
+                "tools/call",
+                {"name": name, "arguments": arguments, "_meta": {"progressToken": f"mopan-{self._next_id + 1}"}},
+                on_progress,
+            )
         parts: list[str] = []
-        for block in result.get("content") or []:
-            if isinstance(block, dict) and isinstance(block.get("text"), str):
-                parts.append(block["text"])
+        files: list[dict] = []
+        documents: list[dict] = []
+        blocks = [block for block in result.get("content") or [] if isinstance(block, dict)]
+        source_links: set[int] = set()  # 문서의 출처로 쓰인 링크 블록의 자리 - 파일 칩으로 또 내지 않는다
+        for position, block in enumerate(blocks):
+            follower = blocks[position + 1] if position + 1 < len(blocks) else {}
+            if position in source_links:
+                continue
+            if isinstance(block.get("text"), str):
+                # 웹 페이지 주소가 바로 뒤따르는 text는 그 페이지의 본문이다. http(s)만 - 이 주소는 답변 밑의
+                # 링크가 되므로 아래 파일 링크와 같은 검사를 통과해야 한다.
+                if (
+                    follower.get("type") == "resource_link"
+                    and follower.get("mimeType") == "text/html"
+                    and isinstance(follower.get("uri"), str)
+                    and follower["uri"].startswith(("http://", "https://"))
+                    and len(documents) < MAX_RESULT_FILES
+                ):
+                    name = follower.get("name")
+                    source_links.add(position + 1)
+                    documents.append(
+                        {
+                            "text": self._redact(block["text"])[:MAX_RESULT_CHARS],
+                            "url": follower["uri"][:2000],
+                            "name": self._redact(name)[:200] if isinstance(name, str) and name else follower["uri"][:200],
+                        }
+                    )
+                else:
+                    parts.append(block["text"])
+            elif block.get("type") == "resource_link":
+                # 도구가 만든 파일(예: maps의 클리핑 GeoTIFF). 서버 것 그대로 믿지 않는다:
+                # 같은 origin 상대경로나 http(s)만 - javascript: 같은 것이 답변 밑의 링크가 되면 안 된다.
+                uri, fname = block.get("uri"), block.get("name")
+                if (
+                    isinstance(uri, str)
+                    and isinstance(fname, str)
+                    and len(files) < MAX_RESULT_FILES
+                    and (
+                        uri.startswith("/")
+                        and not uri.startswith("//")
+                        or uri.startswith(("http://", "https://"))
+                    )
+                ):
+                    files.append(
+                        {
+                            "uri": uri[:2000],
+                            "name": self._redact(fname)[:200],
+                            "mime_type": block.get("mimeType")
+                            if isinstance(block.get("mimeType"), str)
+                            else None,
+                            "size_bytes": block.get("size") if isinstance(block.get("size"), int) else None,
+                        }
+                    )
         text = "\n".join(parts).strip()
         if not text:
             # structuredContent is the newer shape and some servers send only it.
@@ -266,4 +384,4 @@ class MCPClient:
             raise MCPError(f"{failed} {text[:200]}" if text else failed)
         if len(text) > MAX_RESULT_CHARS:
             text = text[:MAX_RESULT_CHARS] + TRUNCATION_MARK
-        return text
+        return ToolResult(text, files, documents)

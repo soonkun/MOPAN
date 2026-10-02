@@ -19,6 +19,9 @@ module.exports = {
     // deployment that does add a reverse proxy has to raise that proxy's own body
     // limit (nginx: client_max_body_size) to match.
     middlewareClientMaxBodySize: "64mb",
+    // rewrite 프록시가 백엔드 응답을 기다리는 시간(기본 30초). 도구 발견·문서 처리처럼 조용히 오래 걸리는 요청이
+    // 30초에서 끊기지 않게. 채팅 스트림은 백엔드가 10초마다 보내는 keepalive가 따로 지킨다.
+    proxyTimeout: 180_000,
   },
   // Same-origin API proxy. The browser only ever calls /api/* on this origin, so:
   //  - CORS never applies
@@ -38,7 +41,11 @@ module.exports = {
   // container would proxy to its own empty port 8000 and every call would fail.
   async rewrites() {
     const backend = process.env.API_INTERNAL_URL || "http://localhost:8000";
-    return [{ source: "/api/:path*", destination: `${backend}/api/:path*` }];
+    return [
+      { source: "/api/:path*", destination: `${backend}/api/:path*` },
+      // maps MCP(soonkun/mcp_server)의 클리핑 결과 파일. middleware.ts가 로그인 쿠키 없는 요청은 /login으로 돌린다.
+      { source: "/maps/files/:path*", destination: "http://127.0.0.1:8200/files/:path*" },
+    ];
   },
   // /agents was a real, linked, bookmarked screen until this slice renamed the
   // concept. The route is gone; a 404 for somebody's saved link is not the

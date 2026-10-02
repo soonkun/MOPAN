@@ -754,3 +754,39 @@ async def test_a_model_with_no_label_is_still_offered_under_its_id(logged_in, ap
         "reasoning": False,
         "provider": "openai",
     } in listed
+
+
+async def test_a_quiet_stream_is_kept_alive_and_closes_cleanly():
+    """프레임 사이가 길면 keepalive 주석이 나간다 - 도구가 50초 도는 동안 조용했던 스트림을 Next 프록시가
+    30초에서 끊어 "답변을 끝까지 받지 못했습니다"가 났던 실사고의 처방. 원래 프레임은 순서대로, 빠짐없이."""
+    import asyncio
+
+    from app.chat import router as chat_router
+
+    async def frames():
+        yield "data: 1\n\n"
+        await asyncio.sleep(0.35)
+        yield "data: 2\n\n"
+
+    original = chat_router.KEEPALIVE_SECONDS
+    chat_router.KEEPALIVE_SECONDS = 0.1
+    try:
+        out = [frame async for frame in chat_router._heartbeat(frames())]
+    finally:
+        chat_router.KEEPALIVE_SECONDS = original
+    assert [f for f in out if f != chat_router.KEEPALIVE] == ["data: 1\n\n", "data: 2\n\n"]
+    assert out.count(chat_router.KEEPALIVE) >= 2 and out[0] == "data: 1\n\n" and out[-1] == "data: 2\n\n"
+
+
+async def test_tool_progress_is_yielded_while_the_call_is_still_running():
+    import asyncio
+
+    from app.chat.router import _with_progress
+
+    async def tool(on_progress):
+        await on_progress("검색 중")
+        await asyncio.sleep(0.05)
+        await on_progress("읽는 중")
+        return "결과"
+
+    assert [item async for item in _with_progress(tool)] == [("progress", "검색 중"), ("progress", "읽는 중"), ("result", "결과")]

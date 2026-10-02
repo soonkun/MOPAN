@@ -1,6 +1,8 @@
 import logging
 import uuid
 
+import httpx
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -21,6 +23,7 @@ from app.schemas.mcp import (
     McpToolOption,
     McpToolResponse,
     McpToolUpdate,
+    WebSites,
 )
 
 logger = logging.getLogger("mopan.mcp")
@@ -164,6 +167,9 @@ async def update_server(
             await check_url(payload.base_url, allow_private=settings.mcp_allow_private_networks)
         except MCPError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if payload.base_url != server.base_url and payload.auth_token is None:
+            # 주소를 바꾸면 옛 토큰을 새 호스트로 보내지 않는다 - 다시 입력받는다(보안 검토 2026-09-25 #11).
+            server.auth_token = None
         server.base_url = payload.base_url
     if payload.name is not None:
         server.name = payload.name
@@ -282,3 +288,52 @@ async def list_callable_tools(
         )
         for tool, server_name in rows
     ]
+
+
+WEB_NOT_CONFIGURED_MESSAGE = "인터넷 검색 서버가 설정되지 않았습니다. WEB_SEARCH_URL과 WEB_SEARCH_ADMIN_TOKEN을 확인해 주세요."
+WEB_UNREACHABLE_MESSAGE = "인터넷 검색 서버에 연결하지 못했습니다. 서버 상태와 관리 토큰을 확인해 주세요."
+
+
+async def _web_admin(settings: Settings, method: str, body: dict | None = None) -> WebSites:
+    """허용 사이트 목록은 검색 서버가 갖는다(다른 서비스도 같은 서버를 쓴다) - 여기는 관리자 권한을 확인한
+    뒤 그 서버의 관리 API로 넘기는 창구다. 주소는 관리자가 입력한 것이 아니라 배포 설정이라 check_url을
+    거치지 않는다."""
+    if not settings.web_search_url or not settings.web_search_admin_token:
+        raise HTTPException(status_code=404, detail=WEB_NOT_CONFIGURED_MESSAGE)
+    try:
+        async with httpx.AsyncClient(timeout=settings.mcp_timeout_seconds) as client:
+            response = await client.request(
+                method,
+                settings.web_search_url.rstrip("/") + "/admin/sites",
+                json=body,
+                headers={"Authorization": f"Bearer {settings.web_search_admin_token}"},
+            )
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail=WEB_UNREACHABLE_MESSAGE) from None
+    if response.status_code == 422:
+        # 주소 형식 오류 - 서버의 한국어 문장이 그대로 관리자에게 가야 고칠 수 있다.
+        raise HTTPException(status_code=422, detail=str(response.json().get("detail", ""))[:300])
+    if response.status_code != 200:
+        raise HTTPException(status_code=502, detail=WEB_UNREACHABLE_MESSAGE)
+    return WebSites.model_validate(response.json())
+
+
+@router.get("/web-sites", response_model=WebSites)
+async def list_web_sites(
+    admin: User = Depends(require_admin),
+    settings: Settings = Depends(get_app_settings),
+):
+    """인터넷 검색이 드나들 수 있는 사이트 목록."""
+    return await _web_admin(settings, "GET")
+
+
+@router.put("/web-sites", response_model=WebSites)
+async def replace_web_sites(
+    payload: WebSites,
+    admin: User = Depends(require_admin),
+    settings: Settings = Depends(get_app_settings),
+):
+    """목록 전체를 바꾼다. 돌려주는 것은 서버가 정규화한 결과(https://www. 를 떼고 중복을 합친 것)."""
+    sites = await _web_admin(settings, "PUT", payload.model_dump())
+    log_event(logger, "web_sites_replaced", count=len(sites.sites), admin_id=str(admin.id))
+    return sites

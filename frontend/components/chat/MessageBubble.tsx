@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import ResearchSteps from "@/components/chat/ResearchSteps";
 import AttachmentChip from "@/components/chat/AttachmentChip";
 import Markdown from "@/components/chat/Markdown";
 import TraceDialog from "@/components/chat/TraceDialog";
@@ -71,6 +72,11 @@ export default function MessageBubble({
   // it reads as a document rather than as a text message. Two return paths
   // rather than one with ternaries everywhere, because the two are not the
   // same shape any more.
+  // 같은 파일을 두 근거가 가리켜도 칩은 하나.
+  const files = Array.from(
+    new Map(message.citations.flatMap((c) => c.files ?? []).map((f) => [f.uri, f])).values(),
+  );
+
   if (message.role === "user") {
     return (
       <div className="flex flex-col items-end gap-2">
@@ -110,6 +116,7 @@ export default function MessageBubble({
       <div className="min-w-0 flex-1">
         {/* No whitespace-pre-wrap any more: markdown owns the block structure,
             and pre-wrap would double every blank line between paragraphs. */}
+        <ResearchSteps steps={message.steps ?? []} />
         {/* 잡담(smalltalk_agent)과 도구 되물음(tool_clarify)에는 이 경고가
             붙지 않는다: 검색을 일부러 돌리지 않은 답이라 "근거를 찾지 못했다"는
             명제 자체가 거짓이다. 실측: "안녕?"의 인사 위에 이 경고가 떠 있었다. */}
@@ -128,6 +135,17 @@ export default function MessageBubble({
           </p>
         )}
         <Markdown content={message.content} citations={message.citations} />
+        {files.length > 0 && (
+          // 도구가 만든 결과 파일. 모델이 경로를 글자로만 적어도 여기서 받는다 -
+          // "자료 줘"의 답은 파일이다. download 속성으로 같은 origin(/maps/files/…)에서 저장.
+          <div className="mt-3 flex flex-wrap gap-2">
+            {files.map((f) => (
+              <a key={f.uri} href={f.uri} download={f.name} className="no-underline">
+                <AttachmentChip filename={f.name} sizeBytes={f.size_bytes ?? 0} kind="document" />
+              </a>
+            ))}
+          </div>
+        )}
         {message.citations.length > 0 && (
           <div className="mt-4 border-t border-outline-variant pt-3 text-caption text-on-surface-variant">
             {message.citations.map((c) => (
@@ -136,7 +154,16 @@ export default function MessageBubble({
               // is unique per message by construction - the backend assigns it
               // with enumerate(used, start=1).
               <div key={c.index} className="truncate">
-                [{c.index}] {c.filename ?? "출처"}
+                [{c.index}]{" "}
+                {c.url ? (
+                  // 인터넷 검색이 읽은 페이지: 제목이 곧 원문 링크다. 주소는 백엔드가 http(s)만 통과시킨다.
+                  <a href={c.url} target="_blank" rel="noopener noreferrer" title={c.url}>
+                    {c.filename ?? c.url}
+                    <span className="ml-1.5">{c.url.replace(/^https?:\/\/(www\.)?/, "").split("/")[0]}</span>
+                  </a>
+                ) : (
+                  (c.filename ?? "출처")
+                )}
                 {c.page !== null ? `, ${c.page}쪽` : ""}
                 {c.section ? `, ${c.section}` : ""}
               </div>

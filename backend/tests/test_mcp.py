@@ -67,6 +67,8 @@ class StubMCP:
         self.is_error = is_error
         self.echo_auth = echo_auth
         self.sse = sse
+        self.links: list[dict] = []  # tools/call 결과에 덧붙일 resource_link 블록들
+        self.progress: list[str] = []  # sse일 때 결과보다 먼저 보낼 notifications/progress 문장들
         self.requests: list[dict] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -86,15 +88,23 @@ class StubMCP:
                 if self.echo_auth
                 else self.results.get(name, f"{name} says hello")
             )
-            result = {"content": [{"type": "text", "text": text}], "isError": self.is_error}
+            result = {"content": [{"type": "text", "text": text}, *self.links], "isError": self.is_error}
         else:  # pragma: no cover - the client sends nothing else
             return httpx.Response(400)
         body = {"jsonrpc": "2.0", "id": payload["id"], "result": result}
         if self.sse:
+            token = ((payload.get("params") or {}).get("_meta") or {}).get("progressToken")
+            notes = "".join(
+                "event: message\ndata: "
+                + json.dumps({"jsonrpc": "2.0", "method": "notifications/progress",
+                              "params": {"progressToken": token, "progress": n, "message": text}})
+                + "\n\n"
+                for n, text in enumerate(self.progress if token and method == "tools/call" else [], 1)
+            )
             return httpx.Response(
                 200,
                 headers={"content-type": "text/event-stream"},
-                text=f"event: message\ndata: {json.dumps(body)}\n\n",
+                text=f"{notes}: ping\n\nevent: message\ndata: {json.dumps(body)}\n\n",
             )
         return httpx.Response(200, json=body)
 
@@ -179,7 +189,8 @@ def tool_id_of(server: dict, name: str) -> str:
 
 
 def settings_with(**overrides) -> Settings:
-    return Settings().model_copy(update=overrides)
+    # web_search_url은 비워서 시작한다 - 운영 .env의 값이 섞이면 시딩 테스트에 서버 행이 하나 더 생긴다.
+    return Settings().model_copy(update={"web_search_url": "", **overrides})
 
 
 # --- Admin only --------------------------------------------------------------
@@ -191,6 +202,9 @@ REGISTRY_ROUTES = [
     ("DELETE", f"/api/mcp/servers/{uuid.uuid4()}", None),
     ("POST", f"/api/mcp/servers/{uuid.uuid4()}/discover", None),
     ("PATCH", f"/api/mcp/tools/{uuid.uuid4()}", {"risk_level": "read"}),
+    # 인터넷 검색 허용 사이트: 목록을 바꿀 수 있는 사람이 모델이 읽을 수 있는 웹의 범위를 정한다.
+    ("GET", "/api/mcp/web-sites", None),
+    ("PUT", "/api/mcp/web-sites", {"sites": [{"pattern": "example.com"}]}),
 ]
 
 
@@ -246,9 +260,7 @@ async def test_the_auth_token_never_reaches_a_log_line(admin_client, stub_mcp, c
     assert TOKEN not in caplog.text
 
 
-async def test_a_server_that_echoes_the_auth_header_back_gets_it_redacted(
-    admin_client, stub_mcp, fake_llm
-):
+async def test_a_server_that_echoes_the_auth_header_back_gets_it_redacted(admin_client, stub_mcp, fake_llm):
     """The path that actually leaks. A registered server receives
     `Authorization: Bearer <token>` on every call and can hand it straight back
     inside a tool result, which becomes Evidence, a citation snippet on screen
@@ -662,9 +674,7 @@ async def test_mcp_evidence_competes_for_the_same_budget_as_rag_evidence():
     assert [e.source_type for e in only_rag] == ["rag"] * len(only_rag)
 
 
-async def test_a_huge_tool_result_stays_inside_the_answer_token_budget(
-    app, admin_client, stub_mcp, fake_llm
-):
+async def test_a_huge_tool_result_stays_inside_the_answer_token_budget(app, admin_client, stub_mcp, fake_llm):
     from app.core.tokens import count_tokens
 
     stub_mcp(StubMCP(results={"current_weather": "turbidity " * 5000}))
@@ -695,7 +705,8 @@ async def test_run_tool_calls_needs_no_request_and_no_session(admin_client, stub
 
     from app.mcp.service import PendingToolCall, load_tool_calls
 
-    assert list(inspect.signature(run_tool_calls).parameters) == ["calls", "settings"]
+    # on_progress는 선택 콜백이다(도구의 진행 알림을 받는 자리) - db도 Request도 아니므로 위의 약속은 그대로다.
+    assert list(inspect.signature(run_tool_calls).parameters) == ["calls", "settings", "on_progress"]
 
     stub_mcp(StubMCP(results={"current_weather": "맑음"}))
     created = await register(admin_client)
@@ -716,9 +727,7 @@ async def test_run_tool_calls_needs_no_request_and_no_session(admin_client, stub
 # 되살릴 것이라, 조용한 부활 대신 거부가 정직하다.
 
 
-async def test_seed_registers_the_bundled_server_as_builtin_with_read_tools(
-    admin_client, db, stub_mcp
-):
+async def test_seed_registers_the_bundled_server_as_builtin_with_read_tools(admin_client, db, stub_mcp):
     from app.mcp.seed import BUNDLED_SERVER_NAME, seed_bundled_servers
 
     stub_mcp(StubMCP())
@@ -738,9 +747,7 @@ async def test_seed_registers_the_bundled_server_as_builtin_with_read_tools(
     await db.commit()
     await seed_bundled_servers(db, settings)
     assert (
-        await db.scalar(
-            select(func.count()).select_from(McpServer).where(McpServer.base_url == PUBLIC_URL)
-        )
+        await db.scalar(select(func.count()).select_from(McpServer).where(McpServer.base_url == PUBLIC_URL))
     ) == 1
     await db.refresh(tools[0])
     assert tools[0].risk_level == "write"
@@ -751,9 +758,7 @@ async def test_seed_registers_the_bundled_server_as_builtin_with_read_tools(
     assert await db.scalar(select(McpServer).where(McpServer.id == server.id)) is not None
 
 
-async def test_seed_adopts_a_manually_registered_row_instead_of_duplicating(
-    admin_client, db, stub_mcp
-):
+async def test_seed_adopts_a_manually_registered_row_instead_of_duplicating(admin_client, db, stub_mcp):
     """이 배포가 실제로 겪는 경로: 관리자가 같은 주소를 먼저 손으로 등록해 두었다.
     시딩은 새 행을 만들지 않고 그 행을 builtin으로 승격만 한다 - 이름도, 도구
     설정도 그대로."""
@@ -783,9 +788,7 @@ async def test_the_first_admin_registration_seeds_the_bundled_server(client, app
     """docker compose up -> 브라우저에서 첫 가입 -> 표 조회 MCP가 이미 있다.
     부팅 시딩은 관리자가 없어 물러났으므로, 이 경로가 신선한 설치를 덮는다."""
     stub_mcp(StubMCP())
-    app.state.settings = app.state.settings.model_copy(
-        update={"bundled_mcp_seed_url": PUBLIC_URL}
-    )
+    app.state.settings = app.state.settings.model_copy(update={"bundled_mcp_seed_url": PUBLIC_URL})
     response = await client.post(
         "/api/auth/register", json={"email": "boot@example.com", "password": "pw123456"}
     )
@@ -802,12 +805,8 @@ async def test_seed_migrates_a_legacy_goods_url_and_prior_seed_name(admin_client
     from app.mcp.seed import BUNDLED_SERVER_NAME, seed_bundled_servers
 
     stub_mcp(StubMCP())
-    created = await register(
-        admin_client, name="표 조회", base_url="http://93.184.216.34/goods/mcp"
-    )
-    await seed_bundled_servers(
-        db, settings_with(bundled_mcp_seed_url="http://93.184.216.34/tables/mcp")
-    )
+    created = await register(admin_client, name="표 조회", base_url="http://93.184.216.34/goods/mcp")
+    await seed_bundled_servers(db, settings_with(bundled_mcp_seed_url="http://93.184.216.34/tables/mcp"))
 
     row = await db.get(McpServer, uuid.UUID(created["id"]))
     await db.refresh(row)
@@ -831,3 +830,110 @@ def test_substantive_drops_only_failure_and_empty_markers():
     ]
     assert substantive([kept_tool, *dropped, kept_rag]) == [kept_tool, kept_rag]
     assert substantive(dropped) == []
+
+
+async def test_call_tool_keeps_only_safe_resource_links(stub_mcp):
+    """도구가 만든 파일(resource_link)은 답변 밑의 다운로드 칩이 된다. 그래서 서버가 준
+    uri를 그대로 믿지 않는다: 같은 origin 상대경로와 http(s)만 남고, javascript:·//host·
+    문자열이 아닌 것은 버린다. 텍스트 본문은 그대로."""
+    stub = StubMCP(results={"current_weather": "맑음"})
+    stub.links = [
+        {
+            "type": "resource_link",
+            "uri": "/maps/files/j1/dem.tif",
+            "name": "dem.tif",
+            "mimeType": "image/tiff",
+            "size": 12,
+        },
+        {"type": "resource_link", "uri": "https://example.com/a.tif", "name": "a.tif"},
+        {"type": "resource_link", "uri": "javascript:alert(1)", "name": "x"},
+        {"type": "resource_link", "uri": "//evil.example/x.tif", "name": "x.tif"},
+        {"type": "resource_link", "uri": "/ok.tif"},
+    ]
+    stub_mcp(stub)
+    target = mcp_client.MCPTarget(name="s", base_url=PUBLIC_URL, auth_token=None)
+    async with mcp_client.MCPClient(target, timeout=5, allow_private_networks=False) as client:
+        text, files, _documents = await client.call_tool("current_weather", {})
+    assert text == "맑음"
+    assert files == [
+        {"uri": "/maps/files/j1/dem.tif", "name": "dem.tif", "mime_type": "image/tiff", "size_bytes": 12},
+        {"uri": "https://example.com/a.tif", "name": "a.tif", "mime_type": None, "size_bytes": None},
+    ]
+
+
+async def test_seed_registers_the_web_search_server_as_external_with_read_tools(admin_client, db, stub_mcp):
+    """WEB_SEARCH_URL이 있으면 "인터넷 검색" 서버가 등록된다. builtin이 아니어야 한다 - builtin은 근거를
+    '같은 코퍼스'로 취급해 문서 범위를 주입하고 RAG를 막지 않는데, 웹은 외부 근거다. 도구는 read여야
+    프롬프트 창의 인터넷 스위치(자동 숙고)가 쓸 수 있다."""
+    from app.mcp.seed import WEB_SERVER_NAME, seed_bundled_servers
+
+    stub_mcp(StubMCP())
+    await admin_client.get("/api/mcp/servers")  # 소유자가 될 관리자 계정을 만든다
+    settings = settings_with(web_search_url="http://93.184.216.34", bundled_mcp_seed_url="")
+    await seed_bundled_servers(db, settings)
+    await seed_bundled_servers(db, settings)  # 멱등
+
+    rows = (await db.scalars(select(McpServer))).all()
+    assert [(r.name, r.base_url, r.builtin) for r in rows] == [(WEB_SERVER_NAME, "http://93.184.216.34/mcp", False)]
+    tools = (await db.scalars(select(McpTool).where(McpTool.server_id == rows[0].id))).all()
+    assert tools and all(tool.risk_level == "read" for tool in tools)
+
+
+async def test_web_sites_route_says_so_when_the_search_server_is_not_configured(admin_client):
+    """설정이 없는 배포: 관리 화면은 이 404를 보고 허용 사이트 카드를 그리지 않는다."""
+    response = await admin_client.get("/api/mcp/web-sites")
+    assert response.status_code == 404
+    assert "WEB_SEARCH_URL" in response.json()["detail"]
+
+
+async def test_a_text_block_followed_by_a_web_page_link_becomes_its_own_evidence(stub_mcp):
+    """인터넷 검색의 계약: text 블록 바로 뒤의 text/html resource_link는 그 본문의 출처다. 페이지마다 근거가
+    따로 생겨야 인용 번호가 페이지를 가리킨다(한 덩어리였을 때 모델이 '웹 문서 3'을 [3]으로 인용해 인용이
+    전부 떨어졌다). 주소는 답변 밑의 링크가 되므로 http(s)가 아니면 문서로 받지 않는다."""
+    from app.mcp.service import PendingToolCall, run_tool_calls
+
+    stub = StubMCP(results={"web_search": "도열병 본문"})
+    stub.links = [
+        {"type": "resource_link", "uri": "https://www.rda.go.kr/a", "name": "도열병 방제", "mimeType": "text/html"},
+        {"type": "text", "text": "나쁜 본문"},
+        {"type": "resource_link", "uri": "javascript:alert(1)", "name": "x", "mimeType": "text/html"},
+    ]
+    stub_mcp(stub)
+    target = mcp_client.MCPTarget(name="인터넷 검색", base_url=PUBLIC_URL, auth_token=None)
+    call = PendingToolCall(target=target, server_name="인터넷 검색", tool_name="web_search", arguments={}, risk_level="read")
+    evidence = await run_tool_calls([call], settings=settings_with())
+
+    assert [(e.content, e.metadata.get("url"), e.metadata.get("filename")) for e in evidence] == [
+        ("도열병 본문", "https://www.rda.go.kr/a", "도열병 방제"),
+        # javascript: 링크는 출처가 못 되고 버려진다. 본문만 보통의 도구 결과로 남는다.
+        ("나쁜 본문", None, None),
+    ]
+    assert evidence[1].metadata["files"] == []
+
+
+async def test_progress_notifications_reach_the_callback_before_the_result(stub_mcp):
+    """오래 걸리는 도구(인터넷 조사)가 보내는 notifications/progress는 결과를 기다리는 동안 콜백으로 넘어온다 -
+    화면의 "조사 과정"이 이것이다. 콜백을 준 호출만 progressToken을 싣고, 서버가 쓴 문장은 토큰을 지우고
+    잘라서 넘긴다(사용자 화면에 가는 남의 글이다). 콜백이 없으면 예전 그대로 한 덩어리로 읽는다."""
+    from app.mcp.service import PendingToolCall, run_tool_calls
+
+    stub = StubMCP(results={"web_research": "본문"}, sse=True)
+    stub.progress = ["검색 3건: rda.go.kr", "비밀 s3cret 을 읽는 중 " + "가" * 400]
+    stub_mcp(stub)
+    target = mcp_client.MCPTarget(name="인터넷 검색", base_url=PUBLIC_URL, auth_token="s3cret")
+    call = PendingToolCall(target=target, server_name="인터넷 검색", tool_name="web_research", arguments={}, risk_level="read")
+
+    seen: list[str] = []
+
+    async def on_progress(line: str) -> None:
+        seen.append(line)
+
+    evidence = await run_tool_calls([call], settings=settings_with(), on_progress=on_progress)
+    assert evidence[0].content == "본문"
+    assert seen[0] == "검색 3건: rda.go.kr"
+    assert "s3cret" not in seen[1] and len(seen[1]) <= 300
+    assert stub.requests[-1]["payload"]["params"]["_meta"]["progressToken"]
+
+    # 콜백 없이: progressToken을 보내지 않고, 결과는 같다.
+    evidence = await run_tool_calls([call], settings=settings_with())
+    assert evidence[0].content == "본문" and "_meta" not in stub.requests[-1]["payload"]["params"]

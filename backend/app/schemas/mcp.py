@@ -109,3 +109,16 @@ class McpToolOption(BaseModel):
     description: str | None
     input_schema: dict
     risk_level: str
+
+
+class WebSite(BaseModel):
+    """인터넷 검색이 드나들 수 있는 사이트 하나. 형식 검증(도메인[/경로])은 검색 서버가 한다."""
+
+    pattern: str = Field(min_length=1, max_length=300)
+    name: str = Field(default="", max_length=100)
+    # 이 사이트에 무엇이 있는가. 조사 도구가 질문에 맞는 사이트를 고를 때 읽는다.
+    description: str = Field(default="", max_length=300)
+
+
+class WebSites(BaseModel):
+    sites: list[WebSite] = Field(max_length=200)

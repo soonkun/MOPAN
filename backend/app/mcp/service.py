@@ -128,11 +128,7 @@ async def discover(db: AsyncSession, server: McpServer, *, settings: Settings) -
         tombstoned=len(vanished),
     )
     return list(
-        (
-            await db.scalars(
-                select(McpTool).where(McpTool.server_id == server.id).order_by(McpTool.name)
-            )
-        ).all()
+        (await db.scalars(select(McpTool).where(McpTool.server_id == server.id).order_by(McpTool.name))).all()
     )
 
 
@@ -180,9 +176,9 @@ async def load_tool_calls(
     ids = [tool_id for tool_id, _ in requested]
     rows = (
         await db.execute(
-            select(McpTool, McpServer).join(McpServer, McpServer.id == McpTool.server_id).where(
-                McpTool.id.in_(ids)
-            )
+            select(McpTool, McpServer)
+            .join(McpServer, McpServer.id == McpTool.server_id)
+            .where(McpTool.id.in_(ids))
         )
     ).all()
     by_id = {tool.id: (tool, server) for tool, server in rows}
@@ -216,7 +212,7 @@ async def load_tool_calls(
     return calls
 
 
-async def run_tool_calls(calls: list[PendingToolCall], *, settings: Settings) -> list[Evidence]:
+async def run_tool_calls(calls: list[PendingToolCall], *, settings: Settings, on_progress=None) -> list[Evidence]:
     """Execute them and return Evidence. No session, no request, no response.
 
     A step that fails becomes Evidence saying so rather than killing the answer:
@@ -233,8 +229,9 @@ async def run_tool_calls(calls: list[PendingToolCall], *, settings: Settings) ->
                 timeout=settings.mcp_timeout_seconds,
                 allow_private_networks=settings.mcp_allow_private_networks,
             ) as client:
-                content = await client.call_tool(call.tool_name, call.arguments)
+                content, files, documents = await client.call_tool(call.tool_name, call.arguments, on_progress)
         except MCPError as exc:
+            files, documents = [], []
             # str(exc) is one of the Korean constants in app/mcp/client.py, all of
             # which have already been through `redact`.
             content = f"{TOOL_FAILED_PREFIX} {exc}"
@@ -257,12 +254,25 @@ async def run_tool_calls(calls: list[PendingToolCall], *, settings: Settings) ->
                 result_chars=len(content),
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
+        # 출처가 딸린 문서(웹 검색이 읽은 페이지)는 하나씩 근거가 된다 - 인용 번호가 페이지를 가리키고, 예산이
+        # 모자라면 뒤쪽 페이지가 통째로 빠진다(한 덩어리였다면 가운데서 잘렸다). filename·url은 인용 목록의 제목과 링크.
+        for document in documents:
+            evidence.append(
+                to_evidence(
+                    call.server_name,
+                    call.tool_name,
+                    document["text"],
+                    {"risk_level": call.risk_level, "filename": document["name"], "url": document["url"]},
+                )
+            )
+        if documents and not content and not files:
+            continue
         evidence.append(
             to_evidence(
                 call.server_name,
                 call.tool_name,
                 content or EMPTY_RESULT_MESSAGE,
-                {"risk_level": call.risk_level},
+                {"risk_level": call.risk_level, "files": files},
             )
         )
     return evidence

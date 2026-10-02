@@ -98,3 +98,9 @@ class Message(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("clock_timestamp()")
     )
+
+    @property
+    def steps(self) -> list[str]:
+        """이 답을 만들며 도구가 알린 진행 과정(인터넷 조사의 검색·열람 단계). trace 안에 있다 - 다시 연
+        대화에서도 답변 위의 "조사 과정"을 펼쳐 볼 수 있게 MessageResponse가 이것을 싣는다."""
+        return ((self.trace or {}).get("auto_tools") or {}).get("steps") or []

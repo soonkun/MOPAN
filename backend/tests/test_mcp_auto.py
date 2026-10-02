@@ -243,3 +243,33 @@ async def test_attached_images_reach_the_deliberation_message(db, catalogue, pro
         model="gpt-4o",
     )
     assert provider.chat.call_args.args[0][-1].images is None
+
+
+async def test_research_call_exists_only_when_an_enabled_read_research_tool_is_switched_on(db, catalogue):
+    """문서 근거가 약할 때의 웹 조사(router의 보완 경로)는 '인터넷이 켜져 있을 때만' 돈다 - 켜져 있다는 것은
+    요청의 auto_tool_ids 안에 사용 중인 read 등급 web_research 도구가 있다는 뜻이다. 사용자가 끈 인터넷을
+    서버가 대신 켜면 안 되고, 관리자가 write로 둔 도구를 무인으로 불러도 안 된다."""
+    server_id = (await db.scalars(select_server_id())).first()
+    research = McpTool(server_id=server_id, name="web_research", risk_level="read")
+    unsafe = McpTool(server_id=server_id, name="web_research_unclassified", risk_level="write")
+    db.add_all([research, unsafe])
+    await db.commit()
+
+    call = await auto.research_call(db, question="최근 벼 재배면적", auto_tool_ids=[research.id, catalogue["read"]])
+    assert call is not None and call.tool_name == "web_research" and call.arguments == {"question": "최근 벼 재배면적"}
+    # 인터넷을 켜지 않은 요청(조사 도구의 id가 없다), 도구 목록이 빈 요청
+    assert await auto.research_call(db, question="q", auto_tool_ids=[catalogue["read"]]) is None
+    assert await auto.research_call(db, question="q", auto_tool_ids=None) is None
+    # read가 아닌 조사 도구, 관리자가 끈 조사 도구
+    research.risk_level = "write"
+    await db.commit()
+    assert await auto.research_call(db, question="q", auto_tool_ids=[research.id]) is None
+    research.risk_level, research.enabled = "read", False
+    await db.commit()
+    assert await auto.research_call(db, question="q", auto_tool_ids=[research.id]) is None
+
+
+def select_server_id():
+    from sqlalchemy import select
+
+    return select(McpServer.id).where(McpServer.name == "날씨")
