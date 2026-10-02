@@ -48,7 +48,11 @@ async def test_jobs_carry_the_callers_id_as_owner(client, service):
     await client.post("/api/video/jobs", json={"url": "https://youtu.be/abc", "force": False})
     listed, posted = service
     assert listed.url.params["owner"] == me
-    assert b'"owner":"' + me.encode() + b'"' in posted.content.replace(b": ", b":")
+    sent = posted.content.replace(b": ", b":")
+    assert b'"owner":"' + me.encode() + b'"' in sent
+    assert b'"summary_chars":500' in sent  # 길이를 안 보내면 기본 500자
+    too_long = await client.post("/api/video/jobs", json={"url": "https://youtu.be/abc", "summary_chars": 5000})
+    assert too_long.status_code == 422 and len(service) == 2
 
 
 async def test_someone_elses_job_is_404_and_bad_names_never_reach_the_service(client, service):

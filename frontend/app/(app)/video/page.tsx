@@ -16,6 +16,7 @@ type Job = {
   done: number;
   failed: Failed[];
   note?: string;
+  summary_chars?: number;
   error?: string;
   finished?: string;
 };
@@ -28,7 +29,7 @@ function stateText(job: Job): string {
     case "running":
       return (job.total ? `${job.total}편 중 ${job.done}편 정리함` : "영상 목록을 가져오는 중") + (job.note ? ` · ${job.note}` : "");
     case "done":
-      return `${job.done}편 정리 완료 · ${job.finished ?? ""}`;
+      return `${job.done}편 정리 완료${job.summary_chars ? ` · 요약 ${job.summary_chars}자 내외` : ""} · ${job.finished ?? ""}`;
     case "failed":
       return `실패: ${job.error ?? ""}`;
     default:
@@ -43,6 +44,7 @@ export default function VideoExtractPage() {
   const [data, setData] = useState<Jobs | null>(null);
   const [url, setUrl] = useState("");
   const [force, setForce] = useState(false);
+  const [chars, setChars] = useState(500);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<Record<string, string>>({});
@@ -61,11 +63,11 @@ export default function VideoExtractPage() {
     return () => clearInterval(timer);
   }, [load]);
 
-  async function submit(target: string, again: boolean) {
+  async function submit(target: string, again: boolean, length: number) {
     setBusy(true);
     setError(null);
     try {
-      await apiFetch("/api/video/jobs", { method: "POST", body: JSON.stringify({ url: target, force: again }) });
+      await apiFetch("/api/video/jobs", { method: "POST", body: JSON.stringify({ url: target, force: again, summary_chars: length }) });
       await load();
       return true;
     } catch (e) {
@@ -95,7 +97,7 @@ export default function VideoExtractPage() {
         className="max-w-measure space-y-3"
         onSubmit={async (e) => {
           e.preventDefault();
-          if (await submit(url, force)) setUrl("");
+          if (await submit(url, force, chars)) setUrl("");
         }}
       >
         <label htmlFor="video-url" className="block text-label font-medium text-on-surface">
@@ -111,6 +113,21 @@ export default function VideoExtractPage() {
           className="field h-auto w-full resize-y py-2"
         />
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <label className="flex items-center gap-2 text-body text-on-surface">
+            요약
+            <input
+              type="number"
+              required
+              min={100}
+              max={1500}
+              step={50}
+              value={chars}
+              onChange={(e) => setChars(Number(e.target.value))}
+              aria-label="요약 길이(자)"
+              className="field w-24"
+            />
+            자 내외
+          </label>
           <button type="submit" disabled={busy || !url.trim()} className="btn-filled">
             정리 시작
           </button>
@@ -190,8 +207,9 @@ export default function VideoExtractPage() {
                       ))}
                     </ul>
                     {job.status === "done" && (
-                      // 끝난 영상은 그 서비스에 저장돼 있어, 같은 주소를 다시 넣으면 실패한 것만 다시 돈다.
-                      <button type="button" disabled={busy} onClick={() => void submit(job.url, false)} className="btn-text btn-compact mt-1">
+                      // 끝난 영상은 그 서비스에 저장돼 있어, 같은 주소·같은 길이로 다시 넣으면 실패한 것만 다시 돈다.
+                      // 길이 설정이 생기기 전 작업(summary_chars 없음)은 500자였다.
+                      <button type="button" disabled={busy} onClick={() => void submit(job.url, false, job.summary_chars ?? 500)} className="btn-text btn-compact mt-1">
                         실패한 영상만 다시 시도
                       </button>
                     )}

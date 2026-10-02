@@ -26,6 +26,8 @@ class NewVideoJob(BaseModel):
     # 주소 하나(영상·재생목록·채널) 또는 여러 개(쉼표·줄바꿈 구분). 유튜브 주소인지는 그 서비스가 검사한다.
     url: str = Field(min_length=1, max_length=60_000)
     force: bool = False
+    # 요약을 몇 자 내외로 쓸지. 범위는 그 서비스의 것과 같다(yt2doc.CHARS_MIN/MAX).
+    summary_chars: int = Field(default=500, ge=100, le=1500)
 
 
 async def _call(settings: Settings, method: str, path: str, **kwargs) -> httpx.Response:
@@ -58,7 +60,7 @@ async def list_jobs(
 async def add_job(
     body: NewVideoJob, user: User = Depends(get_current_user), settings: Settings = Depends(get_app_settings)
 ) -> dict:
-    payload = {"url": body.url, "force": body.force, "owner": str(user.id)}
+    payload = {"url": body.url, "force": body.force, "summary_chars": body.summary_chars, "owner": str(user.id)}
     return (await _call(settings, "POST", "/api/jobs", json=payload)).json()
 
 
