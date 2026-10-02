@@ -128,8 +128,8 @@ vLLM으로 옮기고 e4b·임베딩은 Ollama에 두는 것이 가장 짧다 - �
 
 ```
 # 별도 venv (백엔드 .venv와 섞지 않는다 - torch가 다르다)
-uv venv /NHNHOME/WORKSPACE/26rda001_A/SAS/soonkun/opt/vllm && source .../opt/vllm/bin/activate
-uv pip install vllm            # ≥ 0.19 (Gemma 4), CUDA 13 휠
+uv venv /NHNHOME/WORKSPACE/26rda001_A/SAS/soonkun/opt/vllm-0.30/.venv --python 3.12
+uv pip install -p .../opt/vllm-0.30/.venv/bin/python vllm==0.30.0   # ≥ 0.28 (Muse Glimmer), CUDA 13 휠. 2026-10-03 이전은 opt/vllm의 0.26
 huggingface-cli login          # Gemma 4는 게이트 모델: HF에서 라이선스 동의 후 토큰 필요 (실측: 토큰 없이 401)
 
 CUDA_VISIBLE_DEVICES=0 vllm serve google/gemma-4-26b-it \
@@ -185,7 +185,31 @@ CUDA_VISIBLE_DEVICES=0 vllm serve google/gemma-4-26b-it \
   주면 그 GPU의 85%를 선점하므로, Ollama가 같은 GPU에 올린 모델과 합이 넘지 않게 GPU를
   나눈다(4.1의 배치가 그것이다).
 
-## 6. 지금 상태 (2026-09-12 전환 후)
+## 6. 지금 상태 (2026-10-03, vLLM 0.30)
+
+로컬 모델은 전부 vLLM 0.30(`opt/vllm-0.30/.venv`, torch 2.13+cu130)이 낸다. 0.26 환경(`opt/vllm`)은 지웠다.
+
+| 모델 | GPU (선점) | 포트 | 기동 스크립트 |
+|---|---|---|---|
+| `gemma4:26b` = models/gemma-4-26B-A4B-it (BF16 48.5GiB) - 답변 기본 | 1 (42%) | 8001 | `scripts/start_vllm.sh` |
+| `muse-glimmer:30b` = models/Muse-Glimmer-30B (BF16 56GiB, 창 131k, 이미지) | 1 (40%) | 8006 | `scripts/start_vllm_muse.sh` |
+| `gemma4:e4b` = models/gemma-4-E4B-it (값싼 단계) | 0 (14%) | 8002 | `scripts/start_vllm_e4b.sh` |
+| `qwen3-embedding:8b` = models/Qwen3-Embedding-8B (pooling) | 0 (25%) | 8003 | `scripts/start_vllm_embed.sh` |
+| `qwen3.8:27b` = models/Qwen3.8-27B-FP8 (코드 탭) | 0 (45%) | 8005 | `scripts/start_vllm_qwen.sh` |
+
+0.26 → 0.30에서 달라진 것(2026-10-03 실측):
+- **같은 GPU에 둘을 동시에 띄우면 죽는다.** 0.30은 기동 때 GPU 전체의 빈 메모리 변화를 재서 KV 캐시 크기를 정하므로, 옆에서
+  다른 서버가 올라오면 그 적재분을 제 것으로 세어 `No available memory for the cache blocks`(KV −7.9GiB, −39GiB)로 끝난다.
+  `start_vllm.sh`가 GPU별 잠금으로 한 번에 하나씩 띄운다(앞 서버가 /v1/models에 답한 뒤 다음).
+- **gemma4 26B(A4B, MoE)는 처음 한 번 커널을 빌드한다.** flashinfer가 nvcc로 MoE 커널을 JIT 빌드하는 데 약 15분
+  (`/root/.cache/flashinfer`에 남고, 그 뒤 기동은 3분 10초). 컨테이너가 다시 만들어지면 또 한 번 걸린다.
+- 임베딩 출력은 같다: 같은 글에 대한 0.26과 0.30 벡터의 코사인 0.9999(앞 1536차원 포함) - 다시 임베딩하지 않았다.
+  `dimensions` 인자는 0.30도 400으로 거절한다(프로바이더가 앞 1536차원을 자르는 처리는 그대로 필요).
+- /sleep·/wake_up·/is_sleeping, /metrics의 `num_requests_running`·`request_success_total` 이름, json_schema 출력은 그대로.
+- Muse Glimmer는 추론 강도를 `reasoning_effort`가 아니라 시스템 글 `Reasoning strength: low|medium|high|xhigh`로 받는다 -
+  `app/llm/openai_provider.py`의 `system_reasoning_strength`가 붙인다(안 주면 짧은 답에도 생각 500~700토큰).
+
+## 6-1. 2026-09-12 전환 직후 상태 (기록)
 
 | 프로세스 | 모델 | GPU | 포트 | 기동 |
 |---|---|---|---|---|

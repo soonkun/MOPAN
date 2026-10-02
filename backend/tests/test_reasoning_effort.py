@@ -38,3 +38,16 @@ def test_local_non_reasoning_model_gets_effort_none_to_disable_thinking():
     with pytest.raises(Exception):
         asyncio.run(p.chat([ChatMessage(role="user", content="hi")], model="gpt-oss:120b", reasoning_effort="low"))
     assert captured["extra_body"]["reasoning_effort"] == "low"
+
+
+def test_muse_takes_reasoning_strength_from_the_system_prompt():
+    """Muse Glimmer는 reasoning_effort를 무시하고 시스템 글의 'Reasoning strength'만 본다. 고르지 않으면 low."""
+    from app.llm.openai_provider import system_reasoning_strength, with_system_line
+
+    assert system_reasoning_strength("gemma4:26b", "high") is None
+    assert [system_reasoning_strength("muse-glimmer:30b", e) for e in (None, "none", "minimal", "low", "medium", "high")] == [
+        "low", "low", "low", "low", "medium", "high"]
+    original = [{"role": "system", "content": "규칙"}, {"role": "user", "content": "질문"}]
+    assert with_system_line(original, "Reasoning strength: low")[0]["content"] == "Reasoning strength: low\n\n규칙"
+    assert original[0]["content"] == "규칙"  # 원본은 그대로
+    assert with_system_line([{"role": "user", "content": "질문"}], "L")[0] == {"role": "system", "content": "L"}

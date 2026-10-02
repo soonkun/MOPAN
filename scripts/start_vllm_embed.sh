@@ -1,30 +1,10 @@
 #!/usr/bin/env bash
-# vLLM으로 임베딩 모델(qwen3-embedding:8b = Qwen/Qwen3-Embedding-8B BF16)을 GPU 0에 서빙한다.
-# 근거: docs/local-llm-concurrency.md §6, 기술 보고서 §15. Ollama 임베딩(4 슬롯)이 색인 병목이었다.
-#   --served-model-name qwen3-embedding:8b : EMBEDDING_MODEL·프로필·카탈로그 이름 그대로.
-#   --runner pooling : /v1/embeddings 서버. --max-model-len 8192는 청크 상한(4,095토큰)의 두 배.
-#   차원 1536은 앱이 요청마다 dimensions로 보내고, 서버가 무시하면 프로바이더가 앞 1536차원을
-#   잘라 정규화한다(MRL) - Ollama의 dimensions와 같은 연산.
-# --enable-sleep-mode + VLLM_SERVER_DEV_MODE=1: 유휴 시 백엔드가 /sleep(level 1, 가중치를 CPU RAM으로)으로
-# GPU 메모리를 비우고 첫 요청에 /wake_up으로 되살린다(app/llm/sleep.py). 없으면 두 엔드포인트가 없다.
+# 임베딩 모델(Qwen3-Embedding-8B, BF16 14GB)을 vLLM pooling 서버로 GPU 0의 8003에 띄운다. .env EMBEDDING_BASE_URL이 여기를 본다.
+# 25%(≈46GB) = 가중치 14GB + 긴 배치용 여유. vLLM은 `dimensions`를 400으로 거절하므로(0.30에서도 같다) 프로바이더가 앞 1536차원을
+# 잘라 정규화한다. 서버 판을 올려도 벡터는 같다 - 0.26과 0.30의 출력 코사인 0.9999(2026-10-03 실측), 다시 임베딩할 필요 없음.
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"   # …/soonkun
-MODEL="${VLLM_EMBED_MODEL_PATH:-$ROOT/models/Qwen3-Embedding-8B}"
-PORT="${VLLM_EMBED_PORT:-8003}"
-GPU="${VLLM_EMBED_GPU:-0}"
-UTIL="${VLLM_EMBED_GPU_UTIL:-0.25}"
-LOG="$ROOT/MOPAN/logs/vllm-embed.log"
-mkdir -p "$(dirname "$LOG")"
-if curl -s -m 3 -o /dev/null "http://127.0.0.1:$PORT/v1/models"; then
-  echo "vllm-embed already listening on $PORT"; exit 0
-fi
-CUDA_VISIBLE_DEVICES="$GPU" HF_HUB_OFFLINE=1 VLLM_SERVER_DEV_MODE=1 \
-  setsid nohup "$ROOT/opt/vllm/.venv/bin/vllm" serve "$MODEL" \
-    --runner pooling \
-    --served-model-name qwen3-embedding:8b \
-    --host 127.0.0.1 --port "$PORT" \
-    --dtype bfloat16 --max-model-len 8192 --max-num-seqs 128 \
-    --gpu-memory-utilization "$UTIL" \
-    --enable-sleep-mode \
-    >> "$LOG" 2>&1 < /dev/null &
-echo "vllm-embed starting (pid $!), log: $LOG"
+export VLLM_MODEL_PATH="${VLLM_EMBED_MODEL_PATH:-$(cd "$(dirname "$0")/../.." && pwd)/models/Qwen3-Embedding-8B}"
+export VLLM_SERVED_NAME=qwen3-embedding:8b VLLM_PORT="${VLLM_EMBED_PORT:-8003}" VLLM_GPU="${VLLM_EMBED_GPU:-0}" \
+       VLLM_GPU_UTIL="${VLLM_EMBED_GPU_UTIL:-0.25}" VLLM_LOG_NAME=vllm-embed VLLM_RUNNER=pooling \
+       VLLM_MAX_MODEL_LEN=8192 VLLM_MAX_NUM_SEQS=128
+exec "$(dirname "$0")/start_vllm.sh"

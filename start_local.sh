@@ -12,6 +12,7 @@ DBURL=$(grep -E '^DATABASE_URL=' ../.env | cut -d= -f2-)
 ../scripts/start_vllm.sh
 ../scripts/start_vllm_e4b.sh
 ../scripts/start_vllm_qwen.sh   # 코딩 모델(GPU0 8005)
+../scripts/start_vllm_muse.sh   # Meta Muse Glimmer 30B(GPU1 8006) - 같은 GPU의 서버는 스크립트가 한 번에 하나씩 띄운다
 ../scripts/sandbox_firewall.sh  # 코드 샌드박스 uid는 127.0.0.1:8010만(보안 검토 2026-09-25)
 ../../mcp_server/start.sh       # 국토 공간자료 MCP(8200, soonkun/mcp_server/maps) - 결과 파일은 /maps/files rewrite
 ../../youtube_transcipt/start.sh  # 영상 내용 추출(8210) - 살아 있으면 그대로 둔다. 화면은 사이드바 "영상 내용 추출"(app/video)

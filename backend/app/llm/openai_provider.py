@@ -39,6 +39,26 @@ def adapt_reasoning_effort(model: str, effort: str | None, *, has_tools: bool) -
 
 
 
+# Muse Glimmer(vLLM 8006)는 추론 강도를 reasoning_effort로 받지 않는다 - 시스템 글의 "Reasoning strength: <값>"만 본다
+# (모델 카드). 아무것도 안 주면 두 문장짜리 답에도 생각 500~700토큰(실측 2026-10-03, 5~7초)이고 low면 144토큰(1.6초)이다.
+# 사용자가 고른 추론 수준이 medium 이상이면 그대로, 그 밖(없음·none·minimal·low)은 low - 도구 심의처럼 max_tokens가
+# 작은 호출이 생각만 하다 끝나지 않게.
+SYSTEM_STRENGTH_MODEL_HINTS = ("muse-glimmer",)
+
+
+def system_reasoning_strength(model: str, effort: str | None) -> str | None:
+    if not any(h in model.lower() for h in SYSTEM_STRENGTH_MODEL_HINTS):
+        return None
+    return effort if effort in ("medium", "high", "xhigh") else "low"
+
+
+def with_system_line(messages: list[dict], line: str) -> list[dict]:
+    """첫 시스템 메시지 앞에 한 줄을 붙인다(없으면 시스템 메시지를 만든다). 원본은 건드리지 않는다."""
+    if messages and messages[0].get("role") == "system" and isinstance(messages[0].get("content"), str):
+        return [{**messages[0], "content": f"{line}\n\n{messages[0]['content']}"}, *messages[1:]]
+    return [{"role": "system", "content": line}, *messages]
+
+
 def _truncate_normalise(vector: list[float], dim: int) -> list[float]:
     head = vector[:dim]
     norm = sum(x * x for x in head) ** 0.5
@@ -316,6 +336,9 @@ class OpenAIProvider(LLMProvider):
         # 모델에는 항상 none을 명시한다 - 사용자가 고른 추론 수준은 표시된 모델에서만 의미가 있다.
         if effort is None and self._is_local(model_name) and not self._is_reasoning(model_name):
             effort = "none"
+        strength = system_reasoning_strength(model_name, effort)
+        if strength is not None:
+            request["messages"] = with_system_line(request["messages"], f"Reasoning strength: {strength}")
         if effort is not None:
             # extra_body로: 이 컨테이너의 openai SDK는 reasoning_effort를 명명
             # 인자로 모른다(실측 TypeError). extra_body는 버전 무관하게 요청
