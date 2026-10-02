@@ -23,7 +23,7 @@
 // in its own box rather than widening the column that holds it.
 export default function PageShell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="mx-auto w-full min-w-0 max-w-7xl space-y-6 px-4 py-6 sm:px-6 2xl:max-w-page 2xl:px-8">
+    <div className="mx-auto w-full min-w-0 max-w-7xl space-y-6 px-4 pb-6 pt-4 sm:px-6 md:pt-6 2xl:max-w-page 2xl:px-8">
       {children}
     </div>
   );

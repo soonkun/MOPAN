@@ -233,9 +233,9 @@ export default function WorkflowEditorPage() {
     changeGraph(next);
     setSelection({ node: next.nodes[next.nodes.length - 1].id });
   }
-  // 머리 줄(h-14) 중심에 햄버거를 맞춘다: (56-40)/2 = 8px. 이 화면을 떠나면 되돌린다.
+  // 머리 줄(4.5rem=72px) 중심에 햄버거를 맞춘다: (72-40)/2 = 16px = 왼 여백(left-4)과 같다. 이 화면을 떠나면 되돌린다.
   useEffect(() => {
-    document.documentElement.style.setProperty("--hamburger-top", "0.5rem");
+    document.documentElement.style.setProperty("--hamburger-top", "1rem");
     return () => {
       document.documentElement.style.removeProperty("--hamburger-top");
     };
@@ -370,7 +370,7 @@ export default function WorkflowEditorPage() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* 상단 바 - 이 화면의 유일한 가로 크롬. 나머지는 전부 캔버스다. */}
-      <header className="flex h-14 shrink-0 items-center gap-1.5 border-b border-outline-variant bg-surface-container-low py-0 pl-[4.25rem] pr-2 sm:gap-2 sm:pr-3 md:pl-3">
+      <header className="flex h-[4.5rem] shrink-0 items-center gap-1.5 border-b border-outline-variant bg-surface-container-low py-0 pl-[4.25rem] pr-2 sm:gap-2 sm:pr-3 md:pl-3">
         <button
           type="button"
           onClick={() => (dirty ? setLeaving(true) : router.push("/workflows"))}
