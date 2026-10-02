@@ -227,7 +227,7 @@ async def _save_version(
 @router.get("/workflows/selectable", response_model=list[WorkflowOption])
 async def list_selectable_workflows(
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """What the composer's `@` menu lists: ENABLED workflows that have a graph.
 
@@ -261,7 +261,7 @@ async def list_selectable_workflows(
 @router.get("/tools", response_model=list[CallableToolResponse])
 async def list_callable_tools(
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """**ONE list, because there is one Tool interface.**
 
@@ -348,7 +348,7 @@ async def list_callable_tools(
 @router.get("/workflows", response_model=list[WorkflowResponse])
 async def list_workflows(
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     workflows = (await db.scalars(select(Workflow).order_by(Workflow.name))).all()
     emails = dict((await db.execute(select(User.id, User.email))).all())
@@ -369,7 +369,7 @@ async def list_workflows(
 async def create_workflow(
     payload: WorkflowCreate,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ):
     """Admin only, because a workflow is configuration every user then answers
@@ -424,7 +424,7 @@ async def create_workflow(
 async def get_workflow(
     workflow_id: uuid.UUID,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """The canvas's one request: the row, its boundary lists AND the active
     graph. Splitting the graph into a second endpoint would guarantee a screen
@@ -439,7 +439,7 @@ async def update_workflow(
     workflow_id: uuid.UUID,
     payload: WorkflowUpdate,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ):
     workflow = await _get(db, workflow_id)
@@ -483,7 +483,7 @@ async def update_workflow(
 async def delete_workflow(
     workflow_id: uuid.UUID,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """The join rows and the versions cascade; the MESSAGES DO NOT.
 
@@ -502,7 +502,7 @@ async def delete_workflow(
 async def list_versions(
     workflow_id: uuid.UUID,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """Newest first. This is the 되돌리기 list: a person editing a procedure can
     make it worse, and the only honest answer to that is the row that was there
@@ -535,7 +535,7 @@ async def create_version(
     workflow_id: uuid.UUID,
     payload: WorkflowVersionCreate,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ):
     """Saving the canvas. **Every save is a version**, and the new one is active.
@@ -575,7 +575,7 @@ async def activate_version(
     workflow_id: uuid.UUID,
     version: int,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """되돌리기. Activates an existing version rather than copying it forward, so
     the history stays a history rather than growing a duplicate every rollback.
@@ -626,7 +626,7 @@ async def delete_version(
     workflow_id: uuid.UUID,
     version: int,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """버전 정리(소유자 요청). 활성 버전만은 지울 수 없다 - 이 워크플로우로
     들어오는 다음 질문이 실행할 그래프가 사라지므로, 먼저 다른 버전으로

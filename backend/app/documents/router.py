@@ -120,7 +120,7 @@ def _to_response(document, collection_name, uploader_email, chunk_count) -> Docu
 async def create_collection(
     payload: CollectionCreate,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     collection = Collection(
         name=payload.name,
@@ -144,7 +144,7 @@ async def create_collection(
 @router.get("/collections", response_model=list[CollectionResponse])
 async def list_collections(
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     result = await db.scalars(select(Collection).order_by(Collection.created_at))
     return list(result)
@@ -155,7 +155,7 @@ async def update_collection(
     collection_id: uuid.UUID,
     payload: CollectionUpdate,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     collection = await db.get(Collection, collection_id)
     if collection is None:
@@ -176,7 +176,7 @@ async def update_collection(
 async def delete_collection(
     collection_id: uuid.UUID,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """Refuses while the collection still holds documents. The last remaining
     collection IS deletable: an admin left with none simply creates one, which is
@@ -220,7 +220,7 @@ async def upload_document(
     # shared=공용(관리자만) · mine=개인(누구나, 본인만 봄) · 비면 관리자는 공용, 그 외는 개인.
     scope: str = Form(default=""),
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
     arq_pool: ArqRedis = Depends(get_arq_pool),
 ):
@@ -383,7 +383,7 @@ async def upload_document(
 async def list_documents(
     collection_id: uuid.UUID | None = None,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     query = _document_list_query(user).order_by(Document.created_at.desc())
     if collection_id is not None:
@@ -396,7 +396,7 @@ async def list_documents(
 async def get_document(
     document_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     row = (await db.execute(_document_list_query(user).where(Document.id == document_id))).first()
     if row is None:
@@ -409,7 +409,7 @@ async def reprocess_document(
     document_id: uuid.UUID,
     payload: DocumentReprocess | None = None,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     arq_pool: ArqRedis = Depends(get_arq_pool),
 ):
     """Run the pipeline over the stored file again, optionally recording first
@@ -469,7 +469,7 @@ async def list_chunks(
     offset: int = 0,
     limit: int = 100,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """한 장씩, 그리고 유사도로 찾기.
 
@@ -527,7 +527,7 @@ async def list_chunks(
 async def download_document(
     document_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """The stored original, under the name it was uploaded with. Same
     authorization as GET /api/documents/{id} - any authenticated user - because
@@ -563,7 +563,7 @@ async def download_document(
 async def get_chunk(
     chunk_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """Backs citation click-through: the modal shows the full chunk, not the
     300-character snippet."""
@@ -582,7 +582,7 @@ async def get_chunk(
 async def delete_document(
     document_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ):
     document = await get_readable_document(db, document_id, user)

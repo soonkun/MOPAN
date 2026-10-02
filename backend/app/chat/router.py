@@ -563,7 +563,7 @@ async def _complete(
 async def chat(
     payload: ChatRequest,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     llm_provider: LLMProvider = Depends(get_llm_provider),
     sessionmaker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
     settings: Settings = Depends(get_app_settings),
@@ -905,7 +905,7 @@ async def chat(
 async def approve(
     payload: ApprovalDecision,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     llm_provider: LLMProvider = Depends(get_llm_provider),
     sessionmaker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
     settings: Settings = Depends(get_app_settings),
@@ -1086,7 +1086,7 @@ async def approve(
 async def search(
     payload: SearchRequest,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     llm_provider: LLMProvider = Depends(get_llm_provider),
     settings: Settings = Depends(get_app_settings),
 ):
@@ -1126,7 +1126,7 @@ async def search(
 async def list_models(
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """What the composer's model picker lists. Any authenticated user may read it:
     it is the same allowlist POST /api/chat enforces, so it discloses nothing a
@@ -1149,7 +1149,7 @@ async def list_models(
 @router.get("/conversations", response_model=list[ConversationResponse])
 async def list_conversations(
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     result = await db.scalars(
         select(Conversation).where(Conversation.user_id == user.id).order_by(Conversation.updated_at.desc())
@@ -1161,7 +1161,7 @@ async def list_conversations(
 async def list_messages(
     conversation_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     # The returned object, not the bare id: discarding it and re-querying by id is
     # the caller-discipline pattern load_history/persist_turn exist to remove.
@@ -1177,7 +1177,7 @@ async def rename_conversation(
     conversation_id: uuid.UUID,
     payload: ConversationUpdate,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """The sidebar's 이름 변경. Auto-titling takes `message[:80]` of the first
     question, which is a sentence fragment more often than it is a name.
@@ -1202,7 +1202,7 @@ async def rename_conversation(
 async def delete_conversation(
     conversation_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ):
     conversation = await get_owned_conversation(db, conversation_id, user)

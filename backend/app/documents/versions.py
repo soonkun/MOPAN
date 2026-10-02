@@ -75,7 +75,7 @@ def _version_response(doc: Document, email: str | None) -> VersionResponse:
 
 
 @router.get("/documents/{document_id}/versions", response_model=list[VersionResponse])
-async def list_versions(document_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session)):
+async def list_versions(document_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session, scope="function")):
     doc = await db.get(Document, document_id)
     if doc is None or (doc.owner_id is not None and doc.owner_id != user.id):
         raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
@@ -94,7 +94,7 @@ async def upload_version(
     file: UploadFile = File(...),
     effective_date: date | None = Form(default=None),
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
     arq_pool: ArqRedis = Depends(get_arq_pool),
 ):
@@ -157,7 +157,7 @@ async def upload_version(
 
 @router.post("/documents/{document_id}/versions/{version_id}/activate", response_model=VersionResponse)
 async def activate_version(
-    document_id: uuid.UUID, version_id: uuid.UUID, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db_session)
+    document_id: uuid.UUID, version_id: uuid.UUID, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db_session, scope="function")
 ):
     """되돌리기. 그 버전을 현행으로, 계보의 나머지는 내린다. 색인이 끝난 버전만 현행이 될 수 있다."""
     base = await db.get(Document, document_id)

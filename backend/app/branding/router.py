@@ -79,7 +79,7 @@ def _to_response(row: Branding | None, settings: Settings) -> BrandingResponse:
 @router.get("", response_model=BrandingResponse)
 async def read_branding(
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ):
     return _to_response(await _row(db), settings)
@@ -89,7 +89,7 @@ async def read_branding(
 async def update_branding(
     payload: BrandingUpdateRequest,
     user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ):
     questions = [q.strip() for q in payload.suggested_questions if q.strip()]

@@ -118,7 +118,7 @@ async def _add_usage(session: AsyncSession, user_id: uuid.UUID, usage: dict[str,
 async def list_models(
     request: Request,
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     await _user_for_token(request, db)
     catalog = await load_catalog(db, settings)
@@ -135,7 +135,7 @@ async def list_models(
 async def chat_completions(
     request: Request,
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     user_id = await _user_for_token(request, db)
     body = await request.json()

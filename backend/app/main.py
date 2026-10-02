@@ -155,7 +155,7 @@ def create_app() -> FastAPI:
     @app.get("/api/health/ready")
     async def ready(
         request: Request,
-        db: AsyncSession = Depends(get_db_session),
+        db: AsyncSession = Depends(get_db_session, scope="function"),
         redis: Redis = Depends(get_redis),
     ) -> dict[str, str]:
         try:

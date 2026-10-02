@@ -14,7 +14,7 @@ SESSION_COOKIE_NAME = "mopan_session"
 
 async def get_current_user(
     request: Request,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     redis: Redis = Depends(get_redis),
 ) -> User:
     session_id = request.cookies.get(SESSION_COOKIE_NAME)

@@ -43,6 +43,10 @@ def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
 
 
 async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
+    """받는 쪽은 반드시 `Depends(get_db_session, scope="function")`으로 쓴다(전부 같은 scope여야 세션이 하나로 묶인다).
+    fastapi 0.118부터 yield 의존성은 기본이 '응답을 다 보낸 뒤 정리'라, scope 없이 쓰면 SSE 답변이 흐르는 내내
+    인증 조회가 연 트랜잭션이 idle-in-transaction으로 연결을 쥔다(동시 사용자 수만큼 풀이 마른다).
+    지키는 테스트: test_chat.py::test_no_connection_is_idle_in_transaction_across_the_llm_call"""
     sessionmaker = request.app.state.sessionmaker
     async with sessionmaker() as session:
         yield session

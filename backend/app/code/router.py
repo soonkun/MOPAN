@@ -234,7 +234,7 @@ async def status(
     request: Request,
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     ok, why = _runtime(request).available()
     profile = await get_profile(db, user, settings)
@@ -262,7 +262,7 @@ async def list_workspaces(
     request: Request,
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     profile = await get_profile(db, user, settings)
     out: list[WorkspaceOut] = []
@@ -305,7 +305,7 @@ async def create_workspace(
     request: Request,
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     name = body.name.strip()
     if not NAME_RE.fullmatch(name) or name in {".", ".."}:
@@ -329,7 +329,7 @@ async def delete_workspace(
     request: Request,
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     kind, name = parse_ws_id(ws_id)
     if kind == "local":
@@ -367,7 +367,7 @@ async def upload_files(
     paths: list[str] | None = Form(None),
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """파일 여러 개(폴더 선택 시 상대 경로는 `paths`로) 또는 zip 하나(풀어서 넣는다)."""
     kind, name = parse_ws_id(ws_id)
@@ -427,7 +427,7 @@ async def download_workspace(
     request: Request,
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     kind, name = parse_ws_id(ws_id)
     if kind == "local":
@@ -475,7 +475,7 @@ async def download_file(
     request: Request,
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """결과물 파일 하나 받기(서버 작업 공간). 내 컴퍼터 폴더는 이미 내 컴퍼터에 있다."""
     kind, name = parse_ws_id(ws_id)
@@ -522,7 +522,7 @@ async def list_cowork_tasks(
     request: Request,
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """지난 작업 - 작업(대화)마다 폴더 하나. 넣은 파일과 만든 파일이 그 안에 함께 있다."""
     profile = await get_profile(db, user, settings)
@@ -535,7 +535,7 @@ async def create_cowork_task(
     request: Request,
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """새 작업 폴더. 이름은 첫 요청의 앞부분 - 같은 이름이 있으면 번호를 붙인다."""
     if not settings.code_enabled:
@@ -577,7 +577,7 @@ def purge_cowork_tasks(data_dir: Path, retention_days: int) -> list[str]:
 @router.get("/companion")
 async def companion_script(
     request: Request,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     redis: Redis = Depends(get_redis),
 ):
     """컴패니언 파일. 브라우저(세션 쿠키)도, setup 스크립트(브리지 토큰 Bearer)도 받는다 - 한 줄 설치가
@@ -604,7 +604,7 @@ async def setup_script(request: Request):
 async def issue_bridge_token(
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """새 토큰 발급(이전 것은 즉시 무효). 원문은 이 응답에서만 볼 수 있다."""
     profile = await get_profile(db, user, settings)
@@ -636,7 +636,7 @@ async def bridge_stream(
     dirs: str = "",
     host: str = "",
     version: str = "",
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """컴패니언이 열어 두는 SSE. 서버→PC 요청 프레임이 여기로 내려간다. `dirs`는 `|`로 이은 폴더 경로."""
     user = await _companion_user(request, db)
@@ -669,7 +669,7 @@ async def bridge_stream(
 
 
 @router.post("/bridge/reply/{request_id}")
-async def bridge_reply(request_id: str, request: Request, db: AsyncSession = Depends(get_db_session)):
+async def bridge_reply(request_id: str, request: Request, db: AsyncSession = Depends(get_db_session, scope="function")):
     user = await _companion_user(request, db)
     conn = _bridge(request).get(user.id)
     frame = await request.json()
@@ -689,7 +689,7 @@ async def proxy(
     request: Request,
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     kind, target = parse_ws_id(ws_id)
     if path.startswith(PROXY_DENY_PREFIXES) and path != "config/providers":

@@ -30,7 +30,7 @@ class MemoryList(BaseModel):
 
 
 @router.get("", response_model=MemoryList)
-async def list_memory(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session)):
+async def list_memory(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session, scope="function")):
     rows = await load_user_memory(db, user.id)
     return MemoryList(
         items=[
@@ -42,7 +42,7 @@ async def list_memory(user: User = Depends(get_current_user), db: AsyncSession =
 
 
 @router.delete("/{memory_id}", status_code=204)
-async def delete_one(memory_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session)):
+async def delete_one(memory_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session, scope="function")):
     result = await db.execute(delete(UserMemory).where(UserMemory.id == memory_id, UserMemory.user_id == user.id))
     await db.commit()
     if result.rowcount == 0:
@@ -51,6 +51,6 @@ async def delete_one(memory_id: uuid.UUID, user: User = Depends(get_current_user
 
 
 @router.delete("", status_code=204)
-async def delete_all(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session)):
+async def delete_all(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session, scope="function")):
     await db.execute(delete(UserMemory).where(UserMemory.user_id == user.id))
     await db.commit()

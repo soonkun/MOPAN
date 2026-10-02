@@ -226,7 +226,7 @@ async def list_templates(user: User = Depends(get_current_user)):
 
 
 @router.get("/projects", response_model=list[ProjectResponse])
-async def list_projects(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session)):
+async def list_projects(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session, scope="function")):
     rows = (await db.scalars(select(ResearchProject).order_by(ResearchProject.created_at))).all()
     return [await _project_response(db, p) for p in rows]
 
@@ -235,7 +235,7 @@ async def list_projects(user: User = Depends(get_current_user), db: AsyncSession
 async def create_project(
     payload: ProjectBody,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ):
     await _validate_models(db, settings, payload.model, payload.gap_model)
@@ -267,7 +267,7 @@ async def create_project(
 
 
 @router.get("/projects/{pid}", response_model=ProjectResponse)
-async def get_project(pid: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session)):
+async def get_project(pid: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session, scope="function")):
     return await _project_response(db, await _project_or_404(db, pid))
 
 
@@ -276,7 +276,7 @@ async def update_project(
     pid: uuid.UUID,
     payload: ProjectPatch,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ):
     project = await _project_or_404(db, pid)
@@ -302,7 +302,7 @@ async def update_project(
 
 
 @router.delete("/projects/{pid}", status_code=204)
-async def delete_project(pid: uuid.UUID, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db_session)):
+async def delete_project(pid: uuid.UUID, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db_session, scope="function")):
     project = await _project_or_404(db, pid)
     await db.delete(project)
     await db.commit()
@@ -311,7 +311,7 @@ async def delete_project(pid: uuid.UUID, admin: User = Depends(require_admin), d
 # --- instructions --------------------------------------------------------------
 
 @router.get("/projects/{pid}/instructions", response_model=list[InstructionResponse])
-async def list_instructions(pid: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session)):
+async def list_instructions(pid: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session, scope="function")):
     await _project_or_404(db, pid)
     rows = (
         await db.execute(
@@ -329,7 +329,7 @@ async def list_instructions(pid: uuid.UUID, user: User = Depends(get_current_use
 
 @router.post("/projects/{pid}/instructions", response_model=InstructionResponse, status_code=201)
 async def add_instruction(
-    pid: uuid.UUID, payload: InstructionBody, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db_session)
+    pid: uuid.UUID, payload: InstructionBody, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db_session, scope="function")
 ):
     await _project_or_404(db, pid)
     row = await _add_instruction(db, pid, payload.text.strip(), admin.id)
@@ -339,7 +339,7 @@ async def add_instruction(
 
 @router.post("/projects/{pid}/instructions/{version}/activate", response_model=InstructionResponse)
 async def activate_instruction(
-    pid: uuid.UUID, version: int, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db_session)
+    pid: uuid.UUID, version: int, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db_session, scope="function")
 ):
     row = await db.scalar(
         select(ResearchInstruction).where(ResearchInstruction.project_id == pid, ResearchInstruction.version == version)
@@ -389,7 +389,7 @@ async def start_run(
     reasoning_effort: str | None = Form(default=None),
     file: UploadFile | None = File(default=None),
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
     arq_pool: ArqRedis = Depends(get_arq_pool),
 ):
@@ -428,7 +428,7 @@ async def start_run(
 @router.get("/projects/{pid}/runs", response_model=RunPage)
 async def list_runs(
     pid: uuid.UUID, offset: int = 0, limit: int = 20,
-    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     await _project_or_404(db, pid)
     limit = max(1, min(limit, 100))
@@ -447,7 +447,7 @@ async def list_runs(
 
 
 @router.get("/runs/{rid}", response_model=RunResponse)
-async def get_run(rid: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session)):
+async def get_run(rid: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session, scope="function")):
     row = (
         await db.execute(select(ResearchRun, User.email).outerjoin(User, User.id == ResearchRun.created_by).where(ResearchRun.id == rid))
     ).first()
@@ -457,7 +457,7 @@ async def get_run(rid: uuid.UUID, user: User = Depends(get_current_user), db: As
 
 
 @router.get("/runs/{rid}/pdf")
-async def run_pdf(rid: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session)):
+async def run_pdf(rid: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session, scope="function")):
     """보고서를 PDF 파일로. 서버에서 만든다(원본 CR-67: 브라우저 인쇄는 iOS에서 앱 화면이 찍혔다).
     출처 목록을 부록으로 붙이고, 본문의 [n]은 그대로 남겨 부록과 대응시킨다."""
     from app.research.pdf import PdfUnavailable, report_to_pdf
@@ -489,7 +489,7 @@ async def run_pdf(rid: uuid.UUID, user: User = Depends(get_current_user), db: As
 
 
 @router.post("/runs/{rid}/cancel", response_model=RunResponse, status_code=202)
-async def cancel_run(rid: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session)):
+async def cancel_run(rid: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session, scope="function")):
     run = await db.get(ResearchRun, rid, with_for_update=True)
     if run is None:
         raise HTTPException(status_code=404, detail="실행을 찾을 수 없습니다.")

@@ -160,7 +160,7 @@ async def _subtree_totals(db: AsyncSession, folders: list[Folder]) -> dict:
 # --- folders -------------------------------------------------------------------
 
 @router.get("/collections/{cid}/folders", response_model=list[FolderResponse])
-async def list_folders(cid: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session)):
+async def list_folders(cid: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session, scope="function")):
     if await db.get(Collection, cid) is None:
         raise HTTPException(status_code=404, detail="분류를 찾을 수 없습니다.")
     doc_counts = dict(
@@ -176,7 +176,7 @@ async def list_folders(cid: uuid.UUID, user: User = Depends(get_current_user), d
 
 @router.post("/collections/{cid}/folders", response_model=FolderResponse, status_code=201)
 async def create_folder(
-    cid: uuid.UUID, payload: FolderBody, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db_session)
+    cid: uuid.UUID, payload: FolderBody, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db_session, scope="function")
 ):
     if await db.get(Collection, cid) is None:
         raise HTTPException(status_code=404, detail="분류를 찾을 수 없습니다.")
@@ -207,7 +207,7 @@ async def create_folder(
 
 @router.patch("/folders/{fid}", response_model=FolderResponse)
 async def update_folder(
-    fid: uuid.UUID, payload: FolderPatch, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db_session)
+    fid: uuid.UUID, payload: FolderPatch, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db_session, scope="function")
 ):
     folder = await _folder_or_404(db, fid, lock=True)
     if payload.name is not None:
@@ -246,7 +246,7 @@ async def update_folder(
 
 
 @router.delete("/folders/{fid}", status_code=204)
-async def delete_folder(fid: uuid.UUID, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db_session)):
+async def delete_folder(fid: uuid.UUID, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db_session, scope="function")):
     folder = await _folder_or_404(db, fid, lock=True)
     docs = await db.scalar(select(func.count()).where(Document.folder_id == fid)) or 0
     children = await db.scalar(select(func.count()).where(Folder.parent_id == fid)) or 0
@@ -284,7 +284,7 @@ async def search_documents(
     # all=공용+내 것 · shared=공용만(문서 관리) · mine=내 개인 문서만(문서 등록)
     owner: str = "all",
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ):
     """탐색기용 목록: 폴더·검색어·상태 필터, 정렬, 페이지. 기존 GET /documents는 그대로 둔다.
@@ -351,7 +351,7 @@ async def search_documents(
 async def bulk_documents(
     payload: BulkBody,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
     arq_pool=Depends(get_arq_pool),
 ):

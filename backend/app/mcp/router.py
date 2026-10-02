@@ -80,7 +80,7 @@ async def _get_server(db: AsyncSession, server_id: uuid.UUID) -> McpServer:
 @router.get("/servers", response_model=list[McpServerResponse])
 async def list_servers(
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """Servers with their tools in one payload. Two queries and a group-by in
     Python rather than a relationship: `discover` writes tools through the
@@ -104,7 +104,7 @@ async def list_servers(
 async def create_server(
     payload: McpServerCreate,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ):
     """Register, then discover.
@@ -158,7 +158,7 @@ async def update_server(
     server_id: uuid.UUID,
     payload: McpServerUpdate,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ):
     server = await _get_server(db, server_id)
@@ -197,7 +197,7 @@ async def update_server(
 async def delete_server(
     server_id: uuid.UUID,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     server = await _get_server(db, server_id)
     if server.builtin:
@@ -213,7 +213,7 @@ async def delete_server(
 async def rediscover(
     server_id: uuid.UUID,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ):
     server = await _get_server(db, server_id)
@@ -231,7 +231,7 @@ async def update_tool(
     tool_id: uuid.UUID,
     payload: McpToolUpdate,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """Risk classification is an ADMIN's decision and lives only here. Discovery
     never writes it after the first sighting, so a server author cannot
@@ -260,7 +260,7 @@ async def update_tool(
 @router.get("/tools", response_model=list[McpToolOption])
 async def list_callable_tools(
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """What the composer's tool picker lists: enabled tools on enabled servers.
 

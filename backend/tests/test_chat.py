@@ -790,3 +790,18 @@ async def test_tool_progress_is_yielded_while_the_call_is_still_running():
         return "결과"
 
     assert [item async for item in _with_progress(tool)] == [("progress", "검색 중"), ("progress", "읽는 중"), ("result", "결과")]
+
+
+def test_every_db_session_dependency_is_function_scoped():
+    """scope 없이 쓴 Depends(get_db_session)가 하나라도 있으면 그 엔드포인트는 응답이 끝날 때까지 연결을 쥔다
+    (그리고 scope가 다른 선언끼리는 세션이 둘로 갈린다). 이유는 app/core/db.py get_db_session."""
+    import pathlib
+    import re
+
+    bare = [
+        f"{path}:{n}"
+        for path in pathlib.Path(__file__).parent.parent.joinpath("app").rglob("*.py")
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if re.search(r"Depends\(get_db_session(?!, scope=\"function\"\))", line)
+    ]
+    assert bare == []

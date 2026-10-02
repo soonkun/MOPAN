@@ -41,7 +41,7 @@ ALREADY_SENT_MESSAGE = "이미 전송된 첨부파일은 삭제할 수 없습니
 async def upload_attachment(
     file: UploadFile = File(...),
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ):
     """Any authenticated user, unlike POST /api/documents. The admin gate there
@@ -145,7 +145,7 @@ async def upload_attachment(
 async def get_attachment(
     attachment_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     return await get_owned_attachment(db, attachment_id, user)
 
@@ -154,7 +154,7 @@ async def get_attachment(
 async def get_attachment_content(
     attachment_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """Backs the composer thumbnail and the attachment chips on a reloaded
     transcript."""
@@ -181,7 +181,7 @@ async def get_attachment_content(
 async def delete_attachment(
     attachment_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ):
     """The composer's X button. Without it every removed file would sit as an

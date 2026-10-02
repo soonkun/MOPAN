@@ -57,7 +57,7 @@ def _to_response(m) -> AdminModelResponse:
 async def list_all_models(
     admin: User = Depends(require_admin),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     catalog = await load_catalog(db, settings)
     return [_to_response(m) for m in catalog.models]
@@ -68,7 +68,7 @@ async def add_model(
     payload: AdminModelCreate,
     admin: User = Depends(require_admin),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """이름을 직접 적어 추가한다(OpenAI의 새 모델, 발견되지 않은 로컬 모델). 허가는 꺼진 채 시작."""
     if (await load_catalog(db, settings)).get(payload.id) is not None:
@@ -84,7 +84,7 @@ async def update_model(
     payload: AdminModelUpdate,
     admin: User = Depends(require_admin),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     catalog = await load_catalog(db, settings)
     current = catalog.get(model_id)
@@ -138,7 +138,7 @@ class EmbeddingStatus(BaseModel):
 async def embedding_status(
     admin: User = Depends(require_admin),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """임베딩 프로필 카드. 바꾸는 버튼은 없다 - 전환은 재임베딩을 동반하는 배포 절차다."""
     from sqlalchemy import func, select
@@ -169,7 +169,7 @@ async def refresh_local_models(
     request: Request,
     admin: User = Depends(require_admin),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     if not settings.local_llm_base_url:
         raise HTTPException(status_code=400, detail="LOCAL_LLM_BASE_URL이 설정되지 않았습니다(.env).")

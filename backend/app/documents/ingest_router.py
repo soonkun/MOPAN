@@ -28,7 +28,7 @@ class IngestStatus(BaseModel):
 
 
 @router.get("/status", response_model=IngestStatus)
-async def status(admin: User = Depends(require_admin), settings: Settings = Depends(get_app_settings), db: AsyncSession = Depends(get_db_session)):
+async def status(admin: User = Depends(require_admin), settings: Settings = Depends(get_app_settings), db: AsyncSession = Depends(get_db_session, scope="function")):
     return IngestStatus(**(await ingest_status(db, settings)))
 
 

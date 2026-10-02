@@ -38,7 +38,7 @@ LOGIN_LOCK_SECONDS = 900
 @router.post("/register", response_model=UserResponse)
 async def register(
     payload: RegisterRequest,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ):
     try:
@@ -51,7 +51,7 @@ async def register(
 async def login(
     payload: LoginRequest,
     response: Response,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_app_settings),
 ):
@@ -107,7 +107,7 @@ async def me(user: User = Depends(get_current_user)):
 async def update_me(
     payload: ProfileUpdateRequest,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """본인 프로필. 지금은 닉네임 하나 - 새 대화 화면과 잡담 응답이 "OO님"
     이라고 부를 때 쓰는 호칭이다. 생략된 키는 건드리지 않는다(PATCH)."""
@@ -125,7 +125,7 @@ async def update_me(
 async def change_password(
     payload: PasswordChangeRequest,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     redis: Redis = Depends(get_redis),
 ):
     """본인 비밀번호 변경. 새 비밀번호의 규칙(길이·바이트 한도)은 가입과 같은
@@ -146,7 +146,7 @@ async def delete_me(
     request: Request,
     response: Response,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     redis: Redis = Depends(get_redis),
 ):
     """계정 삭제 - 정확히는 비활성화 + 익명화.

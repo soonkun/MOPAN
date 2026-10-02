@@ -932,7 +932,7 @@ async def get_app_settings(request: Request) -> Settings:
     The session comes from `app.core.db.current_sessionmaker`, set per request by
     RequestContextMiddleware, for the same reason `get_prompt` reads it from
     there: this must not become another parameter on `Settings`, and a
-    `Depends(get_db_session)` here would put a second session on every request
+    `Depends(get_db_session, scope="function")` here would put a second session on every request
     that already has one. Imported inside the function because `app.core.db`
     imports this module.
     """

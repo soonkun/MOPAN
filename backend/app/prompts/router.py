@@ -87,7 +87,7 @@ async def _versions_of(db: AsyncSession, name: str) -> list[tuple[Prompt, str | 
 @router.get("/prompts", response_model=list[PromptResponse])
 async def list_prompts(
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """One entry per prompt NAME, carrying the text that is live right now.
 
@@ -147,7 +147,7 @@ async def list_prompts(
 async def create_prompt(
     payload: PromptCreate,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """A NEW prompt name at version 1, active immediately.
 
@@ -186,7 +186,7 @@ async def create_prompt(
 async def list_prompt_versions(
     name: str,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     versions = await _versions_of(db, name)
     if not versions:
@@ -202,7 +202,7 @@ async def create_prompt_version(
     name: str,
     payload: PromptVersionCreate,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """An edit INSERTs a new version and makes it active. It never overwrites.
 
@@ -261,7 +261,7 @@ async def activate_prompt_version(
     name: str,
     version: str,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     existing = (
         await db.scalars(select(Prompt).where(Prompt.name == name).with_for_update())

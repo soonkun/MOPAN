@@ -68,7 +68,7 @@ async def _owned_assistant_message(db: AsyncSession, message_id: uuid.UUID, user
 async def get_trace(
     message_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """Why this answer looks the way it does: every retrieved item with its
     per-stage ranks and scores, WHICH OF THEM THE TOKEN BUDGET CUT, the model,
@@ -118,7 +118,7 @@ async def put_feedback(
     message_id: uuid.UUID,
     payload: FeedbackRequest,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """One rating per user per message, changeable. PUT rather than POST because
     that is what it is: the same URL, written again, replaces what was there.
@@ -191,7 +191,7 @@ async def list_settings(
     request: Request,
     admin: User = Depends(require_admin),
     settings: Settings = Depends(get_app_settings),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """Only the keys in RUNTIME_SAFE_SETTINGS are enumerable here, which is why
     no secret can leak through this endpoint: OPENAI_API_KEY has no entry, so
@@ -230,7 +230,7 @@ async def put_setting(
     payload: SettingUpdate,
     request: Request,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """Validated against the FULL settings object, not just this key's own range:
     CHUNK_OVERLAP has to stay under CHUNK_SIZE, and checking one at a time would
@@ -267,7 +267,7 @@ async def delete_setting(
     key: str,
     request: Request,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """Removes the override so the key falls back to its `.env` value. Idempotent
     - deleting a key with no override is a 200 describing the environment value,

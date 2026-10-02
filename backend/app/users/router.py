@@ -56,7 +56,7 @@ async def create_user(
     payload: AdminUserCreateRequest,
     request: Request,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ):
     """관리자 초대. 공개 터널을 열고 자가가입을 끈 배포(모바일 가입 화면이
@@ -92,7 +92,7 @@ async def create_user(
 @router.get("/users", response_model=list[AdminUserResponse])
 async def list_users(
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     users = list(await db.scalars(select(User).order_by(User.created_at)))
     # 토큰 사용량(소유자 요청 2026-09-28) - 세 곳의 합: 채팅(messages.usage, 대화의 주인), 딥 리서치(research_runs.usage),
@@ -135,7 +135,7 @@ async def update_user(
     user_id: uuid.UUID,
     payload: UserUpdate,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     redis: Redis = Depends(get_redis),
 ):
     user = await db.get(User, user_id)
@@ -197,7 +197,7 @@ async def update_user(
 async def delete_user(
     user_id: uuid.UUID,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     redis: Redis = Depends(get_redis),
 ):
     """계정 삭제(소유자 요청 2026-09-28: 시험 계정이 목록에 쌓인다). 대화·첨부·개인 문서·기억·코드 프로필은 같이 지워지고
@@ -230,7 +230,7 @@ async def reset_password(
     user_id: uuid.UUID,
     request: Request,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session, scope="function"),
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_app_settings),
 ):
