@@ -16,3 +16,16 @@ data/statutes/
 next-env.d.ts
 *.tsbuildinfo
 logs/
+
+# 보안 검토·취약점 기록은 저장소에 올리지 않는다(GitHub 저장소가 공개다, 소유자 지시 2026-10-02).
+# 서버의 ../MOPAN-private-docs/ 에 쓴다. scripts/git-hooks/pre-push가 푸시 단계에서 한 번 더 막는다.
+*security-review*
+*security_review*
+*securityreview*
+*pentest*
+*vulnerab*
+*보안검토*
+*보안-검토*
+*보안_검토*
+*보안 검토*
+*취약점*

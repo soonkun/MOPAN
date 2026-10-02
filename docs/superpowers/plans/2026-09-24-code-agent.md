@@ -179,11 +179,8 @@ provider=local(이 서버의 vLLM·Ollama)만 통과한다 - 카탈로그에 GPT
 - 파일 트리·에디터 뷰 없음 — 변경은 세션 diff로 본다. 필요해지면 `/file`·`/file/content` 프록시는 이미 열려 있다.
 - 사용량·비용 집계 없음 — 프록시가 지나는 자리라 붙이기는 한 곳이다.
 - 컴패니언 단일 실행 파일(exe) 없음 — Node 22 설치를 요구한다. 요청이 오면 `bun build --compile`.
-- 서버 샌드박스 네트워크는 공유 — 다른 사용자의 opencode 포트는 비밀번호로만 막힌다. 네트워크
-  네임스페이스 분리(slirp)는 필요해질 때.
 - `/var/lib/mopan-code`는 컨테이너 루트 오버레이다 - 컨테이너가 다시 만들어지면 사라진다(/NHNHOME은 남는다). 그때는
   `opt/opencode/node_modules/opencode-linux-x64/bin/opencode`와 `opt/node20`을 다시 복사하고 users/는 비어서 시작한다.
-- 검증 계정 `code-probe-a@example.com`·`code-probe-b@example.com`(비밀번호 Probe-pass-1234)이 남아 있다. 사용자 관리에서 비활성화하면 된다.
 - opencode 버전 고정: 1.18.32(`/var/lib/mopan-code/bin/opencode`). 올릴 때 `/doc` 스키마 변화를 본다.
 
 

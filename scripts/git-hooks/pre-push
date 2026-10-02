@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# 보안 검토·취약점 기록이 든 커밋은 푸시하지 않는다(GitHub 저장소가 공개다, 소유자 지시 2026-10-02).
+# .gitignore가 막는 것은 "추가"뿐이라(-f로 넣거나 이름을 바꾸면 통과한다) 나가는 커밋 전부를 여기서 다시 본다:
+#   1) 파일 이름이 보안 검토·취약점 문서 같은 것   2) 문서(.md/.txt/.docx/.pdf)의 첫머리 제목이 그런 것
+# 한 번 넣었다가 지운 파일도 이력에 남으므로, 끝 상태가 아니라 커밋 하나하나를 본다.
+# 켜기(클론마다 한 번): git config core.hooksPath scripts/git-hooks
+remote="$1"
+NAME='security[-_ ]?review|pentest|vulnerab|보안[-_ ]?검토|취약점'
+TITLE='보안 *검토|보안 *점검|취약점|security +review|penetration +test|vulnerabilit'
+zero=0000000000000000000000000000000000000000
+bad=""
+while read -r _ local_sha _ remote_sha; do
+    [ "$local_sha" = "$zero" ] && continue   # 브랜치 삭제
+    if [ "$remote_sha" = "$zero" ]; then range=$(git rev-list "$local_sha" --not --remotes="$remote"); else range=$(git rev-list "$remote_sha..$local_sha"); fi
+    for c in $range; do
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if printf '%s' "$f" | grep -qiE "$NAME"; then bad="$bad\n  ${c:0:7}  $f  (파일 이름)"; continue; fi
+            case "$f" in *.md|*.txt|*.docx|*.pdf)
+                if git show "$c:$f" 2>/dev/null | head -5 | grep -qiE "^#.*($TITLE)|^($TITLE)"; then bad="$bad\n  ${c:0:7}  $f  (문서 제목)"; fi;;
+            esac
+        done < <(git diff-tree --no-commit-id --name-only -r --diff-filter=AMR --root "$c")
+    done
+done
+if [ -n "$bad" ]; then
+    printf '푸시를 막았습니다 - 보안 검토·취약점 기록으로 보이는 파일이 나가는 커밋에 있습니다:%b\n' "$bad" >&2
+    printf '이런 문서는 저장소 밖(서버의 MOPAN-private-docs/)에 둡니다. 커밋에서 빼고 다시 푸시하세요.\n' >&2
+    exit 1
+fi

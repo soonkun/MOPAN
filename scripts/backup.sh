@@ -4,7 +4,7 @@
 #   - Redis 스냅샷 (세션·큐 - 없어도 재로그인으로 복구되지만 있으면 편하다)
 #   - /var/lib/mopan-code/users (코워크 작업 폴더·코드 작업 공간·opencode 세션 DB) - bin/node20은 opt/에서 다시 복사
 #   - MOPAN/.env (비밀번호가 여기만 있다)
-# 업로드 원본(data/uploads)·모델·소스는 이미 Lustre라 뺀다. 보존 KEEP회분. 복구 절차: docs/superpowers/plans/2026-09-25-security-review.md §D
+# 업로드 원본(data/uploads)·모델·소스는 이미 Lustre라 뺀다. 보존 KEEP회분. 복구 절차는 저장소 밖 문서(서버의 MOPAN-private-docs/)에 있다
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"   # …/soonkun
 MOPAN="$ROOT/MOPAN"
