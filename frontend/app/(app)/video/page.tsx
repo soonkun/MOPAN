@@ -18,6 +18,7 @@ type Job = {
   note?: string;
   summary_chars?: number;
   full?: boolean;
+  thumbnail?: boolean;
   error?: string;
   finished?: string;
 };
@@ -30,7 +31,7 @@ function stateText(job: Job): string {
     case "running":
       return (job.total ? `${job.total}편 중 ${job.done}편 정리함` : "영상 목록을 가져오는 중") + (job.note ? ` · ${job.note}` : "");
     case "done":
-      return `${job.done}편 정리 완료${job.summary_chars ? ` · 요약 ${job.summary_chars}자 내외` : ""}${job.full ? " · 전체 내용 포함" : ""} · ${job.finished ?? ""}`;
+      return `${job.done}편 정리 완료${job.summary_chars ? ` · 요약 ${job.summary_chars}자 내외` : ""}${job.full ? " · 전체 내용 포함" : ""}${job.thumbnail === false ? " · 썸네일 없음" : ""} · ${job.finished ?? ""}`;
     case "failed":
       return `실패: ${job.error ?? ""}`;
     default:
@@ -47,6 +48,7 @@ export default function VideoExtractPage() {
   const [force, setForce] = useState(false);
   const [chars, setChars] = useState(500);
   const [full, setFull] = useState(false);
+  const [thumbnail, setThumbnail] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<Record<string, string>>({});
@@ -65,11 +67,11 @@ export default function VideoExtractPage() {
     return () => clearInterval(timer);
   }, [load]);
 
-  async function submit(target: string, again: boolean, length: number, whole: boolean) {
+  async function submit(target: string, again: boolean, length: number, whole: boolean, thumb: boolean) {
     setBusy(true);
     setError(null);
     try {
-      await apiFetch("/api/video/jobs", { method: "POST", body: JSON.stringify({ url: target, force: again, summary_chars: length, full: whole }) });
+      await apiFetch("/api/video/jobs", { method: "POST", body: JSON.stringify({ url: target, force: again, summary_chars: length, full: whole, thumbnail: thumb }) });
       await load();
       return true;
     } catch (e) {
@@ -99,7 +101,7 @@ export default function VideoExtractPage() {
         className="max-w-measure space-y-3"
         onSubmit={async (e) => {
           e.preventDefault();
-          if (await submit(url, force, chars, full)) setUrl("");
+          if (await submit(url, force, chars, full, thumbnail)) setUrl("");
         }}
       >
         <label htmlFor="video-url" className="block text-label font-medium text-on-surface">
@@ -133,6 +135,10 @@ export default function VideoExtractPage() {
           <button type="submit" disabled={busy || !url.trim()} className="btn-filled">
             정리 시작
           </button>
+          <label className="flex items-center gap-2 text-body text-on-surface">
+            <input type="checkbox" checked={thumbnail} onChange={(e) => setThumbnail(e.target.checked)} />
+            썸네일 포함
+          </label>
           <label className="flex items-center gap-2 text-body text-on-surface">
             <input type="checkbox" checked={full} onChange={(e) => setFull(e.target.checked)} />
             전체 내용 추출 (요약 뒤에 영상 전체 내용을 시간대별로 붙임)
@@ -215,7 +221,7 @@ export default function VideoExtractPage() {
                     {job.status === "done" && (
                       // 끝난 영상은 그 서비스에 저장돼 있어, 같은 주소·같은 길이로 다시 넣으면 실패한 것만 다시 돈다.
                       // 길이 설정이 생기기 전 작업(summary_chars 없음)은 500자였다.
-                      <button type="button" disabled={busy} onClick={() => void submit(job.url, false, job.summary_chars ?? 500, !!job.full)} className="btn-text btn-compact mt-1">
+                      <button type="button" disabled={busy} onClick={() => void submit(job.url, false, job.summary_chars ?? 500, !!job.full, job.thumbnail ?? true)} className="btn-text btn-compact mt-1">
                         실패한 영상만 다시 시도
                       </button>
                     )}

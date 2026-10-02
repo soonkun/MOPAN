@@ -55,6 +55,7 @@ async def test_jobs_carry_the_callers_id_as_owner(client, service):
     assert b'"owner":"' + me.encode() + b'"' in sent
     assert b'"summary_chars":500' in sent  # 길이를 안 보내면 기본 500자
     assert b'"full":false' in sent  # 전체 내용은 켠 사람만
+    assert b'"thumbnail":true' in sent  # 썸네일은 끈 사람만 빠진다
     too_long = await client.post("/api/video/jobs", json={"url": "https://youtu.be/abc", "summary_chars": 5000})
     assert too_long.status_code == 422 and len(service) == 2
 

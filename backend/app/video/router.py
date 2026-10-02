@@ -30,6 +30,8 @@ class NewVideoJob(BaseModel):
     summary_chars: int = Field(default=500, ge=100, le=1500)
     # 요약 뒤에 영상 전체 내용(시간대별로 교정한 자막)도 넣을지.
     full: bool = False
+    # 동영상 링크 앞에 썸네일(Word에는 그림, Markdown에는 그림 주소)을 넣을지.
+    thumbnail: bool = True
 
 
 async def _call(settings: Settings, method: str, path: str, **kwargs) -> httpx.Response:
@@ -67,6 +69,7 @@ async def add_job(
     body: NewVideoJob, user: User = Depends(get_current_user), settings: Settings = Depends(get_app_settings)
 ) -> dict:
     payload = {"url": body.url, "force": body.force, "summary_chars": body.summary_chars, "full": body.full,
+               "thumbnail": body.thumbnail,
                "owner": str(user.id)}
     return (await _call(settings, "POST", "/api/jobs", json=payload)).json()
 
