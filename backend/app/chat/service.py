@@ -63,6 +63,8 @@ async def retrieve(
     collection_ids: list[uuid.UUID] | None = None,
     document_ids: list[uuid.UUID] | None = None,
     workflow: ResolvedWorkflow = DEFAULT_WORKFLOW,
+    owner_id: uuid.UUID | None = None,
+    doc_scope: str = "shared",
 ) -> list[Evidence]:
     """The DIRECT RAG path, unchanged since Slice 1 and still the default.
 
@@ -120,6 +122,8 @@ async def retrieve(
         sparse_weight=settings.sparse_weight,
         collection_ids=scoped,
         document_ids=document_ids,
+        owner_id=owner_id,
+        doc_scope=doc_scope,
         # Neighbour expansion is opted into HERE, at the one choke point every
         # direct-RAG caller reaches - /api/chat, /api/search and the
         # orchestrator's fallback all come through this function - rather than at
@@ -192,9 +196,7 @@ async def retrieve(
             query_expansion=settings.query_expansion_count,
             # 재시도에만 다른(대개 추론) 모델을 허용한다 - 근거는 config.py의
             # query_expansion_retry_model 주석의 실측.
-            query_expansion_model=(
-                settings.query_expansion_retry_model or settings.query_expansion_model
-            ),
+            query_expansion_model=(settings.query_expansion_retry_model or settings.query_expansion_model),
         )
         log_event(
             logger,
@@ -205,9 +207,7 @@ async def retrieve(
             # Did the second pass actually rescue it, or is this question about to
             # reach the clarify branch anyway? The only number that says whether
             # the retry earns its latency in production.
-            rescued=not evidence_is_weak(
-                retried, min_rrf_score=settings.weak_evidence_rrf_score
-            ),
+            rescued=not evidence_is_weak(retried, min_rrf_score=settings.weak_evidence_rrf_score),
         )
         evidence = retried
     return evidence
@@ -288,14 +288,12 @@ def evidence_is_weak(items: list[Evidence], *, min_rrf_score: float) -> bool:
     if any(item.source_type != "rag" for item in items):
         return False
     best = max(
-        (item.metadata.get("rrf_score") or 0.0) / max(item.metadata.get("variants") or 1, 1)
-        for item in items
+        (item.metadata.get("rrf_score") or 0.0) / max(item.metadata.get("variants") or 1, 1) for item in items
     )
     if best < min_rrf_score:
         return True
     return not any(
-        item.metadata.get("candidates_corroborated") or item.metadata.get("corroborated")
-        for item in items
+        item.metadata.get("candidates_corroborated") or item.metadata.get("corroborated") for item in items
     )
 
 
@@ -313,9 +311,11 @@ def _citations_from(answer_text: str, used: list[Evidence]) -> list[dict]:
     cited = {int(marker) for marker in CITATION_MARKER.findall(answer_text)}
     citations: list[dict] = []
     for index, item in enumerate(used, start=1):
-        if index not in cited:
-            continue
         metadata = item.metadata
+        # 예외 하나: 결과 파일을 낸 도구 근거는 인용 여부와 무관하게 남긴다 - "자료 줘"의
+        # 답은 그 파일이고, 모델이 [n]을 빼먹었다고 다운로드 칩까지 사라지면 안 된다.
+        if index not in cited and not metadata.get("files"):
+            continue
         citations.append(
             {
                 "index": index,
@@ -334,6 +334,10 @@ def _citations_from(answer_text: str, used: list[Evidence]) -> list[dict]:
                 "section": metadata.get("section"),
                 "snippet": item.content[:SNIPPET_CHARS],
                 "score": item.score,
+                # 도구가 만든 파일(MCP resource_link) - 화면이 답변 밑에 다운로드 칩으로 낸다.
+                "files": metadata.get("files") or [],
+                # 웹 페이지 근거의 주소(MCP 문서 블록) - 화면이 인용 목록의 제목을 링크로 낸다.
+                "url": metadata.get("url"),
             }
         )
     return citations
@@ -677,7 +681,7 @@ async def persist_turn(
     db.add(user_message)
     assistant_message = Message(
         conversation_id=conversation.id,
-            role="assistant",
+        role="assistant",
         content=chat_answer.content,
         citations=chat_answer.citations,
         model=chat_answer.model,

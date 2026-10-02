@@ -18,6 +18,11 @@ PORT="${VLLM_PORT:-8001}"
 GPU="${VLLM_GPU:-1}"
 UTIL="${VLLM_GPU_UTIL:-0.42}"
 LOG="$ROOT/MOPAN/logs/${VLLM_LOG_NAME:-vllm}.log"
+# 모델별로 다른 것만 환경변수로 - 기본값은 gemma4. start_vllm_qwen.sh가 qwen3 파서·긴 창을 넘긴다.
+MAXLEN="${VLLM_MAX_MODEL_LEN:-16384}"
+RPARSER="${VLLM_REASONING_PARSER:-gemma4}"
+TPARSER="${VLLM_TOOL_PARSER:-gemma4}"
+MAXSEQS="${VLLM_MAX_NUM_SEQS:-64}"
 mkdir -p "$(dirname "$LOG")"
 
 if curl -s -m 3 -o /dev/null "http://127.0.0.1:$PORT/v1/models"; then
@@ -28,12 +33,12 @@ CUDA_VISIBLE_DEVICES="$GPU" HF_HUB_OFFLINE=1 VLLM_SERVER_DEV_MODE=1 VLLM_LOGGING
     --served-model-name "$NAME" \
     --host 127.0.0.1 --port "$PORT" \
     --dtype bfloat16 \
-    --max-model-len 16384 --max-num-seqs 64 \
+    --max-model-len "$MAXLEN" --max-num-seqs "$MAXSEQS" \
     --gpu-memory-utilization "$UTIL" \
     --enable-sleep-mode \
     --enable-prefix-caching \
-    --reasoning-parser gemma4 \
-    --enable-auto-tool-choice --tool-call-parser gemma4 \
+    --reasoning-parser "$RPARSER" \
+    --enable-auto-tool-choice --tool-call-parser "$TPARSER" \
     --limit-mm-per-prompt '{"image": 5}' \
     >> "$LOG" 2>&1 < /dev/null &
 echo "vllm $NAME starting (pid $!), log: $LOG"

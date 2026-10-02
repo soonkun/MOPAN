@@ -57,6 +57,7 @@ TABLES_IN_DELETE_ORDER = (
     # as a dependency order.
     "mcp_tools",
     "mcp_servers",
+    "code_profiles",
     "users",
 )
 
@@ -209,8 +210,14 @@ async def app(test_engine, test_sessionmaker, fake_redis, tmp_path_factory):
             # mcp_servers row under unrelated tests. The seeding tests in
             # tests/test_mcp.py set it deliberately.
             "bundled_mcp_seed_url": "",
+            # 같은 이유: 운영 .env의 인터넷 검색 MCP 주소를 물려받으면 첫 관리자 가입마다 시딩이 돈다.
+            "web_search_url": "",
+            "web_search_admin_token": "",
             # 같은 이유: 운영 .env의 영상 내용 추출 주소를 물려받으면 테스트가 실제 서비스에 작업을 넣는다.
             "video_extract_url": "",
+            # 운영 .env의 SMTP를 물려받으면 사용자 생성·비밀번호 초기화 테스트가 member@example.com 같은 가짜
+            # 주소로 실제 메일을 보낸다 - 스위트를 돌릴 때마다 소유자 Gmail에 반송 알림이 쌓였다(2026-10-01 실사고).
+            "smtp_host": "",
         }
     )
     application.state.settings = settings
@@ -259,3 +266,14 @@ async def clean_db(request):
     engine = request.getfixturevalue("test_engine")
     async with engine.begin() as conn:
         await conn.execute(text("TRUNCATE TABLE " + ", ".join(TABLES_IN_DELETE_ORDER) + " CASCADE"))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_mail(monkeypatch):
+    """위의 smtp_host 고정이 뚫려도(Settings()를 직접 만드는 테스트 등) 스위트는 메일을 못 보낸다."""
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("tests must not open an SMTP connection")
+
+    monkeypatch.setattr("smtplib.SMTP", refuse)
+    monkeypatch.setattr("smtplib.SMTP_SSL", refuse)

@@ -42,7 +42,15 @@ const NAV_ICON: Record<string, React.ReactNode> = {
       <path d="M14.5 7.5 16.5 9.5" />
     </>
   ),
-  // 문서 - a page with a folded corner.
+  // 문서 등록 - 종이 위로 올라가는 화살표: 내 파일을 올린다.
+  "/my-documents": (
+    <>
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" />
+      <path d="M14 3v5h5" />
+      <path d="M12 17v-6M9.5 13.5 12 11l2.5 2.5" />
+    </>
+  ),
+  // 문서 관리 - a page with a folded corner.
   "/documents": (
     <>
       <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" />
@@ -64,6 +72,21 @@ const NAV_ICON: Record<string, React.ReactNode> = {
     <>
       <rect x="3" y="5" width="18" height="14" rx="2.5" />
       <path d="m10.2 9.2 4.8 2.8-4.8 2.8Z" />
+    </>
+  ),
+  // 코워크 - 가방(업무). 자료를 넣고 결과를 들고 나간다.
+  "/cowork": (
+    <>
+      <rect x="3" y="7.5" width="18" height="12" rx="2" />
+      <path d="M9 7.5V6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1.5M3 12.5h18" />
+    </>
+  ),
+  // 코드 - 꺾쇠 한 쌍(</>), 코드가 스스로를 그리는 가장 짧은 표기.
+  "/code": (
+    <>
+      <path d="m8 7-5 5 5 5" />
+      <path d="m16 7 5 5-5 5" />
+      <path d="M13.5 5 10.5 19" />
     </>
   ),
   // 분류 관리 - a folder, which is what a collection is.
@@ -101,6 +124,14 @@ const NAV_ICON: Record<string, React.ReactNode> = {
       <rect x="3.5" y="4" width="17" height="6.5" rx="1.8" />
       <rect x="3.5" y="13.5" width="17" height="6.5" rx="1.8" />
       <path d="M7 7.2h.01M7 16.7h.01" />
+    </>
+  ),
+  // 인터넷 설정 - 지구본. 프롬프트 창의 인터넷 스위치와 같은 그림이라 둘이 한 기능임이 보인다.
+  "/internet": (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18" />
+      <path d="M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9s1.3-6.4 3.8-9Z" />
     </>
   ),
   // 고급 설정 - sliders, not a cog: these are values an admin tunes.
@@ -319,16 +350,21 @@ export default function Sidebar() {
 
   const navLinks = [
     { href: "/chat", label: "새 대화" },
-    { href: "/documents", label: "문서" },
+    // 문서 등록 - 내 개인 문서(0028). 올린 사람만 보고 검색한다. 공용 코퍼스는 관리 → 문서 관리.
+    { href: "/my-documents", label: "문서 등록" },
     // 딥 리서치 - 코퍼스를 여러 갈래로 읽고 인용한 것만 출처로 내는 보고서. 방 만들기는
     // 관리자, 실행은 모든 사용자(원본 새싹이와 같다).
     { href: "/research", label: "딥 리서치" },
     // 영상 내용 추출 - 유튜브 영상·재생목록·채널을 RAG용 문서(Word)로. 일은 soonkun/youtube_transcipt가 하고
     // 백엔드 app/video가 넘긴다. 작업은 넣은 사람에게만 보인다.
     { href: "/video", label: "영상 내용 추출" },
+    // 코워크·코드 - 같은 에이전트(OpenCode), 다른 입구. 코워크는 설치 없이 자료를 넣고 결과 파일을 받는 사람,
+    // 코드는 내 컴퓨터 폴더에서 코딩하는 사람. docs/superpowers/plans/2026-09-24-code-agent.md §3.6
+    { href: "/cowork", label: "코워크" },
+    { href: "/code", label: "코드" },
   ];
 
-  const onAdminPage = ["/collections", "/users", "/prompts", "/mcp", "/workflows", "/settings"].some((h) =>
+  const onAdminPage = ["/documents", "/collections", "/users", "/prompts", "/mcp", "/internet", "/workflows", "/settings"].some((h) =>
     pathname.startsWith(h),
   );
   const [adminOpen, setAdminOpen] = useState(false);
@@ -354,10 +390,14 @@ export default function Sidebar() {
   // every endpoint behind them answers 403 관리자 권한이 필요합니다. - so this is
   // about not offering a link that leads to a refusal, not about access.
   const adminLinks = [
+    // 공용 코퍼스 탐색기(분류·폴더·감시 폴더). 모두의 답에 들어가므로 관리자만 등록·수정한다.
+    { href: "/documents", label: "문서 관리" },
     { href: "/collections", label: "분류 관리" },
     { href: "/users", label: "사용자 관리" },
     { href: "/prompts", label: "프롬프트 관리" },
     { href: "/mcp", label: "MCP 서버 관리" },
+    // 인터넷 검색이 드나들 수 있는 사이트 목록. 검색 서버 자체는 위 MCP 화면의 "인터넷 검색" 행이다.
+    { href: "/internet", label: "인터넷 설정" },
     // After MCP on purpose: an agent is assembled out of the collections,
     // prompts and MCP tools above it, so the order follows the order the work
     // is actually done in.
@@ -689,9 +729,10 @@ export default function Sidebar() {
           // 한 겹이 버튼을 지나가는 글자와 갈라 준다. (토큰 색은 alpha 변형이
           // 없어 /80 같은 투명도 수식은 조용히 무시된다 - 쓰지 말 것.)
           // 세로 위치는 CSS 변수로 - 머리 줄이 있는 화면(워크플로우 편집기)은 그 줄의 중심에
-          // 맞춘다. 없으면 PageShell의 py-6과 같은 24px(실사고: 편집기에서 머리 줄 아래로
-          // 삐져나오며 '뒤로' 버튼과 붙어 보였다).
-          style={{ top: "var(--hamburger-top, 1.5rem)" }}
+          // 맞춘다. 없으면 왼쪽 여백(left-4)과 같은 1rem - 위·왼 여백이 같아야 모서리에
+          // 정확히 앉아 보인다(소유자 지적 2026-09-26: 위 여백이 더 많아 보였다). PageShell의
+          // 모바일 pt-4가 같은 값이라 머리 줄(min-h-10)과 세로 중심이 맞는다.
+          style={{ top: "var(--hamburger-top, 1rem)" }}
           className="icon-btn fixed left-4 z-20 bg-surface-container text-title shadow-md md:hidden"
           onClick={() => setOpen(true)}
         >

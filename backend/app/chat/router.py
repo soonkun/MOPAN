@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import time
@@ -23,7 +24,7 @@ from app.auth.dependencies import get_current_user
 from app.chat.condense import condense_followup
 from app.chat.intent import classify_intent
 from app.chat.memory import await_inflight, schedule_refresh
-from app.chat.service import ChatAnswer, answer, load_history, persist_turn, retrieve
+from app.chat.service import ChatAnswer, answer, evidence_is_weak, load_history, persist_turn, retrieve
 from app.chat.user_memory import load_user_memory, memory_lines, schedule_extract
 from app.core.config import Settings, get_app_settings
 from app.core.db import get_db_session
@@ -34,7 +35,7 @@ from app.documents.folders import documents_in_folders
 from app.documents.storage import delete_document_files
 from app.llm.base import LLMError, LLMProvider
 from app.llm.catalog import load_catalog
-from app.mcp.auto import deliberate_and_run
+from app.mcp.auto import WEB_RESEARCH_TOOL, deliberate_and_run, research_call
 from app.mcp.service import load_tool_calls, run_tool_calls, substantive
 from app.models.attachment import Attachment
 from app.models.conversation import Conversation
@@ -111,6 +112,63 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
 
 
+# 조용한 구간에 흘려보내는 SSE 주석. 프런트의 스트림 읽기는 data: 줄이 없는 프레임을 건너뛴다.
+KEEPALIVE = ": keepalive\n\n"
+KEEPALIVE_SECONDS = 10.0
+
+
+async def _heartbeat(frames: AsyncIterator[str]) -> AsyncIterator[str]:
+    """프레임 사이가 KEEPALIVE_SECONDS를 넘으면 빈 주석을 보낸다.
+
+    실사고(2026-10-01): 인터넷 조사가 50초 도는 동안 스트림이 조용했고, Next.js rewrite 프록시가 30초 무응답
+    (proxyTimeout 기본값)에서 연결을 끊었다 - 백엔드는 답을 다 만들었는데 화면에는 "답변을 끝까지 받지 못했습니다".
+    오래 걸리는 단계가 무엇이든(도구, 긴 답변 생성) 연결이 살아 있게 하는 것은 이 한 곳이다."""
+    iterator = frames.__aiter__()
+    pending: asyncio.Future = asyncio.ensure_future(iterator.__anext__())
+    try:
+        while True:
+            done, _ = await asyncio.wait({pending}, timeout=KEEPALIVE_SECONDS)
+            if not done:
+                yield KEEPALIVE
+                continue
+            try:
+                frame = pending.result()
+            except StopAsyncIteration:
+                return
+            yield frame
+            pending = asyncio.ensure_future(iterator.__anext__())
+    finally:
+        if not pending.done():
+            pending.cancel()
+
+
+async def _with_progress(run) -> AsyncIterator[tuple[str, object]]:
+    """`run(on_progress)`를 돌리며 도구가 알리는 진행 문장을 그때그때 내보낸다: ("progress", 문장)… 끝에 ("result", 값).
+
+    도구 호출은 한 번의 await이고 이 함수의 호출자는 SSE 제너레이터다 - 기다리는 동안에도 프레임을 내려면
+    호출을 태스크로 띄우고 큐로 받는 수밖에 없다."""
+    queue: asyncio.Queue[str] = asyncio.Queue()
+
+    async def on_progress(line: str) -> None:
+        queue.put_nowait(line)
+
+    task = asyncio.ensure_future(run(on_progress))
+    try:
+        while not task.done():
+            getter = asyncio.ensure_future(queue.get())
+            done, _ = await asyncio.wait({task, getter}, return_when=asyncio.FIRST_COMPLETED)
+            if getter in done:
+                yield "progress", getter.result()
+            else:
+                getter.cancel()
+        while not queue.empty():
+            yield "progress", queue.get_nowait()
+        yield "result", task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+
+
 async def _pause_frame(
     redis: Redis,
     run: WorkflowRun,
@@ -123,6 +181,7 @@ async def _pause_frame(
     model: str,
     collection_ids: list[uuid.UUID] | None,
     document_ids: list[uuid.UUID] | None = None,
+    doc_scope: str = "all",
     attachment_ids: list[uuid.UUID],
     tool_evidence: list[Evidence],
     workflow: ResolvedWorkflow,
@@ -162,6 +221,7 @@ async def _pause_frame(
             "author": run.author,
             "collection_ids": [str(c) for c in collection_ids] if collection_ids else None,
             "document_ids": [str(d) for d in document_ids] if document_ids is not None else None,
+            "doc_scope": doc_scope,
             "attachment_ids": [str(a) for a in attachment_ids],
             "graph": graph.to_raw(),
             "results": {
@@ -213,6 +273,7 @@ async def _complete(
     model: str,
     attachment_ids: list[uuid.UUID],
     document_ids: list[uuid.UUID] | None = None,
+    doc_scope: str = "all",
     workflow: ResolvedWorkflow,
     user_nickname: str | None = None,
     auto_tool_ids: list[uuid.UUID] | None = None,
@@ -283,23 +344,33 @@ async def _complete(
     current_time = now_line(client_tz, settings.default_timezone)
     auto_trace = None
     auto_ask = None
+    # 도구가 알린 진행 과정(인터넷 조사의 검색·열람 단계). 화면에 그때그때 나가고, 답변과 함께 trace에 남는다.
+    steps: list[str] = []
     if auto_tool_ids:
         yield _sse({"type": "status", "status": "calling_tool"})
         async with sessionmaker() as tool_db:
-            auto_evidence, auto_trace, auto_ask = await deliberate_and_run(
-                tool_db,
-                llm_provider,
-                settings=settings,
-                question=question,
-                auto_tool_ids=auto_tool_ids,
-                model=model,
-                workflow=workflow,
-                history=history,
-                current_time=current_time,
-                images=images,
-                scope_document_ids=document_ids,
-                summary=conversation.summary,
-            )
+            async for kind, value in _with_progress(
+                lambda on_progress: deliberate_and_run(
+                    tool_db,
+                    llm_provider,
+                    settings=settings,
+                    question=question,
+                    auto_tool_ids=auto_tool_ids,
+                    model=model,
+                    workflow=workflow,
+                    history=history,
+                    current_time=current_time,
+                    images=images,
+                    scope_document_ids=document_ids,
+                    summary=conversation.summary,
+                    on_progress=on_progress,
+                )
+            ):
+                if kind == "progress":
+                    steps.append(str(value))
+                    yield _sse({"type": "progress", "text": value})
+                else:
+                    auto_evidence, auto_trace, auto_ask = value
         evidence = evidence + auto_evidence
         # 도구 먼저, 빈손이면 RAG(소유자 결정). '근거를 냈다'의 기준은 실패·빈
         # 결과를 뺀 부분집합이다 - 실사고: 표 조회의 무일치 응답이 근거로
@@ -353,6 +424,8 @@ async def _complete(
                 settings=settings,
                 collection_ids=collection_ids,
                 document_ids=document_ids,
+                owner_id=user_id,
+                doc_scope=doc_scope,
                 # THE FALLBACK IS INSIDE THE BOUNDARY TOO. This is the path a
                 # refused or empty graph lands on, and a workflow restricted to
                 # one collection whose graph was thrown away must not answer from
@@ -362,6 +435,34 @@ async def _complete(
                 workflow=workflow,
             )
         retrieval_ms += int((time.perf_counter() - started) * 1000)
+        # 인터넷이 켜져 있는데 문서 근거가 약하면 웹 조사로 보완한다. 숙고는 문서를 보기 전의 추측이라, "문서로
+        # 답할 수 있겠다"고 pass한 질문이 막상 문서에 없을 수 있다 - 그때 "문서에 없습니다"로 끝내지 않는다.
+        # 숙고가 이미 조사 도구를 불렀다가 빈손이었으면 다시 부르지 않는다(같은 40초를 두 번 쓰지 않는다).
+        already = any(c.endswith(f"/{WEB_RESEARCH_TOOL}") for c in (auto_trace or {}).get("called", []))
+        web_call = None
+        if auto_tool_ids and not already and evidence_is_weak(plan_evidence, min_rrf_score=settings.weak_evidence_rrf_score):
+            async with sessionmaker() as tool_db:
+                web_call = await research_call(
+                    tool_db, question=question_for_retrieval, auto_tool_ids=auto_tool_ids, workflow=workflow
+                )
+        if web_call is not None:
+            yield _sse({"type": "status", "status": "researching"})
+            steps.append("등록 문서에서 근거를 충분히 찾지 못해 인터넷에서 찾습니다")
+            yield _sse({"type": "progress", "text": steps[-1]})
+            web_evidence = []
+            async for kind, value in _with_progress(
+                lambda on_progress: run_tool_calls([web_call], settings=settings, on_progress=on_progress)
+            ):
+                if kind == "progress":
+                    steps.append(str(value))
+                    yield _sse({"type": "progress", "text": value})
+                else:
+                    # 내용 없는 결과(실패·빈손)는 버린다 - 그러면 약한 문서 근거로 원래 하던 대로 답한다.
+                    web_evidence = substantive(value)
+            if web_evidence:
+                # 약하다고 판정된 문서 청크는 내려놓는다 - 무관한 근거를 같이 건네면 모델이 억지로 엮는다.
+                evidence, plan_evidence = evidence + web_evidence, []
+                auto_trace = {**(auto_trace or {}), "web_fallback": len(web_evidence)}
     if plan_trace is not None:
         plan_trace["fell_back_to_direct_rag"] = fell_back
 
@@ -396,6 +497,8 @@ async def _complete(
     # 이 이미 기록되지만, 그것이 게이트의 판정이었다는 사실은 여기만 안다.
     if intent != "search":
         chat_answer.trace["intent"] = intent
+    if steps:
+        auto_trace = {**(auto_trace or {}), "steps": steps}
     if auto_trace is not None:
         chat_answer.trace["auto_tools"] = auto_trace
     if question_for_retrieval != question:
@@ -445,6 +548,8 @@ async def _complete(
             # 화면이 "왜 인용이 없는가"를 구분할 열쇠 - smalltalk_agent 답변에는
             # 근거-없음 경고 자체가 부적용이다.
             "prompt_name": chat_answer.prompt_name,
+            # 조사 과정 - 답변 위에 접힌 채 남는다(다시 연 대화에서는 messages.trace에서 온다).
+            "steps": steps,
             # Null when no workflow answered. Carried on the frame so the answer
             # on screen says what produced it without waiting for a reload,
             # exactly as `model` is.
@@ -519,6 +624,7 @@ async def chat(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     # 폴더 범위(계획 3단계): 하위 폴더 포함 문서 집합. 빈 폴더면 빈 목록 = 근거 없음.
     document_ids = await documents_in_folders(db, payload.folder_ids) if payload.folder_ids else None
+    doc_scope = payload.doc_scope  # 소유 범위(0028): 이 사용자의 개인 문서를 넣을지
 
     # 슈퍼 에이전트 IS A PER-CONVERSATION CHOICE AND NOTHING ELSE NOW. It used to
     # be turnable on by a row - `agents.orchestrator` - which is precisely how a
@@ -683,6 +789,7 @@ async def chat(
                             model=model,
                             collection_ids=collection_ids,
                             document_ids=document_ids,
+                            doc_scope=doc_scope,
                             attachment_ids=attachment_ids,
                             tool_evidence=tool_evidence,
                             workflow=workflow,
@@ -728,6 +835,7 @@ async def chat(
                 attachment_ids=attachment_ids,
                 document_ids=document_ids,
                 workflow=workflow,
+                doc_scope=doc_scope,
                 user_nickname=user.nickname,
                 user_id=user.id,
                 user_memory=user_memory,
@@ -787,7 +895,7 @@ async def chat(
     # behaviour, unrelated to compression, that no-transform does not address.
     # Re-measure the status labels once the tunnel is actually up.
     return StreamingResponse(
-        stream(),
+        _heartbeat(stream()),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
     )
@@ -833,7 +941,10 @@ async def approve(
     stored_workflow_id = stored.get("workflow_id")
     workflow = await load_workflow(db, uuid.UUID(stored_workflow_id) if stored_workflow_id else None)
     collection_ids = [uuid.UUID(c) for c in stored.get("collection_ids") or []] or None
-    document_ids = [uuid.UUID(d) for d in stored["document_ids"]] if stored.get("document_ids") is not None else None
+    document_ids = (
+        [uuid.UUID(d) for d in stored["document_ids"]] if stored.get("document_ids") is not None else None
+    )
+    doc_scope = stored.get("doc_scope") or "all"
     attachment_ids = [uuid.UUID(a) for a in stored.get("attachment_ids") or []]
     attachments = await load_claimable(db, attachment_ids, user)
     images = await to_image_urls(attachments)
@@ -879,6 +990,9 @@ async def approve(
     user_memory = memory_lines(await load_user_memory(db, user.id)) if settings.user_memory else []
     question = stored["question"]
     model = stored["model"]
+    # 워크플로우·도구는 재개 때 다시 검증하는데 모델만 예외였다(보안 검토 2026-09-25 #12).
+    if not (await load_catalog(db, settings)).is_allowed(model):
+        raise HTTPException(status_code=400, detail="대기 중에 허용 목록에서 빠진 모델입니다. 다시 질문해 주세요.")
     tool_evidence = [evidence_from_dict(item) for item in stored.get("tool_evidence") or []]
     results = {
         node_id: [evidence_from_dict(item) for item in items]
@@ -945,6 +1059,7 @@ async def approve(
                 model=model,
                 attachment_ids=attachment_ids,
                 workflow=workflow,
+                doc_scope=doc_scope,
                 user_nickname=user.nickname,
                 user_id=user.id,
                 user_memory=user_memory,
@@ -961,7 +1076,7 @@ async def approve(
     # no-transform the Next.js rewrite proxy gzips the stream and buffers every
     # frame until the answer is finished.
     return StreamingResponse(
-        stream(),
+        _heartbeat(stream()),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
     )
@@ -989,6 +1104,8 @@ async def search(
         payload.query,
         settings=effective,
         collection_ids=payload.collection_ids,
+        owner_id=user.id,
+        doc_scope="all",
     )
     return SearchResponse(
         query=payload.query,

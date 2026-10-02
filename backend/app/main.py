@@ -62,6 +62,13 @@ async def lifespan(app: FastAPI):
         vllm_base_url=settings.vllm_base_url,
         embedding_base_url=settings.embedding_base_url,
     )
+    # 코드(코딩 에이전트): 사용자별 샌드박스 opencode 프로세스 관리자 + 내 컴퓨터 연결 레지스트리(app/code).
+    from app.code.bridge import Bridge
+    from app.code.runtime import ServerRuntime
+
+    app.state.code_runtime = ServerRuntime(settings)
+    app.state.code_bridge = Bridge()
+    app.state.code_reaper = asyncio.create_task(app.state.code_runtime.reap_forever())
     # 동봉 MCP 자동 등록. 실패해도 기동은 계속된다(seed 안에서 삼킨다).
     from app.llm.catalog import discover_local_models, discover_vllm_models, load_catalog, pin_local_models
     from app.mcp.seed import seed_bundled_servers
@@ -109,6 +116,8 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        app.state.code_reaper.cancel()
+        await app.state.code_runtime.aclose()
         if app.state.sleep_task is not None:
             app.state.sleep_task.cancel()
         await app.state.llm_provider.aclose()
@@ -181,6 +190,8 @@ def create_app() -> FastAPI:
     from app.branding.router import router as branding_router
     from app.chat.router import router as chat_router
     from app.chat.user_memory_router import router as memory_router
+    from app.code.llm_proxy import router as code_llm_router
+    from app.code.router import router as code_router
     from app.documents.folders import router as folders_router
     from app.documents.ingest_router import router as ingest_router
     from app.documents.router import router as documents_router
@@ -199,6 +210,8 @@ def create_app() -> FastAPI:
     app.include_router(branding_router)
     app.include_router(chat_router)
     app.include_router(memory_router)
+    app.include_router(code_router)
+    app.include_router(code_llm_router)
     # documents_router보다 먼저: /documents/search가 /documents/{document_id}에 UUID로 잡히지 않게.
     app.include_router(folders_router)
     app.include_router(versions_router)

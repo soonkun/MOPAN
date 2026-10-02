@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.db import make_engine, make_sessionmaker
-from app.core.logging import configure_logging
+from app.core.logging import configure_logging, log_event
 from app.core.settings_store import effective_settings
 from app.llm.openai_provider import OpenAIProvider
 from app.models.collection import Collection
@@ -182,13 +182,14 @@ async def run_research(ctx: dict, run_id: str) -> None:
         run = await db.get(ResearchRun, uuid.UUID(run_id))
         project = await db.get(ResearchProject, run.project_id) if run else None
         collection_ids = [uuid.UUID(c) for c in (project.collection_ids if project else [])]
+        owner_id = run.created_by if run else None  # 개인 문서(0028)는 실행자 것만
     # 라우팅 정보(로컬 모델 여부)를 프로바이더에 심는다 - 웹 프로세스가 아니라 여기서.
     from app.llm.catalog import load_catalog
     async with ctx["sessionmaker"]() as db:
         (await load_catalog(db, settings)).apply_to_provider(ctx["llm_provider"])
     runner = Runner(
         uuid.UUID(run_id), sessionmaker=ctx["sessionmaker"], settings=settings, llm_provider=ctx["llm_provider"],
-        retrieve=make_retriever(ctx["sessionmaker"], settings, ctx["llm_provider"], collection_ids),
+        retrieve=make_retriever(ctx["sessionmaker"], settings, ctx["llm_provider"], collection_ids, owner_id),
     )
     await runner.run()
 
@@ -210,6 +211,28 @@ async def scan_watch_dir_job(ctx: dict) -> dict:
             return await scan_watch_dir(db, settings, lambda did: enqueue_document_processing(pool, did))
     finally:
         await pool.aclose()
+
+
+async def purge_cowork_job(ctx: dict) -> dict:
+    """코워크 작업 폴더 보존 기한(CODE_COWORK_RETENTION_DAYS) 집행. 매일 03:30 KST(18:30 UTC)."""
+    import asyncio
+
+    from app.code.router import purge_cowork_tasks
+
+    settings = ctx["settings"]
+    days = settings.code_cowork_retention_days
+    removed = await asyncio.to_thread(purge_cowork_tasks, settings.code_data_dir, days)
+    log_event(logger, "cowork_purged", removed=len(removed), days=days)
+    return {"removed": removed}
+
+
+def _cowork_cron():
+    settings = get_settings()
+    if settings.code_cowork_retention_days <= 0:
+        return []
+    return [
+        cron(purge_cowork_job, name="purge_cowork", hour={18}, minute={30}, timeout=600, max_tries=1, keep_result=0),
+    ]
 
 
 def _watch_cron():
@@ -236,8 +259,11 @@ WATCH_QUEUE = "arq:watch"
 
 
 class WatchWorkerSettings:
-    functions = [func(scan_watch_dir_job, name="scan_watch_dir", timeout=1800, max_tries=1)]
-    cron_jobs = _watch_cron()
+    functions = [
+        func(scan_watch_dir_job, name="scan_watch_dir", timeout=1800, max_tries=1),
+        func(purge_cowork_job, name="purge_cowork", timeout=600, max_tries=1),
+    ]
+    cron_jobs = _watch_cron() + _cowork_cron()
     queue_name = WATCH_QUEUE
     max_jobs = 1
     keep_result = 0

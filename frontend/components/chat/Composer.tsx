@@ -60,7 +60,8 @@ export const ATTACHMENT_EXTENSIONS = [
 const ACCEPT = ATTACHMENT_EXTENSIONS.map((ext) => `.${ext}`).join(",");
 
 // 8 rows of body-lg (26px) plus the textarea's own 8px padding top and bottom.
-const MAX_HEIGHT = 8 * 26 + 16;
+// 아래 export들은 코드 탭 입력창(components/code/CodeComposer.tsx)이 같은 부품으로 같은 모양을 만들기 위한 것.
+export const MAX_HEIGHT = 8 * 26 + 16;
 
 /** Exactly one overlay is open at a time, and which one is a single value.
  *
@@ -68,6 +69,16 @@ const MAX_HEIGHT = 8 * 26 + 16;
  * bug the hand-off was written to avoid: two stacked sheets over a composer,
  * two Escapes to get out, and a scrim over a scrim. */
 type Sheet = null | "menu" | "model" | "workflow" | "mcp";
+
+export type DocScope = "all" | "shared" | "mine";
+export const DOC_SCOPE_LABEL: Record<DocScope, string> = { all: "공용 + 내 문서", shared: "공용 문서만", mine: "내 문서만" };
+const DOC_SCOPE_NEXT: Record<DocScope, DocScope> = { all: "shared", shared: "mine", mine: "all" };
+const DOCS = (
+  <>
+    <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" />
+    <path d="M14 3v5h5" />
+  </>
+);
 
 // The four-point spark. Plain currentColor, NOT the brand gradient: §2 reserves
 // that for the wordmark, the assistant sparkle and the streaming indicator.
@@ -90,7 +101,7 @@ const FLOW = (
 // The processor die. The outer rectangle is load-bearing: without it the pins
 // alone read as a snowflake, and in a menu row directly under the spark above
 // the two glyphs were telling each other apart by nothing.
-const CHIP = (
+export const CHIP = (
   <>
     <rect x="5" y="5" width="14" height="14" rx="2.5" />
     <rect x="9.5" y="9.5" width="5" height="5" rx="1" />
@@ -99,7 +110,7 @@ const CHIP = (
 );
 // 바깥 원호의 최저점이 y=24.2로 24px 뷰박스를 넘어 획 절반이 잘렸다(모바일
 // 실사고: 파일 첨부 아이콘 아래가 뭉툭). 시작 좌표만 1.2 올리면 23.0에서 끝난다.
-const CLIP = <path d="M17 7.3 9.4 14.8a2.5 2.5 0 0 0 3.6 3.6l7.1-7.1a4.5 4.5 0 0 0-6.4-6.4l-7 7a6.5 6.5 0 0 0 9.2 9.2l5.6-5.6" />;
+export const CLIP = <path d="M17 7.3 9.4 14.8a2.5 2.5 0 0 0 3.6 3.6l7.1-7.1a4.5 4.5 0 0 0-6.4-6.4l-7 7a6.5 6.5 0 0 0 9.2 9.2l5.6-5.6" />;
 // 카메라 - 모바일에서 찍어서 바로 첨부(capture 입력). 데스크톱에선 이미지
 // 파일 선택기로 열린다(capture는 무시되는 힌트라 따로 분기하지 않는다).
 const CAMERA = (
@@ -108,9 +119,17 @@ const CAMERA = (
     <circle cx="12" cy="13" r="3.2" />
   </>
 );
+// 지구본 - 인터넷 검색 스위치.
+const GLOBE = (
+  <>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M3 12h18" />
+    <path d="M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9s1.3-6.4 3.8-9Z" />
+  </>
+);
 // 마이크 - 음성으로 프롬프트 입력. 누르면 듣기 시작, 다시 누르면 받아적은
 // 문장이 입력창에 들어간다.
-const MIC = (
+export const MIC = (
   <>
     <path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z" />
     <path d="M5.5 11a6.5 6.5 0 0 0 13 0" />
@@ -128,7 +147,7 @@ const PLUG = (
 // 렌치(🔧) - 도구 설정 행. Lucide wrench: 직접 그린 것들은 안 읽혔다(소유자 지적).
 const WRENCH = <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />;
 
-function Glyph({ children, className = "h-5 w-5 shrink-0" }: { children: React.ReactNode; className?: string }) {
+export function Glyph({ children, className = "h-5 w-5 shrink-0" }: { children: React.ReactNode; className?: string }) {
   return (
     <svg
       aria-hidden="true"
@@ -151,7 +170,7 @@ function Glyph({ children, className = "h-5 w-5 shrink-0" }: { children: React.R
  * and it is the reason a menu can hold a setting at all: a control that hides
  * what it is set to is worse than no control. The chips outside the menu carry
  * the same values for the state that has to be readable WITHOUT opening it. */
-function MenuRow({
+export function MenuRow({
   icon,
   label,
   value,
@@ -197,7 +216,7 @@ function MenuRow({
  * Not decoration: it is the answer to "which model is about to answer this" and
  * "is the super agent on", and both are questions asked BEFORE sending. Pressing
  * one opens the sheet that changes it, so the menu is not the only way in. */
-function StateChip({
+export function StateChip({
   icon,
   label,
   onClick,
@@ -205,6 +224,7 @@ function StateChip({
   disabled,
   ariaLabel,
   title,
+  pressed,
 }: {
   icon: React.ReactNode;
   label: string;
@@ -213,6 +233,8 @@ function StateChip({
   disabled?: boolean;
   ariaLabel: string;
   title?: string;
+  /** 켜고 끄는 칩일 때만 준다(aria-pressed) - 시트를 여는 칩은 누름 상태가 없다. */
+  pressed?: boolean;
 }) {
   return (
     <button
@@ -223,6 +245,7 @@ function StateChip({
       onClick={onClick}
       disabled={disabled}
       aria-label={ariaLabel}
+      aria-pressed={pressed}
       title={title}
       className={`inline-flex max-w-full items-center gap-1.5 rounded-full px-3 py-1.5 text-caption transition-colors duration-150 disabled:cursor-default ${
         active
@@ -261,10 +284,14 @@ export default function Composer({
   onToolRemove,
   orchestrator,
   onOrchestratorChange,
+  docScope,
+  onDocScopeChange,
   reasoningEffort,
   onReasoningEffortChange,
   mcpServers,
   onMcpServerChange,
+  web,
+  onWebChange,
   pinnedServers,
   onServerPin,
   onServerUnpin,
@@ -315,12 +342,19 @@ export default function Composer({
    * the disabled-but-on chip that used to say so is gone with it. */
   orchestrator: boolean;
   onOrchestratorChange: (value: boolean) => void;
+  /** 문서 소유 범위(0028): all=공용+내 문서 · shared=공용만 · mine=내 문서만. 누를 때마다 다음으로. */
+  docScope: DocScope;
+  onDocScopeChange: (value: DocScope) => void;
   /** 서버 단위의 자동 사용 스위치, 클로드 데스크톱의 커넥터 토글 모양. 켜 두면
    * 상황이 맞을 때 모델이 그 서버의 도구를 알아서 쓰고, `@`로 직접 부르는
    * 길은 꺼져 있어도 열려 있다. 도구 단위가 아니라 서버 단위인 것이 요점이다 -
    * "서버를 연결하면 그 안의 기능은 다 쓰는 것"이라는 소유자의 말 그대로. */
   mcpServers: { name: string; on: boolean }[];
   onMcpServerChange: (name: string, on: boolean) => void;
+  /** 인터넷 검색 스위치. null이면 검색 서버가 등록되지 않은 배포라 칩을 그리지 않는다. 다른 상태 칩과 달리
+   * 꺼져 있어도 보인다 - 이 칩이 곧 켜고 끄는 자리다(소유자 지시: 프롬프트 창에서 연결/해제). */
+  web: boolean | null;
+  onWebChange: (value: boolean) => void;
   /** @로 이번 질문에 지목한 서버들. 토글이 꺼져 있어도 자동 사용 후보에
    * 들어가고, 전송과 함께 비워진다(첨부·도구 칩과 같은 수명). */
   pinnedServers: string[];
@@ -839,6 +873,21 @@ export default function Composer({
               줄로. 좁은 화면에서 칩이 많으면 가로 스크롤. 모델 칩은 고를 수
               있는 모델이 둘 이상일 때만 - 하나뿐이면 물을 것이 없다. */}
           <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto">
+            {web !== null && (
+              <StateChip
+                icon={GLOBE}
+                label="인터넷"
+                active={web}
+                pressed={web}
+                onClick={() => onWebChange(!web)}
+                ariaLabel="인터넷 검색"
+                title={
+                  web
+                    ? "인터넷 연결됨 - 관리자가 허용한 사이트에서 찾아 답합니다. 누르면 해제합니다."
+                    : "누르면 인터넷에 연결합니다 - 관리자가 허용한 사이트에서 찾아 답합니다."
+                }
+              />
+            )}
             {models.length > 1 && currentModel && (
               <StateChip
                 icon={CHIP}
@@ -855,6 +904,16 @@ export default function Composer({
                 onClick={() => setSheet("workflow")}
                 ariaLabel={`워크플로우: ${currentWorkflow.name}`}
                 title="누르면 바꿉니다. 이 질문은 이 워크플로우의 절차로 답합니다."
+              />
+            )}
+            {docScope !== "all" && (
+              <StateChip
+                icon={DOCS}
+                label={DOC_SCOPE_LABEL[docScope]}
+                active
+                onClick={() => onDocScopeChange("all")}
+                ariaLabel={`문서 범위: ${DOC_SCOPE_LABEL[docScope]}`}
+                title="누르면 공용 + 내 문서로 되돌립니다."
               />
             )}
             {orchestrator && (
@@ -997,6 +1056,14 @@ export default function Composer({
                 onClick={() => setSheet("workflow")}
               />
             )}
+            {/* 문서 범위(0028): 공용 코퍼스와 내 개인 문서 중 어디서 찾을지. 누를 때마다 셋을 돈다. */}
+            <MenuRow
+              icon={DOCS}
+              label="문서 범위"
+              value={DOC_SCOPE_LABEL[docScope]}
+              onClick={() => onDocScopeChange(DOC_SCOPE_NEXT[docScope])}
+              title="공용 + 내 문서 → 공용 문서만 → 내 문서만 순으로 바뀝니다."
+            />
             <MenuRow
               icon={SPARK}
               label="슈퍼 에이전트"

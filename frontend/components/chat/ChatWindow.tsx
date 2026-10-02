@@ -8,8 +8,10 @@ import Composer, {
   ATTACHMENT_EXTENSIONS,
   type PendingAttachment,
 } from "@/components/chat/Composer";
+import type { DocScope } from "@/components/chat/Composer";
 import MessageBubble from "@/components/chat/MessageBubble";
 import PlanProgress from "@/components/chat/PlanProgress";
+import ResearchSteps from "@/components/chat/ResearchSteps";
 import type {
   Branding,
   User,
@@ -28,6 +30,7 @@ import type {
 const STATUS_LABEL: Record<string, string> = {
   planning: "실행 계획 세우는 중…",
   calling_tool: "도구 호출 중…",
+  researching: "인터넷에서 자료를 찾는 중…",
   searching: "문서 검색 중…",
   answering: "답변 생성 중…",
 };
@@ -65,6 +68,10 @@ const WORKFLOW_STORAGE_KEY = "mopan.workflow";
 // 후보가 된다(클로드 데스크톱의 방향). 서버 쪽 위험 필터(read 등급만)가 진짜
 // 경계라 여기 남은 낡은 이름은 해가 없다.
 const MCP_OFF_STORAGE_KEY = "mopan.mcp-servers-off";
+
+// 인터넷 검색(웹 검색 MCP)을 켰는가. 다른 MCP 서버와 반대로 기본이 꺼짐이라 켠 쪽을 기억한다 - 켜 두면 외부
+// 근거가 문서 검색을 대신할 수 있으므로(도구가 근거를 내면 RAG를 건너뛴다), 사용자가 직접 켠 때만 쓴다.
+const WEB_STORAGE_KEY = "mopan.web-search";
 
 // 추론 모델의 사고 깊이. 모델 선택과 같은 이유로 기억되고, 추론을 받지 않는
 // 모델로 바꾼 뒤 남은 값은 서버가 조용히 버리므로 낡아도 해가 없다.
@@ -133,6 +140,8 @@ export default function ChatWindow({
   const [collectionId, setCollectionId] = useState<string | null>(null);
   // 폴더 범위(계획 3단계). 분류와 함께 고르고, 분류를 풀면 함께 풀린다.
   const [folder, setFolder] = useState<{ id: string; label: string } | null>(null);
+  // 문서 소유 범위(0028). 기본은 공용 + 내 개인 문서.
+  const [docScope, setDocScope] = useState<DocScope>("all");
   // ONE pending call. Slice 2 is manual invocation - the user picks the tool -
   // so there is nothing here to plan with; the request body already takes a
   // list because Slice 3's orchestrator will send several.
@@ -146,6 +155,7 @@ export default function ChatWindow({
   const [orchestrator, setOrchestrator] = useState(false);
   // 자동 사용을 끈 MCP 서버 이름들. 여기 없는 서버는 전부 켜져 있는 것이다.
   const [mcpOff, setMcpOff] = useState<string[]>([]);
+  const [webOn, setWebOn] = useState(false);
   // @로 이번 질문에 지목한 서버들. 토글이 꺼져 있어도 자동 사용 후보에
   // 들어가고("꺼져 있어도 @면 적극 사용"), 전송과 함께 비워진다.
   const [pinnedServers, setPinnedServers] = useState<string[]>([]);
@@ -165,6 +175,8 @@ export default function ChatWindow({
   const [approval, setApproval] = useState<(ApprovalRequest & { pendingId: string }) | null>(null);
   const [dragging, setDragging] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  // 지금 만들어지는 답의 조사 과정. 답이 오면 그 메시지로 옮겨 가고 비워진다.
+  const [progress, setProgress] = useState<string[]>([]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The answer, repeated into an off-screen live region - see the markup below
@@ -295,6 +307,11 @@ export default function ChatWindow({
       // Same fallback, and here "the default" means every server ON.
     }
     try {
+      setWebOn(localStorage.getItem(WEB_STORAGE_KEY) === "true");
+    } catch {
+      // 기본값은 꺼짐이고, 이미 꺼져 있다.
+    }
+    try {
       const stored = localStorage.getItem(REASONING_STORAGE_KEY);
       if ((REASONING_EFFORTS as readonly string[]).includes(stored ?? "")) {
         setReasoningEffort(stored as ReasoningEffort);
@@ -312,13 +329,27 @@ export default function ChatWindow({
       .finally(() => setLoaded(true));
   }, [initialConversationId]);
 
+  // 히스토리 복원: 첫 질문 뒤 주소만 /chat/{id}로 바꿨으므로(위 replaceState) 그 항목으로 Back/Forward하면
+  // /chat(새 대화) 페이지가 대화 없이 마운트된다. 주소에 id가 있으면 그 대화를 연다.
+  useEffect(() => {
+    if (initialConversationId || conversationId) return;
+    const id = window.location.pathname.match(/^\/chat\/([0-9a-f-]{36})$/)?.[1];
+    if (!id) return;
+    setConversationId(id);
+    setLoaded(false);
+    apiFetch<Message[]>(`/api/conversations/${id}/messages`)
+      .then(setMessages)
+      .catch((err) => setError(errorMessage(err)))
+      .finally(() => setLoaded(true));
+  }, [initialConversationId, conversationId]);
+
   useEffect(() => {
     // §7: under `reduce` the app must be fully usable with zero animation, and
     // a CSS override cannot reach a behavior passed to scrollIntoView. The jump
     // still lands on the same element - only the tween goes.
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     bottomRef.current?.scrollIntoView({ behavior: reduce ? "auto" : "smooth" });
-  }, [messages, status]);
+  }, [messages, status, progress]);
 
   async function upload(key: string, file: File) {
     const controller = new AbortController();
@@ -440,6 +471,8 @@ export default function ChatWindow({
       await start((event) => {
           if (event.type === "status") {
             setStatus(STATUS_LABEL[event.status] ?? null);
+          } else if (event.type === "progress") {
+            setProgress((prev) => [...prev, event.text]);
           } else if (event.type === "step") {
             // Upsert: every step arrives twice, `running` then its final state.
             setSteps((prev) => {
@@ -472,9 +505,11 @@ export default function ChatWindow({
             // question. The permanent record is the 추적 dialog, which shows the
             // plan with each step's timing and result.
             setSteps([]);
+            setProgress([]);
             setMessages((prev) => [
               ...prev,
               {
+                steps: event.steps ?? [],
                 // The row id from the `done` frame, not a fabricated
                 // `assistant-${Date.now()}`: the 👍/👎 and 추적 controls call
                 // /api/messages/{id}/..., so a made-up id made both of them
@@ -503,32 +538,12 @@ export default function ChatWindow({
 
       if (!conversationId && newConversationId) {
         setConversationId(newConversationId);
-        // router.replace, and NOT window.history.replaceState. Both were
-        // measured on `next start`, same clicks, only this line differing, with
-        // POST /api/chat answered by a stubbed SSE body naming an existing
-        // conversation.
-        //
-        // router.replace costs a full document load here (performance.timeOrigin
-        // changes; /api/auth/me and /api/conversations are requested again), so
-        // the answer that just rendered is off screen until the new page's
-        // transcript fetch lands: rAF frames of the new document at 31, 53 and
-        // 63ms hold no messages and the transcript is back at 80ms, ~76ms end to
-        // end over loopback. Everything downstream is then correct - Back
-        // re-requests /api/conversations/{id}/messages and restores the
-        // conversation, Forward returns to the one clicked in the sidebar, and
-        // reload matches both.
-        //
-        // window.history.replaceState removes that reload, and the Sidebar still
-        // refetches because usePathname() still changes. It also corrupts the
-        // history entry, which is worse. Next patches replaceState to re-run its
-        // router restore with the tree it already has, so the entry keeps the
-        // /chat (new-chat) tree while its URL becomes /chat/{id}. Measured: the
-        // next sidebar click degrades to a full page load, and Back then restores
-        // that entry making NO request at all - the transcript it showed was the
-        // two messages left in memory where the conversation has four, and
-        // nothing ever refetches it. 76ms of flicker is cosmetic; a history entry
-        // whose page disagrees with its URL is not.
-        router.replace(`/chat/${newConversationId}`);
+        // 주소만 바꾼다(window.history.replaceState). router.replace는 /chat → /chat/{id} 라우트 전환이라 이
+        // 컴포넌트가 통째로 갈리고 답변이 그려진 화면이 한 번 비었다 - 소유자가 "답변 전 깜빡임"으로 지적(2026-09-27,
+        // Playwright 실측: 빈 프레임 6번, textarea 교체). Next 15.5는 native replaceState를 라우터에 통합해
+        // usePathname이 따라 바뀌므로 Sidebar의 목록 갱신은 그대로 된다. 옛 우려(이 히스토리 항목이 /chat 트리를
+        // 유지해 Back 때 빈 새 대화가 뜸)는 아래 "주소의 id를 연다" 효과가 막는다.
+        window.history.replaceState(null, "", `/chat/${newConversationId}`);
       }
     } catch (err) {
       // An abort is this component's own doing, not a failure: either the user
@@ -552,9 +567,16 @@ export default function ChatWindow({
       }
     } finally {
       setStatus(null);
+      setProgress([]);
       setSending(false);
     }
   }
+
+  // 인터넷 검색 서버 = web_research(조사) 또는 web_search 도구를 가진 서버. 이름이 아니라 도구로 알아본다 - 이름은 관리자가 바꿀 수 있다.
+  // 이 서버는 "도구 설정" 목록에서 빠지고 프롬프트 창의 인터넷 스위치가 대신 켜고 끈다.
+  const webServers = new Set(
+    tools.filter((t) => t.name === "web_research" || t.name === "web_search").map((t) => t.server_name),
+  );
 
   async function handleSend() {
     if (!input.trim() || sending) return;
@@ -575,7 +597,11 @@ export default function ChatWindow({
     // 토글이 켜진 서버 + @로 지목된 서버의 합집합. 지목은 이번 질문 한정이라
     // 전송과 함께 비워진다.
     const autoToolIds = tools
-      .filter((t) => !mcpOff.includes(t.server_name) || pinnedServers.includes(t.server_name))
+      .filter(
+        (t) =>
+          (webServers.has(t.server_name) ? webOn : !mcpOff.includes(t.server_name)) ||
+          pinnedServers.includes(t.server_name),
+      )
       .map((t) => t.id);
     const pendingId = `temp-${Date.now()}`;
     setInput("");
@@ -601,6 +627,7 @@ export default function ChatWindow({
     // run(), so the steps of a paused plan survive the approval round trip and
     // the user can still read what has already happened while deciding.
     setSteps([]);
+    setProgress([]);
     setMessages((prev) => [
       ...prev,
       {
@@ -627,6 +654,7 @@ export default function ChatWindow({
           // Korean 400 from the server before the conversation is created.
           ...(collectionId ? { collection_ids: [collectionId] } : {}),
           ...(folder ? { folder_ids: [folder.id] } : {}),
+          ...(docScope !== "all" ? { doc_scope: docScope } : {}),
           ...(calls.length
             ? { tool_calls: calls.map((c) => ({ tool_id: c.tool.id, arguments: c.arguments })) }
             : {}),
@@ -717,6 +745,16 @@ export default function ChatWindow({
       return next;
     });
     setNotice(on ? `${name} 서버를 자동으로 사용합니다.` : `${name} 서버 자동 사용을 껐습니다.`);
+  }
+
+  function chooseWeb(value: boolean) {
+    setWebOn(value);
+    setNotice(value ? "인터넷 검색을 켰습니다. 허용된 사이트에서 찾아 답합니다." : "인터넷 검색을 껐습니다.");
+    try {
+      localStorage.setItem(WEB_STORAGE_KEY, String(value));
+    } catch {
+      // 이번 세션에는 적용되고, 새로 고치면 꺼짐으로 돌아간다.
+    }
   }
 
   function chooseOrchestrator(value: boolean) {
@@ -951,6 +989,7 @@ export default function ChatWindow({
               전송 and the answer landing, and it is never focused. The sparkle
               is the streaming indicator - the one looping animation in the app
               (§7), and it exists only while `status` does. */}
+          <ResearchSteps steps={progress} live />
           <p aria-live="polite" className="flex items-center gap-4 text-body text-on-surface-variant">
             {status && (
               <span aria-hidden="true" className="sparkle sparkle-pulsing h-5 w-5 shrink-0" />
@@ -1015,12 +1054,15 @@ export default function ChatWindow({
           onToolRemove={() => setToolCall(null)}
           orchestrator={orchestrator}
           onOrchestratorChange={chooseOrchestrator}
+          docScope={docScope}
+          onDocScopeChange={setDocScope}
           reasoningEffort={reasoningEffort}
           onReasoningEffortChange={chooseReasoningEffort}
-          mcpServers={[...new Set(tools.map((t) => t.server_name))].map((name) => ({
-            name,
-            on: !mcpOff.includes(name),
-          }))}
+          mcpServers={[...new Set(tools.map((t) => t.server_name))]
+            .filter((name) => !webServers.has(name))
+            .map((name) => ({ name, on: !mcpOff.includes(name) }))}
+          web={webServers.size > 0 ? webOn : null}
+          onWebChange={chooseWeb}
           onMcpServerChange={chooseMcpServer}
           pinnedServers={pinnedServers}
           onServerPin={pinServer}

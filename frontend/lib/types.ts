@@ -23,6 +23,8 @@ export interface Branding {
 export interface ManagedUser extends User {
   is_active: boolean;
   created_at: string;
+  /** 토큰 사용량 누계(채팅+딥 리서치+코드 탭). */
+  usage: { prompt_tokens: number; completion_tokens: number };
 }
 
 /** CollectionResponse. It carries no document count - the management screen
@@ -268,6 +270,18 @@ export interface Citation {
   section: string | null;
   snippet: string;
   score: number | null;
+  // 도구가 만든 결과 파일(MCP resource_link, 예: maps의 클리핑 GeoTIFF). uri는 같은 origin
+  // 상대경로나 http(s)만 - 백엔드(app/mcp/client.py)가 걸러서 보낸다. 오래된 답변에는 없다.
+  files?: CitationFile[];
+  // 웹 페이지 근거의 주소(인터넷 검색). 있으면 인용 목록의 제목이 이 주소로 가는 링크가 된다.
+  url?: string | null;
+}
+
+export interface CitationFile {
+  uri: string;
+  name: string;
+  mime_type: string | null;
+  size_bytes: number | null;
 }
 
 /** POST /api/attachments, and the `attachments` array on a user MessageResponse.
@@ -777,6 +791,8 @@ export interface Message {
   /** 어느 저장 프롬프트가 답했는가. "smalltalk_agent"면 검색 없이 답한
    * 대화형 응답이라 근거-없음 경고를 붙이지 않는다. 과거 답변은 null. */
   prompt_name?: string | null;
+  /** 도구가 알린 진행 과정(인터넷 조사가 무엇을 검색하고 읽었는가). 없으면 빈 배열이거나 없다. */
+  steps?: string[];
   model: string | null;
   // WHICH WORKFLOW ANSWERED, and which version of it. Null on every user turn,
   // on every answer written before workflows existed, and on every answer given
@@ -799,7 +815,7 @@ export type ChatEvent =
   // slow, visible thing they asked for happening. "planning" is Slice 3's, and
   // "searching" then appears only when the plan produced no evidence and the
   // direct RAG path answered instead.
-  | { type: "status"; status: "searching" | "answering" | "calling_tool" | "planning" }
+  | { type: "status"; status: "searching" | "answering" | "calling_tool" | "planning" | "researching" }
   // One per plan step, twice: `running` when it starts, and its final state when
   // it ends. This is the "문서 검색 → 진단 → 결과 종합" the requirement asked for.
   | ({ type: "step" } & PlanStep)
@@ -807,6 +823,8 @@ export type ChatEvent =
   // and the client replies with POST /api/chat/approve.
   | ({ type: "approval_required" } & ApprovalRequest)
   | { type: "token"; text: string }
+  // 도구가 알린 진행 한 줄(인터넷 조사의 "검색 5건: …", "문서 8건 읽는 중: …"). 오는 대로 화면에 쌓인다.
+  | { type: "progress"; text: string }
   | { type: "citations"; citations: Citation[] }
   | {
       type: "done";
@@ -821,6 +839,8 @@ export type ChatEvent =
       /** 어느 저장 프롬프트가 답했는가 - "smalltalk_agent"면 근거-없음 경고를
        * 붙이지 않는다. 과거 서버의 프레임에는 없을 수 있다. */
       prompt_name?: string | null;
+      /** 조사 과정 전체 - 답변 위에 접힌 채 남는다. */
+      steps?: string[];
       // So the answer on screen can say what produced it without a reload,
       // exactly as `model` does. Null when no workflow was named.
       workflow_name: string | null;

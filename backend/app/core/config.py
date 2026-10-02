@@ -549,6 +549,14 @@ class Settings(BaseSettings):
     # Shorter than LLM_TIMEOUT_SECONDS on purpose: an MCP call sits in front of
     # the model call rather than replacing it, so its budget is additive to a
     # question the user is already waiting on.
+    # 계정 안내 메일(app/core/mail.py). 비어 있으면 메일 없이 화면에만 임시 비밀번호를 보인다.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    # 메일에 적는 접속 주소. 비어 있으면 요청의 Origin(관리자가 보고 있는 주소) - quick tunnel은 주소가 바뀐다.
+    public_url: str = ""
     mcp_timeout_seconds: float = 15.0
     # A manual turn names its own tools, so this is a bound on one request, not
     # on a planner. Slice 3's orchestrator gets its own ceiling.
@@ -558,6 +566,11 @@ class Settings(BaseSettings):
     # 컨테이너망에서만 풀리므로, 호스트에서 직접 돌리는 개발 서버가 죽은 주소를
     # 시딩하면 안 된다. 비우면 시딩이 꺼진다. app/mcp/seed.py가 소비자.
     bundled_mcp_seed_url: str = ""
+    # 인터넷 검색 MCP(soonkun/mcp_server/web)의 주소(예: http://127.0.0.1:8201). 있으면 부팅이 "인터넷 검색"
+    # 서버로 등록하고(app/mcp/seed.py), 관리자 화면이 허용 사이트 목록을 이 서버의 관리 API로 읽고 쓴다
+    # (app/mcp/router.py). 허용 목록의 경계는 그 서버가 지킨다 - 여기는 주소와 관리 토큰만 안다.
+    web_search_url: str = ""
+    web_search_admin_token: str = ""
     # 영상 내용 추출(soonkun/youtube_transcipt)의 주소(예: http://127.0.0.1:8210). 유튜브 영상을 받아 자막·음성·화면으로
     # 요약해 Word/Markdown을 만드는 별도 서비스이고, app/video/router.py가 로그인한 사용자의 요청을 그리로 넘긴다.
     # 비우면 화면은 "설정되어 있지 않습니다"로 답한다.
@@ -649,6 +662,32 @@ class Settings(BaseSettings):
     # 3 rather than larger because each level multiplies the tool-call budget's
     # worst case by the nodes at that level, and nobody has asked for deeper.
     workflow_max_depth: int = 3
+
+    # --- 코드(코딩 에이전트) - app/code. 계약: docs/superpowers/plans/2026-09-24-code-agent.md ---
+    # 서버 작업 공간(샌드박스 안 opencode)을 켤지. 꺼도 내 컴퓨터 연결과 LLM 프록시는 산다.
+    code_enabled: bool = True
+    # 사용자 홈·작업 공간·로그. 샌드박스 uid가 지나갈 수 있는 경로여야 한다(이 배포의 /NHNHOME/.../SAS는
+    # 그룹 전용이라 안 된다 - 그래서 기본값이 저장소 밖이다). 하위는 users/<uid>/{home,ws}.
+    code_data_dir: Path = Path("/var/lib/mopan-code")
+    # OpenCode 단일 실행 파일(bun 빌드, npm opencode-ai의 opencode-linux-x64/bin/opencode 복사본)과 샌드박스에
+    # /opt/node로 넣어 줄 Node(사용자 코드가 node를 쓸 수 있게 - 없으면 생략).
+    code_opencode_bin: Path = Path("/var/lib/mopan-code/bin/opencode")
+    code_node_dir: Path = Path("/var/lib/mopan-code/node20")
+    # 샌드박스 안 opencode가 모델을 부를 주소(이 백엔드 자신). 네트워크 네임스페이스를 공유하므로 127.0.0.1.
+    code_backend_url: str = "http://127.0.0.1:8010"
+    code_idle_minutes: int = 30
+    code_max_processes: int = 8
+    # 사용자마다 이 값 위로 하나씩 배정하는 리눅스 uid. /etc/passwd에 없어도 된다.
+    code_uid_base: int = 60000
+    # opencode에 알려 주는 컨텍스트 창(토큰) - vLLM이 아닌 모델(OpenAI)용. vLLM 모델은 서버의 max_model_len을 읽는다.
+    code_model_context: int = 128_000
+    # 코드 탭이 처음 고르는 모델(카탈로그에 켜져 있어야 한다). 비면 카탈로그 기본 모델.
+    # 답변 모델과 코딩 모델은 다른 것이 보통이다.
+    code_default_model: str = ""
+    # 참이면 코드 탭은 이 서버의 로컬 모델(vLLM·Ollama)만 보이고 받는다 - 코드가 OpenAI 등 외부로 나가지 않는다.
+    code_local_only: bool = True
+    # 코워크 작업 폴더(users/<uid>/cowork/<작업>)는 마지막 사용 후 이 일수가 지나면 통째로 지운다. 0=안 지움.
+    code_cowork_retention_days: int = 30
 
     @property
     def selectable_models(self) -> list[str]:

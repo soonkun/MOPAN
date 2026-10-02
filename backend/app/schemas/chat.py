@@ -32,6 +32,8 @@ class ChatRequest(BaseModel):
     collection_ids: list[uuid.UUID] | None = None
     # 폴더 범위(계획 3단계): 하위 폴더 포함 문서 집합으로 검색을 좁힌다. collection_ids와 AND.
     folder_ids: list[uuid.UUID] | None = None
+    # 문서 소유 범위(0028): all=공용+내 개인 문서 · shared=공용만 · mine=내 개인 문서만.
+    doc_scope: Literal["all", "shared", "mine"] = "all"
     # Ids from POST /api/attachments. The count ceiling is
     # MAX_ATTACHMENTS_PER_MESSAGE and is enforced in the router, not here: it is
     # operator configuration, and a Field(max_length=...) would freeze it at
@@ -170,6 +172,8 @@ class MessageResponse(BaseModel):
     # 어느 저장 프롬프트가 답했는가. smalltalk_agent면 검색 없이 답한
     # 대화형 응답이라, 화면이 근거-없음 경고를 붙이지 않는다.
     prompt_name: str | None = None
+    # 도구가 알린 진행 과정(인터넷 조사가 무엇을 검색하고 읽었는가). 답변 위에 접힌 "조사 과정"으로 보인다.
+    steps: list[str] = []
     # WHICH WORKFLOW ANSWERED, and which VERSION of it. Null on every user turn,
     # on every answer written before workflows existed, and on every answer given
     # without one - all three of which the transcript renders the same way,
