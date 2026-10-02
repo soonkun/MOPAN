@@ -558,6 +558,10 @@ class Settings(BaseSettings):
     # 컨테이너망에서만 풀리므로, 호스트에서 직접 돌리는 개발 서버가 죽은 주소를
     # 시딩하면 안 된다. 비우면 시딩이 꺼진다. app/mcp/seed.py가 소비자.
     bundled_mcp_seed_url: str = ""
+    # 영상 내용 추출(soonkun/youtube_transcipt)의 주소(예: http://127.0.0.1:8210). 유튜브 영상을 받아 자막·음성·화면으로
+    # 요약해 Word/Markdown을 만드는 별도 서비스이고, app/video/router.py가 로그인한 사용자의 요청을 그리로 넘긴다.
+    # 비우면 화면은 "설정되어 있지 않습니다"로 답한다.
+    video_extract_url: str = ""
 
     # --- Super Agent / Orchestrator (Slice 3) --------------------------------
     # OPT-IN per question, exactly the way the answer model is picked. The direct

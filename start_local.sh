@@ -11,6 +11,7 @@ DBURL=$(grep -E '^DATABASE_URL=' ../.env | cut -d= -f2-)
 # /v1/models로 vLLM을 발견하며, 그때 아직 안 떠 있었으면 관리자 화면 "모델 → 새로고침"이 다시 발견한다.
 ../scripts/start_vllm.sh
 ../scripts/start_vllm_e4b.sh
+../../youtube_transcipt/start.sh  # 영상 내용 추출(8210) - 살아 있으면 그대로 둔다. 화면은 사이드바 "영상 내용 추출"(app/video)
 # 임베딩은 GPU 0의 vLLM pooling(8003)이 낸다 - Ollama 임베딩(4 슬롯)보다 색인이 수십 배 빠르다.
 ../scripts/start_vllm_embed.sh
 DATABASE_URL="$DBURL" nohup ../.venv/bin/python -m uvicorn app.examples_mcp.main:app --host 127.0.0.1 --port 8100 >> ../logs/mcp-examples.log 2>&1 &

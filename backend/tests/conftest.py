@@ -209,6 +209,8 @@ async def app(test_engine, test_sessionmaker, fake_redis, tmp_path_factory):
             # mcp_servers row under unrelated tests. The seeding tests in
             # tests/test_mcp.py set it deliberately.
             "bundled_mcp_seed_url": "",
+            # 같은 이유: 운영 .env의 영상 내용 추출 주소를 물려받으면 테스트가 실제 서비스에 작업을 넣는다.
+            "video_extract_url": "",
         }
     )
     application.state.settings = settings

@@ -191,6 +191,7 @@ def create_app() -> FastAPI:
     from app.prompts.router import router as prompts_router
     from app.research.router import router as research_router
     from app.users.router import router as users_router
+    from app.video.router import router as video_router
     from app.workflow.router import router as workflows_router
 
     app.include_router(attachments_router)
@@ -209,6 +210,7 @@ def create_app() -> FastAPI:
     app.include_router(observability_router)
     app.include_router(prompts_router)
     app.include_router(users_router)
+    app.include_router(video_router)
     app.include_router(workflows_router)
 
     return app

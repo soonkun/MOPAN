@@ -59,6 +59,13 @@ const NAV_ICON: Record<string, React.ReactNode> = {
       <path d="M12 14.4 9.2 21M12.7 14.1 15.5 21" />
     </>
   ),
+  // 영상 내용 추출 - 재생 단추가 든 화면. 영상을 읽어 문서로 낸다.
+  "/video": (
+    <>
+      <rect x="3" y="5" width="18" height="14" rx="2.5" />
+      <path d="m10.2 9.2 4.8 2.8-4.8 2.8Z" />
+    </>
+  ),
   // 분류 관리 - a folder, which is what a collection is.
   "/collections": <path d="M3 8a2 2 0 0 1 2-2h3.2l1.8 2H19a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
   // 사용자 관리 - two people.
@@ -316,6 +323,9 @@ export default function Sidebar() {
     // 딥 리서치 - 코퍼스를 여러 갈래로 읽고 인용한 것만 출처로 내는 보고서. 방 만들기는
     // 관리자, 실행은 모든 사용자(원본 새싹이와 같다).
     { href: "/research", label: "딥 리서치" },
+    // 영상 내용 추출 - 유튜브 영상·재생목록·채널을 RAG용 문서(Word)로. 일은 soonkun/youtube_transcipt가 하고
+    // 백엔드 app/video가 넘긴다. 작업은 넣은 사람에게만 보인다.
+    { href: "/video", label: "영상 내용 추출" },
   ];
 
   const onAdminPage = ["/collections", "/users", "/prompts", "/mcp", "/workflows", "/settings"].some((h) =>
