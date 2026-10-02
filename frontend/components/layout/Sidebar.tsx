@@ -74,6 +74,13 @@ const NAV_ICON: Record<string, React.ReactNode> = {
       <path d="m10.2 9.2 4.8 2.8-4.8 2.8Z" />
     </>
   ),
+  // 음성 전사·회의록 - 마이크. 회의 녹음을 받아 적어 보고서로 낸다.
+  "/minutes": (
+    <>
+      <rect x="9" y="3" width="6" height="11" rx="3" />
+      <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3" />
+    </>
+  ),
   // 코워크 - 가방(업무). 자료를 넣고 결과를 들고 나간다.
   "/cowork": (
     <>
@@ -358,6 +365,8 @@ export default function Sidebar() {
     // 영상 내용 추출 - 유튜브 영상·재생목록·채널을 RAG용 문서(Word)로. 일은 soonkun/youtube_transcipt가 하고
     // 백엔드 app/video가 넘긴다. 작업은 넣은 사람에게만 보인다.
     { href: "/video", label: "영상 내용 추출" },
+    // 음성 전사·회의록 - 회의 녹음 → 받아 적은 글 → 회의 결과보고서(hwpx). 원본 새싹이. 백엔드 app/minutes.
+    { href: "/minutes", label: "음성 전사·회의록" },
     // 코워크·코드 - 같은 에이전트(OpenCode), 다른 입구. 코워크는 설치 없이 자료를 넣고 결과 파일을 받는 사람,
     // 코드는 내 컴퓨터 폴더에서 코딩하는 사람. docs/superpowers/plans/2026-09-24-code-agent.md §3.6
     { href: "/cowork", label: "코워크" },

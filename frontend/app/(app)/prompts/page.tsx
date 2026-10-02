@@ -22,6 +22,7 @@ const PROMPT_LABEL: Record<string, string> = {
   research_planner: "리서치 계획",
   research_gap: "리서치 격차 분석",
   research_synthesis: "리서치 보고서 종합",
+  meeting_minutes: "회의록 작성 지침",
 };
 
 // 편집기 위에 보이는 계약 안내 - 출력 형식이 코드와 약속된 프롬프트만.
@@ -32,6 +33,9 @@ const PROMPT_NOTE: Record<string, string> = {
   research_planner: 'JSON {"sub_queries": [...]} 만 출력하게 두어야 합니다. 파싱에 실패하면 원문 질문 하나로 검색합니다.',
   research_gap: 'JSON {"sub_queries": [...]} 만 출력하게 두어야 합니다. 비어 있으면 격차 분석을 마칩니다.',
   research_synthesis: "방의 지침이 있으면 그 뒤에 붙고, 인용 강제·출력 형식 규칙은 코드가 항상 덧붙입니다.",
+  meeting_minutes:
+    "음성 전사·회의록의 보고서 작성 지침입니다. 출력 형식(제목·[개요]·[주요내용]·[향후계획]·○/-/* 레이아웃)과 분량은 코드가 항상 뒤에 덧붙이고, " +
+    "글자 수(한 줄 37자·두 줄 70~72자)·꼭지 수·종결·날짜 형식은 코드가 재어 고쳐 쓰게 합니다 - 이 숫자를 바꾸려면 코드(app/minutes/draft.py)도 함께 바꿔야 합니다.",
 };
 
 const SEED_AUTHOR = "시스템";

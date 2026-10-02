@@ -12,6 +12,7 @@ from app.llm.base import ChatMessage
 
 # 별칭 필수: 이 모듈에도 PLANNER_SYSTEM_PROMPT(워크플로우 플래너 v1)가 있다. 같은 이름으로 들여오면
 # 모듈 정의가 덮어써 리서치 플래너가 워크플로우 계획(steps JSON)을 받는다(실측 2026-09-08).
+from app.minutes.prompts import GUIDE as MINUTES_GUIDE
 from app.research.prompts import GAP_SYSTEM_PROMPT as RESEARCH_GAP_PROMPT
 from app.research.prompts import PLANNER_SYSTEM_PROMPT as RESEARCH_PLANNER_PROMPT
 from app.research.prompts import SCOPE_SYSTEM_PROMPT as RESEARCH_SCOPE_PROMPT
@@ -348,6 +349,9 @@ _FALLBACK_PROMPTS = {
     "smalltalk_agent": PromptTemplate(
         name="smalltalk_agent", version="1", text=SMALLTALK_SYSTEM_PROMPT
     ),
+    # 음성 전사·회의록(app/minutes)의 작성 지침. 출력 형식(prompts.LAYOUT)은 편집 불가로 항상 뒤에 붙는다 -
+    # 그 모양을 코드가 읽어 한글 문서를 만든다.
+    "meeting_minutes": PromptTemplate(name="meeting_minutes", version="1", text=MINUTES_GUIDE),
 }
 
 _ACTIVE_PROMPT_SQL = text("SELECT version, text FROM prompts WHERE name = :name AND is_active LIMIT 1")

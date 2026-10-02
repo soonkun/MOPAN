@@ -18,7 +18,9 @@ module.exports = {
     // to keep in step - Task 24 tunnels cloudflared straight at it - but a
     // deployment that does add a reverse proxy has to raise that proxy's own body
     // limit (nginx: client_max_body_size) to match.
-    middlewareClientMaxBodySize: "64mb",
+    // 2026-10-03: 64mb → 100mb. 음성 전사(/minutes)가 회의 녹음을 올린다(화면이 95MB에서 막는다).
+    // ponytail: 100MB가 천장 - Cloudflare 터널이 한 요청 본문을 100MB까지 받는다. 더 긴 녹음이 필요해지면 나눠 올리기로.
+    middlewareClientMaxBodySize: "100mb",
     // rewrite 프록시가 백엔드 응답을 기다리는 시간(기본 30초). 도구 발견·문서 처리처럼 조용히 오래 걸리는 요청이
     // 30초에서 끊기지 않게. 채팅 스트림은 백엔드가 10초마다 보내는 keepalive가 따로 지킨다.
     proxyTimeout: 180_000,
