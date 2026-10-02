@@ -11,7 +11,6 @@ from app.attachments.service import attachment_root, get_owned_attachment, no_vi
 from app.auth.dependencies import get_current_user
 from app.core.config import Settings, get_app_settings
 from app.core.db import get_db_session
-from app.llm.catalog import load_catalog
 from app.core.logging import log_event
 from app.documents.storage import delete_document_files, save_upload_stream
 from app.documents.validation import (
@@ -22,7 +21,9 @@ from app.documents.validation import (
     UploadValidationError,
     validate_magic_bytes,
     validate_upload_metadata,
+    validate_zip_expansion,
 )
+from app.llm.catalog import load_catalog
 from app.models.attachment import Attachment
 from app.models.user import User
 from app.rag.parsers import get_parser
@@ -109,6 +110,12 @@ async def upload_attachment(
 
     attachment.storage_path = str(path)
     attachment.size_bytes = size
+    try:
+        validate_zip_expansion(extension, path)  # zip 폭탄(docx·xlsx) - 보안 검토 2026-09-25 #5
+    except UploadValidationError as exc:
+        await db.rollback()
+        await delete_document_files(root, str(attachment.id))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if kind == "document":
         parser = get_parser(extension)

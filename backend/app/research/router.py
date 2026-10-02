@@ -6,6 +6,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from anyio import to_thread
 from arq import ArqRedis
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -20,7 +21,14 @@ from app.core.config import Settings, get_app_settings
 from app.core.db import get_db_session
 from app.core.logging import log_event
 from app.documents.service import get_arq_pool
-from app.documents.validation import ALLOWED_EXTENSIONS, extension_of
+from app.documents.validation import (
+    ALLOWED_EXTENSIONS,
+    MAGIC_SNIFF_BYTES,
+    UploadValidationError,
+    extension_of,
+    validate_magic_bytes,
+    validate_zip_expansion,
+)
 from app.llm.catalog import load_catalog
 from app.models.research import (
     RESEARCH_TERMINAL,
@@ -359,8 +367,11 @@ async def _extract_attachment_text(file: UploadFile, upload_dir: Path) -> tuple[
     path = tmp_dir / f"{uuid.uuid4()}.{extension}"
     path.write_bytes(raw)
     try:
-        parsed = get_parser(extension).parse(str(path))
-    except ParseFailure as exc:
+        # 확장자만 믿지 않는다 + zip 폭탄 차단 + 파싱(OCR 수 분)은 스레드로 - 이벤트 루프를 세우지 않게(#4·#5).
+        validate_magic_bytes(extension, raw[:MAGIC_SNIFF_BYTES])
+        validate_zip_expansion(extension, path)
+        parsed = await to_thread.run_sync(get_parser(extension).parse, str(path))
+    except (ParseFailure, UploadValidationError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         path.unlink(missing_ok=True)
@@ -421,11 +432,15 @@ async def list_runs(
 ):
     await _project_or_404(db, pid)
     limit = max(1, min(limit, 100))
-    total = await db.scalar(select(func.count(ResearchRun.id)).where(ResearchRun.project_id == pid)) or 0
+    # 프롬프트·첨부는 개인 입력이다 - 관리자가 아니면 내 실행만(보안 검토 2026-09-25 #6).
+    mine = ResearchRun.project_id == pid
+    if user.role != "admin":
+        mine = mine & (ResearchRun.created_by == user.id)
+    total = await db.scalar(select(func.count(ResearchRun.id)).where(mine)) or 0
     rows = (
         await db.execute(
             select(ResearchRun, User.email).outerjoin(User, User.id == ResearchRun.created_by)
-            .where(ResearchRun.project_id == pid).order_by(ResearchRun.created_at.desc()).offset(offset).limit(limit)
+            .where(mine).order_by(ResearchRun.created_at.desc()).offset(offset).limit(limit)
         )
     ).all()
     return RunPage(total=total, items=[_run_summary(r, e) for r, e in rows])
@@ -436,7 +451,7 @@ async def get_run(rid: uuid.UUID, user: User = Depends(get_current_user), db: As
     row = (
         await db.execute(select(ResearchRun, User.email).outerjoin(User, User.id == ResearchRun.created_by).where(ResearchRun.id == rid))
     ).first()
-    if row is None:
+    if row is None or (row[0].created_by != user.id and user.role != "admin"):
         raise HTTPException(status_code=404, detail="실행을 찾을 수 없습니다.")
     return _run_response(row[0], row[1])
 
@@ -448,7 +463,7 @@ async def run_pdf(rid: uuid.UUID, user: User = Depends(get_current_user), db: As
     from app.research.pdf import PdfUnavailable, report_to_pdf
 
     run = await db.get(ResearchRun, rid)
-    if run is None or not run.report:
+    if run is None or not run.report or (run.created_by != user.id and user.role != "admin"):
         raise HTTPException(status_code=404, detail="보고서가 없습니다.")
     project = await db.get(ResearchProject, run.project_id)
     title = f"{project.name if project else '리서치'} 보고서"

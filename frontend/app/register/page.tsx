@@ -11,12 +11,18 @@ export default function RegisterPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  // 두 번 적어 오타를 막는다(소유자 지적 2026-09-27). 서버는 한 값만 받으므로 검사는 여기서.
+  const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    if (password !== confirm) {
+      setError("비밀번호가 서로 다릅니다. 같은 값을 두 번 입력해 주세요.");
+      return;
+    }
     setLoading(true);
     try {
       await apiFetch<User>("/api/auth/register", {
@@ -78,6 +84,26 @@ export default function RegisterPage() {
             onChange={(e) => setPassword(e.target.value)}
             className="field w-full"
           />
+        </div>
+        <div>
+          <label htmlFor="password-confirm" className="sr-only">
+            비밀번호 확인
+          </label>
+          <input
+            id="password-confirm"
+            type="password"
+            required
+            maxLength={72}
+            autoComplete="new-password"
+            placeholder="비밀번호 확인 (한 번 더)"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            aria-invalid={confirm.length > 0 && confirm !== password}
+            className={`field w-full ${confirm.length > 0 && confirm !== password ? "border-error" : ""}`}
+          />
+          {confirm.length > 0 && confirm !== password && (
+            <p className="mt-1 text-caption text-error">비밀번호가 서로 다릅니다.</p>
+          )}
         </div>
         <ErrorBanner message={error} />
         <button

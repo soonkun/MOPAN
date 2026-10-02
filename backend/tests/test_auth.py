@@ -81,7 +81,7 @@ async def test_duplicate_registration_does_not_confirm_the_account_exists(client
         "/api/auth/register", json={"email": "c@example.com", "password": "pw123456"}
     )
     assert duplicate.status_code == 400
-    assert duplicate.json()["detail"] == "회원가입을 완료하지 못했습니다."
+    assert duplicate.json()["detail"] == "회원가입을 완료하지 못했습니다. 이미 가입한 이메일이라면 로그인 화면에서 로그인해 주세요."
 
 
 async def test_short_password_is_rejected(client):
@@ -251,7 +251,8 @@ async def test_list_users_returns_the_admin_fields_sorted_by_created_at(admin_cl
     assert body[0]["role"] == "admin"
     assert body[1]["role"] == "user"
     assert all(u["is_active"] is True for u in body)
-    assert set(body[0]) == {"id", "email", "role", "nickname", "is_active", "created_at"}
+    assert set(body[0]) == {"id", "email", "role", "nickname", "is_active", "created_at", "usage"}
+    assert body[0]["usage"] == {"prompt_tokens": 0, "completion_tokens": 0}
 
 
 async def test_user_management_is_admin_only(member_client, admin_client):

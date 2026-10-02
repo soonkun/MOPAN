@@ -8,23 +8,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import SESSION_COOKIE_NAME, get_current_user
 from app.auth.service import AuthError, authenticate_user, register_user
-from app.core.security import hash_password, verify_password
 from app.core.config import Settings, get_app_settings
 from app.core.db import get_db_session
 from app.core.redis import get_redis
-from app.core.security import create_session, delete_session
+from app.core.security import (
+    create_session,
+    delete_session,
+    hash_password,
+    revoke_user_sessions,
+    verify_password,
+)
 from app.models.conversation import Conversation
 from app.models.user import User
 from app.schemas.auth import (
     DeleteAccountRequest,
-    PasswordChangeRequest,
     LoginRequest,
+    PasswordChangeRequest,
     ProfileUpdateRequest,
     RegisterRequest,
     UserResponse,
 )
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+LOGIN_MAX_ATTEMPTS = 10
+LOGIN_LOCK_SECONDS = 900
 
 
 @router.post("/register", response_model=UserResponse)
@@ -47,10 +55,18 @@ async def login(
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_app_settings),
 ):
+    # 시도 제한(보안 검토 2026-09-25 #2): 공개 주소 + 이메일이 곧 아이디라 크리덴셜 스터핑을 늦춘다. 계정 기준 15분에 10회.
+    # IP 기준은 Next 프록시가 클라이언트 주소를 넘기지 않아 아직 못 쓴다.
+    attempts_key = f"login-fail:{payload.email.strip().lower()}"
+    if int(await redis.get(attempts_key) or 0) >= LOGIN_MAX_ATTEMPTS:
+        raise HTTPException(status_code=429, detail="로그인 시도가 너무 많습니다. 15분 뒤에 다시 시도해 주세요.")
     try:
         user = await authenticate_user(db, payload.email, payload.password)
     except AuthError as exc:
+        await redis.incr(attempts_key)
+        await redis.expire(attempts_key, LOGIN_LOCK_SECONDS)
         raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 올바르지 않습니다.") from exc
+    await redis.delete(attempts_key)
 
     session_id = await create_session(redis, str(user.id), settings.session_ttl_seconds)
     response.set_cookie(
@@ -110,13 +126,18 @@ async def change_password(
     payload: PasswordChangeRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
 ):
     """본인 비밀번호 변경. 새 비밀번호의 규칙(길이·바이트 한도)은 가입과 같은
-    스키마가 지킨다 - 두 벌의 규칙은 반드시 어긋난다."""
+    스키마가 지킨다 - 두 벌의 규칙은 반드시 어긋난다.
+
+    바꾸면 이 계정의 세션을 전부 끊는다(지금 것 포함) - 비밀번호를 바꾸는 이유가 대개 "누가 내 세션을
+    쓰는 것 같다"인데, 끊지 않으면 탈취된 세션이 TTL(24h)까지 산다(보안 검토 2026-09-25 #8)."""
     if not verify_password(payload.current_password, user.password_hash):
         raise HTTPException(status_code=403, detail="현재 비밀번호가 올바르지 않습니다.")
     user.password_hash = hash_password(payload.new_password)
     await db.commit()
+    await revoke_user_sessions(redis, str(user.id))
 
 
 @router.delete("/me", status_code=204)

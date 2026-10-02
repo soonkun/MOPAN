@@ -28,9 +28,10 @@ export default function UsersPage() {
   const [rowError, setRowError] = useState<{ id: string; message: string } | null>(null);
   const [deactivateTarget, setDeactivateTarget] = useState<ManagedUser | null>(null);
   const [resetTarget, setResetTarget] = useState<ManagedUser | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ManagedUser | null>(null);
   // 방금 발급된 임시 비밀번호. 응답에 딱 한 번 실리는 값이라(서버엔 해시만
   // 남는다) 관리자가 옮겨 적을 때까지 행 밑에 붙여 둔다.
-  const [tempPassword, setTempPassword] = useState<{ id: string; value: string } | null>(null);
+  const [tempPassword, setTempPassword] = useState<{ id: string; value: string; mailed?: boolean; email?: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [query, setQuery] = useState("");
   // 사용자 추가 - 공개 배포에서 자가가입을 꺼 두면 계정이 생기는 유일한 길.
@@ -89,12 +90,12 @@ export default function UsersPage() {
     setAdding(true);
     setAddError(null);
     try {
-      const created = await apiFetch<ManagedUser & { temporary_password: string }>(
+      const created = await apiFetch<ManagedUser & { temporary_password: string; mail_sent?: boolean }>(
         "/api/users",
         { method: "POST", body: JSON.stringify({ email: newEmail, role: newRole }) },
       );
       setCopied(false);
-      setTempPassword({ id: created.id, value: created.temporary_password });
+      setTempPassword({ id: created.id, value: created.temporary_password, mailed: created.mail_sent === true, email: created.email });
       setNewEmail("");
       setNewRole("user");
       setAddOpen(false);
@@ -194,6 +195,7 @@ export default function UsersPage() {
                 <th scope="col" className="px-3 py-3">권한</th>
                 <th scope="col" className="px-3 py-3">상태</th>
                 <th scope="col" className="px-3 py-3">가입일</th>
+                <th scope="col" className="px-3 py-3">토큰 사용량</th>
                 <th scope="col" className="px-3 py-3">관리</th>
               </tr>
             </thead>
@@ -237,6 +239,10 @@ export default function UsersPage() {
                   <td className="px-3 py-3 text-on-surface-variant">
                     {new Date(u.created_at).toLocaleDateString()}
                   </td>
+                  <td className="px-3 py-3 text-on-surface-variant" title={`입력 ${u.usage.prompt_tokens.toLocaleString()} · 출력 ${u.usage.completion_tokens.toLocaleString()}`}>
+                    {/* 합계 하나면 비교가 되고, 입력/출력은 마우스를 올리면 보인다. 채팅·딥 리서치·코드 탭 합. */}
+                    {(u.usage.prompt_tokens + u.usage.completion_tokens).toLocaleString()}
+                  </td>
                   <td className="px-3 py-3">
                     {/* 자기 행에는 없다 - 서버도 409로 거절하고, 자기 것은 계정
                         설정이 정도다. */}
@@ -277,6 +283,19 @@ export default function UsersPage() {
                         활성화
                       </button>
                     )}
+                    {/* 삭제는 비활성 계정에만 - 활성 계정을 지우는 실수를 한 단계 늦춘다(먼저 비활성화, 그 다음 삭제). */}
+                    {!u.is_active && me?.id !== u.id && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRowError(null);
+                          setDeleteTarget(u);
+                        }}
+                        className="btn-danger btn-compact ml-2"
+                      >
+                        삭제
+                      </button>
+                    )}
                     {rowError?.id === u.id && (
                       <div className="mt-2 max-w-sm">
                         <ErrorBanner message={rowError.message} />
@@ -285,8 +304,9 @@ export default function UsersPage() {
                     {tempPassword?.id === u.id && (
                       <div className="mt-2 max-w-sm rounded-md bg-surface-container p-3">
                         <p className="text-caption text-on-surface-variant">
-                          임시 비밀번호입니다. 지금만 보이니 전달하고, 로그인 후 계정
-                          설정에서 바로 바꾸도록 안내해 주세요.
+                          {tempPassword.mailed
+                            ? `접속 주소와 임시 비밀번호를 ${tempPassword.email ?? u.email} 로 보냈습니다. 여기 값은 메일이 닿지 않을 때 직접 전달용이며 지금만 보입니다.`
+                            : "메일을 보내지 못했습니다(SMTP 설정 또는 발송 실패). 임시 비밀번호는 지금만 보이니 직접 전달하고, 로그인 후 계정 설정에서 바로 바꾸도록 안내해 주세요."}
                         </p>
                         <div className="mt-2 flex items-center gap-2">
                           <code className="rounded-sm bg-surface-container-high px-2 py-1 text-body">
@@ -328,12 +348,25 @@ export default function UsersPage() {
           confirmLabel="재설정"
           onClose={() => setResetTarget(null)}
           onConfirm={async () => {
-            const created = await apiFetch<{ temporary_password: string }>(
+            const created = await apiFetch<{ temporary_password: string; mail_sent?: boolean }>(
               `/api/users/${resetTarget.id}/password`,
               { method: "POST" },
             );
             setCopied(false);
-            setTempPassword({ id: resetTarget.id, value: created.temporary_password });
+            setTempPassword({ id: resetTarget.id, value: created.temporary_password, mailed: created.mail_sent === true });
+          }}
+        />
+      )}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          title="사용자 삭제"
+          message={`${deleteTarget.email} 계정을 완전히 삭제할까요? 대화·첨부·개인 문서·기억이 함께 지워지며 되돌릴 수 없습니다. 이 사용자가 올린 공용 문서·워크플로우가 있으면 삭제되지 않습니다.`}
+          confirmLabel="삭제"
+          onClose={() => setDeleteTarget(null)}
+          onConfirm={async () => {
+            await apiFetch(`/api/users/${deleteTarget.id}`, { method: "DELETE" });
+            setUsers((prev) => (prev ?? []).filter((x) => x.id !== deleteTarget.id));
           }}
         />
       )}

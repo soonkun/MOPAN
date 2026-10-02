@@ -30,7 +30,9 @@ async def register_user(db: AsyncSession, settings: Settings, email: str, passwo
     # whoever POSTs first - so there the admin must come from scripts/create_admin.py.
     is_first_user = user_count == 0 and settings.environment != "production"
     if not is_first_user and not settings.allow_self_registration:
-        raise AuthError("회원가입이 비활성화되어 있습니다.")
+        raise AuthError(
+            "회원가입이 닫혀 있습니다. 관리자에게 계정을 요청해 주세요(관리 → 사용자 → 사용자 추가)."
+        )
 
     existing = await db.scalar(select(User).where(User.email == email))
     if existing is not None:
@@ -38,8 +40,10 @@ async def register_user(db: AsyncSession, settings: Settings, email: str, passwo
         # enumeration oracle to anyone who can POST a guess. It is deliberately
         # NOT the disabled-registration message above either - that one names a
         # real, checkable cause, and reusing it here would name a false one.
+        # 실사고 2026-09-28: 이미 가입한 사람이 다시 가입하다 이 문구를 "가입이 막혔다"로 읽었다. 로그인으로 안내하는 꼬리는
+        # 존재 여부를 새로 말하지 않는다(모든 실패에 붙는 일반 안내).
         log_event(logger, "register_duplicate_email")
-        raise AuthError("회원가입을 완료하지 못했습니다.")
+        raise AuthError("회원가입을 완료하지 못했습니다. 이미 가입한 이메일이라면 로그인 화면에서 로그인해 주세요.")
 
     user = User(
         email=email,

@@ -119,3 +119,23 @@ def validate_magic_bytes(extension: str, head: bytes) -> None:
     if guess is None or guess.mime not in expected:
         actual = guess.mime if guess else "알 수 없음"
         raise UploadValidationError(f"파일 내용({actual})이 .{extension} 확장자와 맞지 않습니다.")
+
+
+# docx·xlsx는 zip이다. 상한(10~50MB)은 압축 후 크기라 deflate 최대 ~1000:1로 수 GB XML이 될 수 있다(zip 폭탄).
+# 저장된 파일을 열어 풀린 크기 합을 본다 - 파서가 메모리에 올리기 전에.
+ZIP_EXTENSIONS = {"docx", "xlsx"}
+MAX_ZIP_EXPANDED_BYTES = 200 * 1024 * 1024
+
+
+def validate_zip_expansion(extension: str, path) -> None:
+    if extension not in ZIP_EXTENSIONS:
+        return
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path) as zf:
+            total = sum(i.file_size for i in zf.infolist())
+    except zipfile.BadZipFile as exc:
+        raise UploadValidationError("손상된 문서 파일입니다.") from exc
+    if total > MAX_ZIP_EXPANDED_BYTES:
+        raise UploadValidationError("문서 안의 내용이 너무 큽니다(압축 해제 200MB 초과).")

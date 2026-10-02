@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiFetch, errorMessage, safeNextPath } from "@/lib/api";
@@ -13,6 +13,11 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // 계정 안내 메일의 버튼(login?email=…)으로 들어오면 이메일을 미리 채운다 - 임시 비밀번호만 넣으면 된다.
+  useEffect(() => {
+    const preset = new URLSearchParams(window.location.search).get("email");
+    if (preset) setEmail(preset);
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();

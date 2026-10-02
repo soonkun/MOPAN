@@ -80,6 +80,8 @@ class AdminUserResponse(UserResponse):
 
     is_active: bool
     created_at: datetime
+    # 토큰 사용량 누계 {prompt_tokens, completion_tokens} - 목록(GET /api/users)만 채운다. 생성·수정 응답은 0.
+    usage: dict[str, int] = Field(default_factory=lambda: {"prompt_tokens": 0, "completion_tokens": 0})
 
 
 class AdminUserCreateRequest(BaseModel):
@@ -98,9 +100,11 @@ class AdminUserCreateRequest(BaseModel):
 
 
 class AdminUserCreateResponse(AdminUserResponse):
-    """생성된 계정 + 임시 비밀번호. 임시값은 여기 한 번 실리고 끝이다."""
+    """생성된 계정 + 임시 비밀번호. 임시값은 여기 한 번 실리고 끝이다. mail_sent는 그 값을 담은
+    안내 메일이 그 주소로 나갔는지 - 실패면 화면이 직접 전달을 부탁한다."""
 
     temporary_password: str
+    mail_sent: bool = False
 
 
 class AdminPasswordResetResponse(BaseModel):
@@ -108,6 +112,7 @@ class AdminPasswordResetResponse(BaseModel):
     끝이다 - 서버에는 해시만 남아 다시 보여줄 수 없다."""
 
     temporary_password: str
+    mail_sent: bool = False
 
 
 class UserUpdate(BaseModel):
