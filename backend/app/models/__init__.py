@@ -3,6 +3,7 @@ from app.models.attachment import ATTACHMENT_KINDS, Attachment
 from app.models.base import Base
 from app.models.branding import Branding
 from app.models.chunk import EMBEDDING_DIM, Chunk
+from app.models.code import CodeProfile
 from app.models.chunk_edge import EDGE_KINDS, ChunkEdge
 from app.models.collection import Collection
 from app.models.conversation import Conversation
@@ -42,6 +43,7 @@ __all__ = [
     "USER_MEMORY_CHARS",
     "UserMemory",
     "IngestFile",
+    "CodeProfile",
     "Folder",
     "ResearchProject",
     "ResearchInstruction",
