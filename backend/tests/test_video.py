@@ -25,7 +25,9 @@ async def service(app, client, monkeypatch):
         return httpx.Response(200, content=b"docx", headers={"content-type": "application/x-test"})
 
     monkeypatch.setattr(video, "transport", httpx.MockTransport(handler))
-    app.state.settings = app.state.settings.model_copy(update={"video_extract_url": "http://video.test"})
+    app.state.settings = app.state.settings.model_copy(
+        update={"video_extract_url": "http://video.test", "video_extract_token": "tok-from-service"}
+    )
     await client.post("/api/auth/register", json={"email": "boss@example.com", "password": "pw123456"})
     await client.post("/api/auth/login", json={"email": "boss@example.com", "password": "pw123456"})
     return seen
@@ -48,9 +50,11 @@ async def test_jobs_carry_the_callers_id_as_owner(client, service):
     await client.post("/api/video/jobs", json={"url": "https://youtu.be/abc", "force": False})
     listed, posted = service
     assert listed.url.params["owner"] == me
+    assert listed.headers["x-owner-token"] == posted.headers["x-owner-token"] == "tok-from-service"
     sent = posted.content.replace(b": ", b":")
     assert b'"owner":"' + me.encode() + b'"' in sent
     assert b'"summary_chars":500' in sent  # 길이를 안 보내면 기본 500자
+    assert b'"full":false' in sent  # 전체 내용은 켠 사람만
     too_long = await client.post("/api/video/jobs", json={"url": "https://youtu.be/abc", "summary_chars": 5000})
     assert too_long.status_code == 422 and len(service) == 2
 

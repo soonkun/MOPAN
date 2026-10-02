@@ -28,13 +28,19 @@ class NewVideoJob(BaseModel):
     force: bool = False
     # 요약을 몇 자 내외로 쓸지. 범위는 그 서비스의 것과 같다(yt2doc.CHARS_MIN/MAX).
     summary_chars: int = Field(default=500, ge=100, le=1500)
+    # 요약 뒤에 영상 전체 내용(시간대별로 교정한 자막)도 넣을지.
+    full: bool = False
 
 
 async def _call(settings: Settings, method: str, path: str, **kwargs) -> httpx.Response:
     if not settings.video_extract_url:
         raise HTTPException(status_code=503, detail="영상 내용 추출이 이 서버에 설정되어 있지 않습니다.")
     try:
-        async with httpx.AsyncClient(base_url=settings.video_extract_url, timeout=30.0, transport=transport) as client:
+        # owner를 붙여 부를 자격 증명. 그 서비스는 이 값 없이 온 owner 요청을 403으로 거절한다.
+        headers = {"X-Owner-Token": settings.video_extract_token}
+        async with httpx.AsyncClient(
+            base_url=settings.video_extract_url, timeout=30.0, transport=transport, headers=headers
+        ) as client:
             response = await client.request(method, path, **kwargs)
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=503, detail=UNAVAILABLE) from exc
@@ -60,7 +66,8 @@ async def list_jobs(
 async def add_job(
     body: NewVideoJob, user: User = Depends(get_current_user), settings: Settings = Depends(get_app_settings)
 ) -> dict:
-    payload = {"url": body.url, "force": body.force, "summary_chars": body.summary_chars, "owner": str(user.id)}
+    payload = {"url": body.url, "force": body.force, "summary_chars": body.summary_chars, "full": body.full,
+               "owner": str(user.id)}
     return (await _call(settings, "POST", "/api/jobs", json=payload)).json()
 
 

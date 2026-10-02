@@ -215,6 +215,7 @@ async def app(test_engine, test_sessionmaker, fake_redis, tmp_path_factory):
             "web_search_admin_token": "",
             # 같은 이유: 운영 .env의 영상 내용 추출 주소를 물려받으면 테스트가 실제 서비스에 작업을 넣는다.
             "video_extract_url": "",
+            "video_extract_token": "",
             # 운영 .env의 SMTP를 물려받으면 사용자 생성·비밀번호 초기화 테스트가 member@example.com 같은 가짜
             # 주소로 실제 메일을 보낸다 - 스위트를 돌릴 때마다 소유자 Gmail에 반송 알림이 쌓였다(2026-10-01 실사고).
             "smtp_host": "",

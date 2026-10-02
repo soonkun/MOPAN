@@ -575,6 +575,9 @@ class Settings(BaseSettings):
     # 요약해 Word/Markdown을 만드는 별도 서비스이고, app/video/router.py가 로그인한 사용자의 요청을 그리로 넘긴다.
     # 비우면 화면은 "설정되어 있지 않습니다"로 답한다.
     video_extract_url: str = ""
+    # 그 서비스가 처음 뜰 때 만든 값(youtube_transcipt/data/owner_token). 백엔드가 사용자 id(owner)를 붙여 부를 때
+    # 헤더로 보낸다 - 없거나 다르면 그 서비스가 403으로 거절해 화면에 작업 목록이 뜨지 않는다.
+    video_extract_token: str = ""
 
     # --- Super Agent / Orchestrator (Slice 3) --------------------------------
     # OPT-IN per question, exactly the way the answer model is picked. The direct
