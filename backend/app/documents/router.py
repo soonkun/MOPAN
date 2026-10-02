@@ -12,7 +12,7 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.authorization import get_readable_document
+from app.auth.authorization import can_manage_document, get_readable_document
 from app.auth.dependencies import get_current_user, require_admin
 from app.core.config import Settings, get_app_settings
 from app.core.db import get_db_session
@@ -25,14 +25,15 @@ from app.documents.validation import (
     UploadValidationError,
     validate_magic_bytes,
     validate_upload_metadata,
+    validate_zip_expansion,
 )
+from app.llm.base import LLMProvider
 from app.models.chunk import Chunk
 from app.models.collection import Collection
-from app.models.document import Document
+from app.models.document import Document, owner_visible
 from app.models.folder import Folder
 from app.models.user import User
 from app.schemas.collection import CollectionCreate, CollectionResponse, CollectionUpdate
-from app.llm.base import LLMProvider
 from app.schemas.document import (
     ChunkListResponse,
     ChunkResponse,
@@ -51,7 +52,30 @@ COLLECTION_NOT_FOUND_MESSAGE = "분류를 찾을 수 없습니다."
 DUPLICATE_COLLECTION_MESSAGE = "같은 이름의 분류가 이미 있습니다. 다른 이름을 입력해 주세요."
 
 
-def _document_list_query():
+PERSONAL_COLLECTION = "개인 문서"
+PERSONAL_MAX_DOCS = 200
+PERSONAL_MAX_BYTES = 2 * 1024**3
+
+
+async def personal_collection(db: AsyncSession, user: User) -> Collection:
+    """개인 문서가 들어가는 분류 하나(없으면 만든다).
+
+    청킹은 배포 기본값 - documents.collection_id는 NOT NULL이라 분류가 있어야 하고, 개인 문서는 소유자 열이
+    격리하므로 분류로 나눌 이유가 없다."""
+    coll = await db.scalar(select(Collection).where(Collection.name == PERSONAL_COLLECTION))
+    if coll is None:
+        coll = Collection(
+            name=PERSONAL_COLLECTION,
+            description="사용자가 직접 등록한 개인 문서 - 올린 사람만 보고 검색합니다.",
+            chunking={},
+            created_by=user.id,
+        )
+        db.add(coll)
+        await db.flush()
+    return coll
+
+
+def _document_list_query(user: User | None = None):
     # chunk_count via a correlated subquery, not one extra SELECT per row.
     chunk_count = (
         select(func.count(Chunk.id))
@@ -59,11 +83,13 @@ def _document_list_query():
         .correlate(Document)
         .scalar_subquery()
     )
-    return (
+    query = (
         select(Document, Collection.name, User.email, chunk_count)
         .join(Collection, Collection.id == Document.collection_id)
         .join(User, User.id == Document.uploaded_by)
     )
+    # 공용 + 내 개인 문서만. 남의 개인 문서는 목록에도, id로 찾아도 없다(0028).
+    return query.where(owner_visible(user.id)) if user is not None else query
 
 
 def _to_response(document, collection_name, uploader_email, chunk_count) -> DocumentResponse:
@@ -185,23 +211,52 @@ async def delete_collection(
 
 @router.post("/documents", response_model=DocumentResponse, status_code=202)
 async def upload_document(
-    collection_id: uuid.UUID = Form(...),
     file: UploadFile = File(...),
+    # 공용 문서(관리자)의 분류. 개인 문서는 무시하고 '개인 문서' 분류에 넣는다.
+    collection_id: uuid.UUID | None = Form(default=None),
     folder_id: uuid.UUID | None = Form(default=None),
     # 같은 내용의 파일이 이미 있어도 올린다(참조용 사본). 기본은 409로 묻는다(0021).
     force: bool = Form(default=False),
-    admin: User = Depends(require_admin),
+    # shared=공용(관리자만) · mine=개인(누구나, 본인만 봄) · 비면 관리자는 공용, 그 외는 개인.
+    scope: str = Form(default=""),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_app_settings),
     arq_pool: ArqRedis = Depends(get_arq_pool),
 ):
-    collection = await db.get(Collection, collection_id)
-    if collection is None:
-        raise HTTPException(status_code=404, detail=COLLECTION_NOT_FOUND_MESSAGE)
-    if folder_id is not None:
-        folder = await db.get(Folder, folder_id)
-        if folder is None or folder.collection_id != collection_id:
-            raise HTTPException(status_code=400, detail="그 분류에 없는 폴더입니다.")
+    personal = scope == "mine" or (scope != "shared" and user.role != "admin")
+    if not personal and user.role != "admin":
+        # 공용 코퍼스는 누구의 답에나 들어간다 - 올릴 수 있으면 남의 답을 오염시킬 수 있다.
+        raise HTTPException(
+            status_code=403, detail="공용 문서는 관리자만 등록할 수 있습니다."
+        )
+    owner_id: uuid.UUID | None = user.id if personal else None
+    if personal:
+        # 개인 문서 상한(보안 검토 2026-09-25 #9): 계정 하나가 디스크·워커 큐를 독점하지 못하게.
+        count, total = (
+            await db.execute(
+                select(func.count(Document.id), func.coalesce(func.sum(Document.size_bytes), 0)).where(
+                    Document.owner_id == user.id
+                )
+            )
+        ).one()
+        if count >= PERSONAL_MAX_DOCS or total >= PERSONAL_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"개인 문서는 {PERSONAL_MAX_DOCS}개·{PERSONAL_MAX_BYTES // (1024**3)}GB까지입니다. 지우고 올려 주세요.",
+            )
+        collection = await personal_collection(db, user)
+        collection_id, folder_id = collection.id, None
+    else:
+        if collection_id is None:
+            raise HTTPException(status_code=400, detail="올릴 분류를 골라 주세요.")
+        collection = await db.get(Collection, collection_id)
+        if collection is None:
+            raise HTTPException(status_code=404, detail=COLLECTION_NOT_FOUND_MESSAGE)
+        if folder_id is not None:
+            folder = await db.get(Folder, folder_id)
+            if folder is None or folder.collection_id != collection_id:
+                raise HTTPException(status_code=400, detail="그 분류에 없는 폴더입니다.")
 
     filename = (file.filename or "").strip()
     try:
@@ -228,7 +283,8 @@ async def upload_document(
         size_bytes=0,
         storage_path="",
         status="uploaded",
-        uploaded_by=admin.id,
+        uploaded_by=user.id,
+        owner_id=owner_id,
     )
     db.add(document)
     await db.flush()
@@ -255,11 +311,25 @@ async def upload_document(
         await db.rollback()
         raise HTTPException(status_code=413, detail=str(exc)) from exc
 
+    # zip 폭탄(docx·xlsx) - 파서가 열기 전에 풀린 크기를 본다(보안 검토 2026-09-25 #5).
+    try:
+        validate_zip_expansion(extension, path)
+    except UploadValidationError as exc:
+        await db.rollback()
+        await delete_document_files(settings.upload_dir, str(document.id))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     # 중복 감지(0021): 같은 해시의 현행 문서가 있으면 막지 않고 묻는다 - 409에 그 문서를 적어
     # 화면이 "그 문서로 가기 / 그래도 올리기"를 낼 수 있게. force면 통과(참조용 사본).
+    # 같은 소유 범위 안에서만 중복이다 - 두 사용자가 같은 파일을 각자 올리는 것은 정당하다.
     duplicate = await db.scalar(
         select(Document)
-        .where(Document.sha256 == sha256, Document.is_current.is_(True), Document.id != document.id)
+        .where(
+            Document.sha256 == sha256,
+            Document.is_current.is_(True),
+            Document.id != document.id,
+            Document.owner_id.is_(None) if owner_id is None else Document.owner_id == owner_id,
+        )
         .limit(1)
     )
     if duplicate is not None and not force:
@@ -299,14 +369,14 @@ async def upload_document(
             # the banner text, and without it a 503 with a perfectly good Korean
             # error_message rendered as the browser's own "Service Unavailable".
             content={
-                **jsonable_encoder(_to_response(document, collection.name, admin.email, 0)),
+                **jsonable_encoder(_to_response(document, collection.name, user.email, 0)),
                 "detail": ENQUEUE_FAILED_MESSAGE,
             },
         )
 
     await db.refresh(document)
     log_event(logger, "document_uploaded", document_id=str(document.id), size_bytes=size)
-    return _to_response(document, collection.name, admin.email, 0)
+    return _to_response(document, collection.name, user.email, 0)
 
 
 @router.get("/documents", response_model=list[DocumentResponse])
@@ -315,7 +385,7 @@ async def list_documents(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ):
-    query = _document_list_query().order_by(Document.created_at.desc())
+    query = _document_list_query(user).order_by(Document.created_at.desc())
     if collection_id is not None:
         query = query.where(Document.collection_id == collection_id)
     rows = (await db.execute(query)).all()
@@ -328,7 +398,7 @@ async def get_document(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ):
-    row = (await db.execute(_document_list_query().where(Document.id == document_id))).first()
+    row = (await db.execute(_document_list_query(user).where(Document.id == document_id))).first()
     if row is None:
         raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
     return _to_response(*row)
@@ -412,7 +482,7 @@ async def list_chunks(
     "이 내용이 어느 청크에 있나"에 답한다. 임베딩 호출이 한 번 들지만 질문
     한 개 값이다. 아직 임베딩이 없는 청크(색인 중)는 순위를 매길 수 없어
     빠진다."""
-    await get_readable_document(db, document_id)
+    await get_readable_document(db, document_id, user)
     limit = min(max(limit, 1), 200)
     offset = max(offset, 0)
     total = (
@@ -469,7 +539,7 @@ async def download_document(
     upload and /api/* is proxied same-origin by Next, so echoing a stored file
     back under its own Content-Type would be stored XSS on the app's own origin.
     nosniff stops a browser second-guessing that."""
-    document = await get_readable_document(db, document_id)
+    document = await get_readable_document(db, document_id, user)
     # Checked rather than left to FileResponse, which raises RuntimeError from
     # inside the response and answers 500. This case is reachable and has already
     # bitten this project: a locally-run backend and the Docker backend do not
@@ -498,7 +568,9 @@ async def get_chunk(
     """Backs citation click-through: the modal shows the full chunk, not the
     300-character snippet."""
     chunk = await db.get(Chunk, chunk_id)
-    if chunk is None:
+    # 개인 문서의 청크는 소유자에게만(0028) - 이 경로는 문서 조회를 거치지 않아 따로 본다.
+    document = await db.get(Document, chunk.document_id) if chunk is not None else None
+    if chunk is None or document is None or (document.owner_id is not None and document.owner_id != user.id):
         # Worded for where it is actually read: this detail renders inside the
         # chat citation modal, which is labelled 출처. 청크 is an internal word
         # the chat surface never uses anywhere else.
@@ -509,11 +581,13 @@ async def get_chunk(
 @router.delete("/documents/{document_id}", status_code=204)
 async def delete_document(
     document_id: uuid.UUID,
-    admin: User = Depends(require_admin),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_app_settings),
 ):
-    document = await get_readable_document(db, document_id)
+    document = await get_readable_document(db, document_id, user)
+    if not can_manage_document(document, user):
+        raise HTTPException(status_code=403, detail="본인이 등록한 문서만 지울 수 있습니다.")
     await db.delete(document)  # chunks cascade via ON DELETE CASCADE
     await db.commit()
     await delete_document_files(settings.upload_dir, str(document_id))

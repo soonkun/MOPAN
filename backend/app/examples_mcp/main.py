@@ -17,6 +17,7 @@ Dockerfile도 새로 없다. DB·Redis에는 손대지 않는다.
 """
 
 import logging
+import uuid
 from typing import Any
 
 import httpx
@@ -497,7 +498,7 @@ _TABLE_SQL_TEMPLATE = r"""
       SELECT split_part(c.section, ']', 1) || ']' AS marker, c.content, d.filename
       FROM chunks c JOIN documents d ON d.id = c.document_id
       WHERE c.section ~ '^\[[^]]+/[^]]+\]' AND c.content ILIKE '%' || :q || '%'
-        AND d.is_current {scope}
+        AND d.is_current AND d.owner_id IS NULL {scope}
     ) rows ORDER BY marker LIMIT :n
     """
 
@@ -509,13 +510,14 @@ _FALLBACK_SQL_TEMPLATE = r"""
     SELECT COALESCE(NULLIF(c.section, ''), d.filename) AS place, c.content, d.filename
     FROM chunks c JOIN documents d ON d.id = c.document_id
     WHERE c.content ILIKE '%' || :q || '%'
-      AND d.is_current {scope}
+      AND d.is_current AND d.owner_id IS NULL {scope}
       AND (c.section IS NULL OR c.section !~ '^\[[^]]+/[^]]+\]')
     ORDER BY d.filename, c.chunk_index LIMIT :n
     """
 
 
 # 폴더 범위(계획 3단계): MOPAN이 주입한 document_ids가 있으면 그 문서만. 없으면 전 코퍼스.
+# 개인 문서(owner_id, 0028)는 이 도구가 보지 않는다 - 이 프로세스는 누가 묻는지 모른다.
 def _scoped(template: str, ids: list[str] | None):
     scope = "AND c.document_id = ANY(CAST(:ids AS uuid[]))" if ids else ""
     return sql_text(template.replace("{scope}", scope))
@@ -528,7 +530,13 @@ async def table_lookup(arguments: dict) -> str:
         raise ValueError("keyword는 2자 이상의 명칭/키워드여야 합니다.")
     limit = min(max(int(arguments.get("limit") or 8), 1), 20)
     raw_ids = arguments.get("document_ids")
-    ids = [str(i) for i in raw_ids] if isinstance(raw_ids, list) and raw_ids else None
+    ids = None
+    if isinstance(raw_ids, list) and raw_ids:
+        try:
+            ids = [str(uuid.UUID(str(i))) for i in raw_ids]
+        except (ValueError, AttributeError, TypeError):
+            # 형식이 틀린 id는 DB에 보내지 않는다 - 캐스트 실패 원문(SQL 구조)이 도구 결과로 새던 길.
+            raise ValueError("document_ids가 올바르지 않습니다.") from None
     params = {"q": keyword, "n": limit, **({"ids": ids} if ids else {})}
     async with _engine().connect() as conn:
         rows = list((await conn.execute(_scoped(_TABLE_SQL_TEMPLATE, ids), params)).all())

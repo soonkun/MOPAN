@@ -7,7 +7,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chunk import Chunk, sparse_tsvector
-from app.models.document import Document
+from app.models.document import Document, owner_visible
 
 # Postgres documents a 65535-parameter cap, but asyncpg encodes the bind-parameter
 # COUNT as an int16 and refuses at 32767 ("the number of query arguments cannot
@@ -160,6 +160,8 @@ class PgVectorStore(VectorStore):
         limit: int,
         collection_ids: list[uuid.UUID] | None = None,
         document_ids: list[uuid.UUID] | None = None,
+        owner_id: uuid.UUID | None = None,
+        doc_scope: str = "shared",
     ) -> list[ScoredId]:
         # cosine_distance emits the `<=>` operator, which is the only one
         # ix_chunks_embedding (HNSW, vector_cosine_ops) can serve. `<->` or `<#>`
@@ -173,7 +175,8 @@ class PgVectorStore(VectorStore):
         query = (
             select(Chunk.id, distance)
             .join(Document, Document.id == Chunk.document_id)
-            .where(Chunk.embedding.is_not(None), Document.is_current.is_(True))
+            # 소유 범위(0028): 공용(owner NULL)이거나 이 사용자의 개인 문서. 사용자를 모르면 공용만.
+            .where(Chunk.embedding.is_not(None), Document.is_current.is_(True), owner_visible(owner_id, doc_scope))
         )
         if collection_ids is not None:
             # `is not None` rather than truthiness: an empty list means "scoped to

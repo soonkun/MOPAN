@@ -92,6 +92,9 @@ async def hybrid_search(
     sparse_df_trim: float = 0.0,
     evidence_floor: float = 0.0,
     collapse: bool = False,
+    # 소유 범위(0028). 기본은 공용만 - 사용자를 모르는 호출(워크플로우 RAG 노드·딥 리서치)이 개인 문서를 건드리지 않게.
+    owner_id: uuid.UUID | None = None,
+    doc_scope: str = "shared",
 ) -> list[Evidence]:
     """Query -> (dense + sparse) -> RRF -> rerank -> top-N -> expand -> Evidence.
 
@@ -166,9 +169,13 @@ async def hybrid_search(
     # RETRIEVAL_CANDIDATE_LIMIT at 10 (app/retrieval/collapse.py has the table).
     for variant, embedding in zip(variants, embeddings, strict=True):
         # document_ids는 있을 때만 넘긴다 - 테스트의 가짜 스토어와 외부 VectorStore 구현이 옛 시그니처다.
-        hits = await vector_store.search(
-            embedding, candidate_limit, collection_ids, **({"document_ids": document_ids} if document_ids is not None else {})
-        )
+        # owner_id/doc_scope도 기본값이 아닐 때만 - 같은 이유(옛 시그니처의 스토어).
+        extra: dict = {}
+        if document_ids is not None:
+            extra["document_ids"] = document_ids
+        if owner_id is not None or doc_scope != "shared":
+            extra.update(owner_id=owner_id, doc_scope=doc_scope)
+        hits = await vector_store.search(embedding, candidate_limit, collection_ids, **extra)
         rankings.append([hit.chunk_id for hit in hits])
         dense_seen.update(rankings[-1])
         weights.append(1.0)
@@ -180,6 +187,8 @@ async def hybrid_search(
             document_ids=document_ids,
             tokenizer=sparse_tokenizer,
             df_trim=sparse_df_trim,
+            owner_id=owner_id,
+            doc_scope=doc_scope,
         )
         rankings.append(keywords)
         sparse_seen.update(keywords)

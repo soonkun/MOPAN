@@ -54,10 +54,26 @@ async def test_upload_creates_row_and_enqueues_job(admin_client, app, collection
     app.state.arq_pool.enqueue_job.assert_awaited_once_with("process_document", body["id"])
 
 
-async def test_upload_requires_admin(member_client, collection_id):
+async def test_member_upload_is_private(member_client, admin_client, collection_id):
+    """0028: 일반 사용자의 업로드는 개인 문서 - 본인만 목록·조회하고, 관리자에게도 404다."""
     response = await member_client.post(
         "/api/documents",
-        data={"collection_id": collection_id},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+    )
+    assert response.status_code == 202
+    body = response.json()
+    assert body["collection_name"] == "개인 문서"
+    assert (await member_client.get(f"/api/documents/{body['id']}")).status_code == 200
+    assert (await admin_client.get(f"/api/documents/{body['id']}")).status_code == 404
+    assert body["id"] not in {d["id"] for d in (await admin_client.get("/api/documents")).json()}
+    # 본인은 지울 수 있다.
+    assert (await member_client.delete(f"/api/documents/{body['id']}")).status_code == 204
+
+
+async def test_member_cannot_upload_shared(member_client, collection_id):
+    response = await member_client.post(
+        "/api/documents",
+        data={"collection_id": collection_id, "scope": "shared"},
         files={"file": ("note.txt", b"hello", "text/plain")},
     )
     assert response.status_code == 403

@@ -428,8 +428,17 @@ class Runner:
         )
 
 
-def make_retriever(sessionmaker, settings: Settings, llm_provider: LLMProvider, collection_ids: list[uuid.UUID] | None) -> Retriever:
-    """MOPAN hybrid_search를 (query, top_k)로 감싼다. 검색마다 짧은 세션."""
+def make_retriever(
+    sessionmaker,
+    settings: Settings,
+    llm_provider: LLMProvider,
+    collection_ids: list[uuid.UUID] | None,
+    owner_id: uuid.UUID | None = None,
+) -> Retriever:
+    """MOPAN hybrid_search를 (query, top_k)로 감싼다. 검색마다 짧은 세션.
+
+    owner_id = 실행을 시킨 사용자(ResearchRun.created_by). 있으면 공용 + 그 사람의 개인 문서(0028)를 읽고,
+    없으면 공용만 - 보고서는 그 사람에게만 가므로 개인 문서를 넣어도 남에게 새지 않는다."""
     from app.retrieval.reranker import make_reranker
     from app.retrieval.service import hybrid_search
     from app.retrieval.vector_store import PgVectorStore
@@ -440,6 +449,7 @@ def make_retriever(sessionmaker, settings: Settings, llm_provider: LLMProvider, 
                 db, PgVectorStore(db), llm_provider, make_reranker(settings, llm_provider), query,
                 top_n=top_k, rrf_k=settings.rrf_k, candidate_limit=settings.retrieval_candidate_limit,
                 sparse_weight=settings.sparse_weight, collection_ids=collection_ids or None,
+                owner_id=owner_id, doc_scope="all" if owner_id else "shared",
                 neighbor_expansion=settings.neighbor_expansion, chunk_overlap=settings.chunk_overlap,
                 token_budget=0, sparse_tokenizer=settings.sparse_tokenizer, sparse_df_trim=settings.sparse_df_trim,
                 evidence_floor=settings.evidence_floor_rrf_score, collapse=settings.retrieval_collapse,

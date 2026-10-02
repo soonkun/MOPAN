@@ -6,7 +6,7 @@ from sqlalchemy import ARRAY, Text, bindparam, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chunk import Chunk
-from app.models.document import Document
+from app.models.document import Document, owner_visible
 from app.retrieval.tokenize import tokenize
 
 logger = logging.getLogger("mopan.retrieval")
@@ -206,6 +206,8 @@ async def keyword_search(
     document_ids: list[uuid.UUID] | None = None,
     tokenizer: str = "simple",
     df_trim: float = 0.0,
+    owner_id: uuid.UUID | None = None,
+    doc_scope: str = "shared",
 ) -> list[str]:
     """The sparse half of hybrid retrieval: ordered chunk ids, best first.
 
@@ -239,7 +241,11 @@ async def keyword_search(
     query = (
         select(Chunk.id)
         .join(Document, Document.id == Chunk.document_id)
-        .where(Chunk.content_tsv.op("@@", is_comparison=True)(ts_query), Document.is_current.is_(True))
+        .where(
+            Chunk.content_tsv.op("@@", is_comparison=True)(ts_query),
+            Document.is_current.is_(True),
+            owner_visible(owner_id, doc_scope),  # 소유 범위(0028) - PgVectorStore.search와 같은 조건
+        )
     )
     if collection_ids is not None:
         # `is not None`, not truthiness: an empty list means "scoped to no

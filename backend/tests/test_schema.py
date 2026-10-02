@@ -101,6 +101,8 @@ async def test_retrieval_indexes_exist_with_expected_access_methods(test_engine)
 # means "the deployment's own default", which the admin screen renders as 시스템.
 # Every version an admin writes carries their id; only the seed is NULL.
 NULLABLE_FK_EXCEPTIONS = {
+    # documents.owner_id: NULL = 공용 코퍼스, 값 = 개인 문서의 소유자(0028). 비어 있음이 뜻을 갖는 열.
+    ("documents", "owner_id"),
     ("attachments", "message_id"),
     ("prompts", "created_by"),
     # An UNRESOLVED citation. 특허·실용신안 심사기준 cites [민법950] and [헌법6] and

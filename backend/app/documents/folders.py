@@ -20,7 +20,7 @@ from app.documents.service import enqueue_document_processing, get_arq_pool
 from app.documents.storage import delete_document_files
 from app.models.chunk import Chunk
 from app.models.collection import Collection
-from app.models.document import Document
+from app.models.document import Document, owner_visible
 from app.models.folder import MAX_FOLDER_DEPTH, Folder
 from app.models.user import User
 from app.schemas.document import DocumentResponse
@@ -281,6 +281,8 @@ async def search_documents(
     order: str = "desc",
     offset: int = 0,
     limit: int = 50,
+    # all=공용+내 것 · shared=공용만(문서 관리) · mine=내 개인 문서만(문서 등록)
+    owner: str = "all",
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_app_settings),
@@ -293,6 +295,7 @@ async def search_documents(
         select(Document, Collection.name, User.email, chunk_count)
         .join(Collection, Collection.id == Document.collection_id)
         .join(User, User.id == Document.uploaded_by)
+        .where(owner_visible(user.id, owner if owner in ("shared", "mine") else "all"))
     )
     if collection_id is not None:
         base = base.where(Document.collection_id == collection_id)

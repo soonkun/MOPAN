@@ -77,7 +77,7 @@ def _version_response(doc: Document, email: str | None) -> VersionResponse:
 @router.get("/documents/{document_id}/versions", response_model=list[VersionResponse])
 async def list_versions(document_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db_session)):
     doc = await db.get(Document, document_id)
-    if doc is None:
+    if doc is None or (doc.owner_id is not None and doc.owner_id != user.id):
         raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
     rows = (
         await db.execute(

@@ -34,11 +34,15 @@ export default function UploadDropzone({
   collectionId,
   folderId,
   onUploaded,
+  scope = "shared",
 }: {
-  collectionId: string;
+  /** 공용 문서의 분류. 개인 문서(scope=mine)는 서버가 '개인 문서' 분류에 넣으므로 비워도 된다. */
+  collectionId?: string | null;
   /** 올릴 폴더. 없으면 컬렉션 루트. */
   folderId?: string | null;
   onUploaded: () => void;
+  /** shared=공용(관리자) · mine=내 개인 문서(0028). */
+  scope?: "shared" | "mine";
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
@@ -58,8 +62,9 @@ export default function UploadDropzone({
     setDuplicate(null);
     setBusy(true);
     const formData = new FormData();
-    formData.append("collection_id", collectionId);
+    if (collectionId) formData.append("collection_id", collectionId);
     if (folderId) formData.append("folder_id", folderId);
+    formData.append("scope", scope);
     if (force) formData.append("force", "true");
     formData.append("file", file);
     try {

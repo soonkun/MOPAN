@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, String, Text, func, text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, String, Text, func, or_, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -81,9 +81,28 @@ class Document(Base):
         nullable=False,
         index=True,
     )
+    # 소유자. NULL = 공용 코퍼스(관리자 등록·감시 폴더 - 모두가 보고 검색). 값 = 그 사용자만 보고 검색하는
+    # 개인 문서(0028). uploaded_by는 "누가 올렸나"(출처)라 따로 둔다 - 감시 폴더 문서도 uploaded_by는 있다.
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+
+DOC_SCOPES = ("all", "shared", "mine")
+
+
+def owner_visible(user_id: uuid.UUID | None, scope: str = "all"):
+    """이 사용자가 볼 수 있는 문서의 SQL 조건 - 목록·조회·두 검색 팔이 같은 한 줄을 쓴다.
+
+    all: 공용 + 내 것 · shared: 공용만 · mine: 내 것만. 사용자가 없으면(워커·리서치·MCP) 공용만."""
+    if scope == "shared" or user_id is None:
+        return Document.owner_id.is_(None)
+    if scope == "mine":
+        return Document.owner_id == user_id
+    return or_(Document.owner_id.is_(None), Document.owner_id == user_id)
