@@ -234,6 +234,7 @@ export default function BriefingPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const help = useHelp("뉴스 브리핑");
+  const windowHelp = useHelp("보고 회차");
 
   const load = useCallback(async () => {
     try {
@@ -404,9 +405,20 @@ export default function BriefingPage() {
         </div>
 
         <div className="space-y-3 rounded-md bg-surface-container-low px-4 py-3">
-          <p className="text-label font-medium text-on-surface">
-            보고 회차 <span className="font-normal text-on-surface-variant">(하루 {windows.length}회 · 회차마다 기사 시간대·조사 시작·보고 시각이 따로 갑니다)</span>
-          </p>
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-label font-medium text-on-surface">
+              보고 회차 <span className="font-normal text-on-surface-variant">(하루 {windows.length}회)</span>
+            </p>
+            {windowHelp.button}
+          </div>
+          {windowHelp.panel(
+            <p className="break-keep text-caption">
+              회차마다 기사 시간대·조사 시작·보고 시각이 따로 갑니다. 시작·끝 바늘을 끌어 기사가 나온 시간대를 정합니다(15분 단위, 자정을 넘겨도 됩니다). <b>끝</b>은 기사 모으기를 멈추는 시각이라{" "}
+              <b>조사 시작</b>이 그 시각을 따라갑니다(직접 고르면 따로 갑니다). 조사 시작에 기사를 모아 브리핑을 만들고(이 구독은 약 {estimate}분 - 주제 브리핑은 기사 100건에 1~2분,
+              동향표는 대상 1명당 약 10초, 사실 확인 포함. GPU가 바쁘면 2~3배), <b>보고 시각</b>에 메일을 보냅니다. 보고 시각은 조사 시작보다 만드는 시간만큼 뒤로
+              두세요(예: 08:30 조사 → 09:00 보고). 비우면 만들어지는 대로 보냅니다. {recentText}
+            </p>,
+          )}
           <div className="flex flex-wrap gap-2">
             {PRESETS.map((p) => (
               <button key={p.label} type="button" title={p.hint} onClick={() => setWindows(p.windows.map((w) => ({ ...w })))} className="btn-tonal btn-compact">
@@ -468,12 +480,6 @@ export default function BriefingPage() {
               </div>
             ))}
           </div>
-          <p className="break-keep text-caption text-on-surface-variant">
-            시작·끝 바늘을 끌어 기사가 나온 시간대를 정합니다(15분 단위, 자정을 넘겨도 됩니다). <b>끝</b>은 기사 모으기를 멈추는 시각이라 <b>조사 시작</b>이 그 시각을
-            따라갑니다(직접 고르면 따로 갑니다). 조사 시작에 기사를 모아 브리핑을 만들고(이 구독은 약 {estimate}분 -
-            주제 브리핑은 기사 100건에 1~2분, 동향표는 대상 1명당 약 10초, 사실 확인 포함. GPU가 바쁘면 2~3배), <b>보고 시각</b>에 메일을 보냅니다. 보고 시각은
-            조사 시작보다 만드는 시간만큼 뒤로 두세요(예: 08:30 조사 → 09:00 보고). 비우면 만들어지는 대로 보냅니다. {recentText}
-          </p>
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
