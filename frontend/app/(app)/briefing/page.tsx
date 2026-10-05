@@ -21,6 +21,7 @@ type Subscription = {
   mail_to: string;
   formats: string[];
   windows: Window[];
+  keep_days?: number;
   estimate_minutes: number;
 };
 type Report = {
@@ -229,6 +230,7 @@ export default function BriefingPage() {
   const [mail, setMail] = useState(true); // 메일 발송 스위치. 끄면 화면에만 쌓인다
   const [mailTo, setMailTo] = useState(""); // 비우면 계정 메일
   const [formats, setFormats] = useState<string[]>(["pdf"]);
+  const [keepDays, setKeepDays] = useState(10);
   const [windows, setWindows] = useState<Window[]>(PRESETS[0].windows);
   const [send, setSend] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -284,6 +286,7 @@ export default function BriefingPage() {
           mail_to: mailTo.trim(),
           formats,
           windows,
+          keep_days: keepDays,
         }),
       }),
     );
@@ -491,6 +494,16 @@ export default function BriefingPage() {
                 {label}
               </label>
             ))}
+            <label className="flex items-center gap-1.5">
+              보관
+              <select value={keepDays} onChange={(e) => setKeepDays(Number(e.target.value))} className="field" aria-label="브리핑 보관 기간">
+                {[10, 15, 20, 30].map((d) => (
+                  <option key={d} value={d}>
+                    {d}일
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
           <button type="submit" disabled={busy || !name.trim() || formats.length === 0 || (style === "tracker" && entityList.length === 0)} className="btn-filled">
             구독 추가
@@ -518,7 +531,7 @@ export default function BriefingPage() {
                       {sub.style === "tracker" ? (sub.scope ? `관점 ${sub.scope}` : "관점 없음") : `검색어 ${sub.queries.join(", ")}`}
                       {sub.style === "tracker" && sub.queries.length > 0 && ` · 기타 키워드 ${sub.queries.join(", ")}`}
                       {sub.sites.length > 0 && ` · 사이트 ${sub.sites.join(", ")}`} ·{" "}
-                      {sub.mail_to ? `${sub.mail_to}로 발송(${sub.formats.join("·")})` : "메일 없음"}
+                      {sub.mail_to ? `${sub.mail_to}로 발송(${sub.formats.join("·")})` : "메일 없음"} · {sub.keep_days ?? 10}일 보관
                     </p>
                     <ul className="text-caption text-on-surface-variant">
                       {sub.windows.map((w, i) => (
